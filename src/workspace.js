@@ -518,14 +518,18 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
   const branch = `agent-team/${member}-${id}`;
   mkdirSync(dirname(dir), { recursive: true });
 
-  execFileSync('git', cloneArgs(repoRoot, dir), { stdio: 'pipe' });
-
-  // Everything past this point can throw (including the every-file-denied guard right
-  // below). A partial build is an unredacted clone of the repo, not evidence worth
-  // keeping — remove it before propagating the failure so nothing readable is left behind.
+  // Everything past this point can throw (including the clone itself, and the
+  // every-file-denied guard right below). A partial build is an unredacted clone of the
+  // repo, not evidence worth keeping — remove it before propagating the failure so
+  // nothing readable is left behind. The clone used to sit above this block, which meant
+  // a clone interrupted partway (disk full, a signal, a network hiccup on a large repo)
+  // left exactly what this block exists to prevent: a partial, unfiltered clone, with no
+  // removal and no warning.
   let unmatchedDenyPaths;
   let droppedSymlinks;
   try {
+    execFileSync('git', cloneArgs(repoRoot, dir), { stdio: 'pipe' });
+
     git(dir, 'config', 'user.email', 'agent-team@localhost');
     git(dir, 'config', 'user.name', 'agent-team');
     git(dir, 'config', 'commit.gpgsign', 'false');

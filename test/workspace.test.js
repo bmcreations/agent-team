@@ -166,6 +166,65 @@ test('after a partial-build throw, no directory anywhere under the workspaces ro
   assert.deepEqual(leftover, []);
 });
 
+// --- A2-0: a git clone that dies partway through must not strand a partial, unredacted
+// clone on disk. The cleanup `try` below is written to cover exactly this ("everything past
+// this point can throw"), but the clone call itself used to sit above that block, so a clone
+// interrupted by a disk-full, a signal, or a network drop on a large repo left its partial,
+// unfiltered working tree behind with no removal and no warning. There is no real way to
+// interrupt a clone mid-flight from a test without touching the disk or the network, so this
+// shadows `git` on PATH with a stub that only intercepts `clone`: it does what a real
+// interrupted clone does — creates the destination directory and drops unfiltered content
+// into it — then fails, the way disk-full/SIGTERM/a network hiccup would. Every other git
+// subcommand createWorkspace needs passes straight through to the real binary.
+
+function createFailingCloneGitStub(realGitPath) {
+  const stubDir = mkdtempSync(join(tmpdir(), 'agent-team-git-clonestub-'));
+  const stubPath = join(stubDir, 'git');
+  writeFileSync(stubPath, [
+    '#!/usr/bin/env node',
+    "const { spawnSync } = require('node:child_process');",
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    `const REAL_GIT = ${JSON.stringify(realGitPath)};`,
+    'const args = process.argv.slice(2);',
+    "if (args[0] === 'clone') {",
+    '  // Stand in for what a real interrupted clone leaves: the destination directory,',
+    '  // created, holding unfiltered content — before failing the way disk-full, a signal,',
+    '  // or a network drop would.',
+    '  const dest = args[args.length - 1];',
+    '  fs.mkdirSync(dest, { recursive: true });',
+    "  fs.writeFileSync(path.join(dest, 'UNREDACTED_PARTIAL_CLONE'), 'should never survive on disk\\n');",
+    "  process.stderr.write('fatal: simulated clone failure\\n');",
+    '  process.exit(128);',
+    '}',
+    '// Every other invocation (config, ls-files, commit, ...) passes straight through to',
+    "// the real git, inheriting this process's own stdio.",
+    'const res = spawnSync(REAL_GIT, args, { stdio: "inherit" });',
+    'process.exit(res.status === null ? 1 : res.status);',
+    ''
+  ].join('\n'));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+test('a git clone that dies partway through leaves no partial, unredacted clone behind', () => {
+  const root = repoWithSecrets();
+  const realGitPath = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const stubDir = createFailingCloneGitStub(realGitPath);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${stubDir}:${originalPath}`;
+  try {
+    assert.throws(() => createWorkspace(root, 'clonefailsmember', DENY, 'workspace'));
+    // The repo-key parent directory created by mkdirSync(dirname(dir)) before the clone is
+    // harmless litter (empty, no repo content) — what matters is that the partial clone
+    // itself, and the unfiltered content the stub dropped into it, do not survive.
+    const leftover = listWorkspaceDirs(WORKSPACE_ROOT).filter((d) => d.includes('clonefailsmember'));
+    assert.deepEqual(leftover, []);
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
 // --- B2: workspaces must not live inside the repository ---
 
 test('the workspace lives outside the repository, under the workspaces root env override', () => {
