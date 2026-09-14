@@ -267,10 +267,24 @@ test('an escaped leading \\# is not rejected — it is the way to mean a literal
   assert.deepEqual(cfg.deny_paths, ['\\#k.pem']);
 });
 
+// --- A2-2: "!" does not negate a deny_paths entry — it is booked as a deny hit like any
+// other pattern, so a "!"-prefixed entry deletes rather than exempts. Reject it at load,
+// the same way finding 1 rejects "#": loud beats a silent over-deletion no one asked for. ---
+
+test('a deny_paths entry with a leading ! is refused', () => {
+  const root = denyProject(['!secrets/README.md']);
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /!secrets\/README\.md/);
+    assert.match(err.message, /negat/i);
+    assert.match(err.message, /delete/i);
+    return true;
+  });
+});
+
 test('deny_paths entries that do work still load', () => {
-  const root = denyProject(['credentials/**', '/credentials/**', 'credentials/', '**/.env*', '!credentials/public.txt']);
+  const root = denyProject(['credentials/**', '/credentials/**', 'credentials/', '**/.env*']);
   const cfg = loadConfig(root);
-  assert.deepEqual(cfg.deny_paths, ['credentials/**', '/credentials/**', 'credentials/', '**/.env*', '!credentials/public.txt']);
+  assert.deepEqual(cfg.deny_paths, ['credentials/**', '/credentials/**', 'credentials/', '**/.env*']);
 });
 
 // --- Group B: a member field of the wrong type crashed with a raw TypeError ---

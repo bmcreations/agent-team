@@ -119,6 +119,21 @@ function validateDenyPath(entry, path) {
       `${JSON.stringify(suggestion)} to mean it literally, not ${JSON.stringify(entry)}`
     );
   }
+  // Not "can never match" — the opposite problem. "!" negation is not implemented here:
+  // check-ignore -v reports a match record for a pattern that negates a match too, and
+  // src/workspace.js's parser books every record it gets back as a deny hit regardless of
+  // the pattern's leading "!". So a "!"-prefixed entry does not exempt a path — it deletes
+  // it, silently, since it is also booked as matched and never reaches unmatchedDenyPaths.
+  // The direction (over-deletion, not under) is safe, which is why this is a rejection
+  // rather than something to make actually work — but a member expecting an exemption and
+  // getting a deletion instead deserves a loud error, not a quiet surprise.
+  if (entry.startsWith('!')) {
+    throw new Error(
+      `${path}: "deny_paths" entry ${JSON.stringify(entry)} is refused — a leading "!" looks ` +
+      `like gitignore negation, but negation is not supported here: the entry would be ` +
+      `booked as an ordinary deny hit and silently DELETE the path it names, not exempt it`
+    );
+  }
 }
 
 export function loadConfig(projectRoot) {

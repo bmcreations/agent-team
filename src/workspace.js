@@ -105,9 +105,14 @@ export function gitFailure(label, result) {
 // --no-index is still required: without it, check-ignore reports tracked files (which
 // the workspace clone's files are) as not ignored. -v -z still reports each match as a
 // NUL-separated "<source>\0<linenum>\0<pattern>\0<pathname>\0" quad. Gitignore semantics
-// (a bare `credentials` matches the directory at any depth, `*.pem` globs, `!` negates)
-// are what deny_paths deliberately inherits by going through git's own ignore engine
-// instead of reimplementing pattern matching.
+// (a bare `credentials` matches the directory at any depth, `*.pem` globs) are what
+// deny_paths inherits by going through git's own ignore engine instead of reimplementing
+// pattern matching — with one deliberate exception: negation. check-ignore -v -z reports a
+// match record for a pattern that negates a match too, and parseCheckIgnoreOutput below
+// books every record as a deny hit regardless of a leading `!`, so a `!`-prefixed entry
+// does not negate anything here — it deletes rather than exempts, and is booked as matched
+// while doing it. src/config.js rejects a `!`-prefixed deny_paths entry at load for exactly
+// that reason, rather than making negation actually work.
 const EXCLUDE_SOURCE = '.git/info/exclude';
 
 // core.ignorecase is auto-detected per-filesystem at `git init`/`git clone` time, and

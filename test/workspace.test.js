@@ -225,6 +225,32 @@ test('a git clone that dies partway through leaves no partial, unredacted clone 
   }
 });
 
+// --- A2-2: "!" does not negate a deny_paths entry, and the entry is booked as matched ---
+//
+// check-ignore -v -z reports a match record for a pattern that negates a match too, and
+// parseCheckIgnoreOutput books every record as a deny hit regardless of the pattern's
+// leading "!" — so a "!"-prefixed deny_paths entry does not exempt anything, it deletes.
+// src/config.js rejects this shape at load (see test/config.test.js); this proves the git
+// behavior that rejection depends on, directly, at the layer that actually asks git to
+// arbitrate. createWorkspace takes deny_paths as a raw array, unvalidated — reachable here
+// exactly as dispatch.js reaches it once config.js has already validated upstream.
+
+test('a "!"-prefixed deny_paths entry deletes the file rather than exempting it, and is booked as matched', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', ['credentials/**', '!credentials/signing.p8'], 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'signing.p8')), false,
+    'the "!" entry must not exempt the file — it is booked as an ordinary deny hit');
+  // The overlapping, broader `credentials/**` entry can legitimately land in
+  // unmatchedDenyPaths here too — check-ignore -v reports only the winning pattern per
+  // path, and the more specific `!credentials/signing.p8` wins arbitration for the one
+  // file under `credentials/` (see finding 4). What matters for THIS finding is narrower:
+  // the "!" entry itself must not be reported as unmatched — that would be the actual
+  // danger, since it is the one signal that could tell an operator the negation silently
+  // failed to negate.
+  assert.ok(!ws.unmatchedDenyPaths.includes('!credentials/signing.p8'),
+    `the "!" entry matched a file — it must not be reported as unmatched, got: ${JSON.stringify(ws.unmatchedDenyPaths)}`);
+});
+
 // --- B2: workspaces must not live inside the repository ---
 
 test('the workspace lives outside the repository, under the workspaces root env override', () => {
