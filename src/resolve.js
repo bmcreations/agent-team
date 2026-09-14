@@ -1,17 +1,21 @@
-export function resolveRole(config, roleName, { probe, assignments = {} } = {}) {
-  const role = config.roles[roleName];
-  if (!role) {
-    throw new Error(`unknown role: ${roleName} (configured: ${Object.keys(config.roles).join(', ')})`);
+import { directReports } from './org.js';
+
+export function resolveMember(config, name, { probe, assignments = {} } = {}) {
+  const member = config.members[name];
+  if (!member) {
+    throw new Error(
+      `unknown member: ${name} (configured: ${Object.keys(config.members).join(', ')})`
+    );
   }
 
-  let agent = role.agent;
+  let agent = member.agent;
   let warning = null;
 
   if (!probe(agent)) {
     const fallback = config.defaults?.on_unavailable;
     if (!fallback || !probe(fallback)) {
       throw new Error(
-        `role "${roleName}": agent "${agent}" is unavailable and no usable fallback ` +
+        `member "${name}": agent "${agent}" is unavailable and no usable fallback ` +
         `(on_unavailable: ${fallback ?? 'unset'})`
       );
     }
@@ -21,21 +25,28 @@ export function resolveRole(config, roleName, { probe, assignments = {} } = {}) 
 
   // Checked AFTER fallback: a fallback must not create the self-review
   // that distinct_from exists to prevent.
-  const conflicts = (role.distinct_from ?? []).filter((other) => assignments[other] === agent);
+  const conflicts = (member.distinct_from ?? []).filter((other) => assignments[other] === agent);
   if (conflicts.length > 0) {
     throw new Error(
-      `role "${roleName}": distinct_from forbids "${agent}", already assigned to ` +
+      `member "${name}": distinct_from forbids "${agent}", already assigned to ` +
       `${conflicts.join(', ')} — refusing to let an agent review its own work` +
       (warning ? ` (reached via fallback: ${warning})` : '')
     );
   }
 
   return {
-    role: roleName,
+    member: name,
+    title: member.title ?? name,
     agent,
-    model: role.model ?? null,
-    skill: role.skill ?? null,
-    isolation: role.isolation ?? 'read-only',
+    model: member.model ?? null,
+    skill: member.skill ?? null,
+    charter: member.charter ?? null,
+    persona: member.persona ?? null,
+    isolation: member.isolation,
+    deliverable: member.deliverable,
+    output_path: member.output_path ?? null,
+    reports_to: member.reports_to ?? null,
+    reports: directReports(config.org, name),
     warning
   };
 }

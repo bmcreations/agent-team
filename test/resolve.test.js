@@ -1,81 +1,105 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveRole } from '../src/resolve.js';
+import { buildOrg } from '../src/org.js';
+import { resolveMember } from '../src/resolve.js';
 
-const CONFIG = {
-  roles: {
-    implementer: { agent: 'codex', model: 'gpt-5-codex', isolation: 'worktree' },
-    reviewer:    { agent: 'codex', isolation: 'read-only' },
-    'red-team':  { agent: 'grok', skill: 'red-team', isolation: 'worktree',
-                   distinct_from: ['implementer'] }
-  },
-  deny_paths: ['**/.env*'],
-  defaults: { on_unavailable: 'claude' }
-};
+function config(members, defaults = { on_unavailable: 'claude' }) {
+  const withDefaults = Object.fromEntries(Object.entries(members).map(([k, m]) => [
+    k, { isolation: 'read-only', deliverable: 'review', ...m }
+  ]));
+  return { members: withDefaults, org: buildOrg(withDefaults), deny_paths: ['x'], defaults };
+}
+
+const CONFIG = config({
+  'eng-lead': { agent: 'claude' },
+  implementer: { agent: 'codex', reports_to: 'eng-lead', isolation: 'workspace', deliverable: 'diff' },
+  reviewer: { agent: 'grok', reports_to: 'eng-lead', distinct_from: ['implementer'] }
+});
 
 const all = () => true;
-const none = (a) => a === 'claude';
+const none = () => false;
+const only = (...ok) => (a) => ok.includes(a);
 
-test('resolves a role to its configured agent', () => {
-  const r = resolveRole(CONFIG, 'implementer', { probe: all });
+test('an unknown member names what is configured', () => {
+  assert.throws(() => resolveMember(CONFIG, 'ghost', { probe: all }), /unknown member: ghost/);
+  assert.throws(() => resolveMember(CONFIG, 'ghost', { probe: all }), /implementer/);
+});
+
+test('an available agent is used as written, with no warning', () => {
+  const r = resolveMember(CONFIG, 'implementer', { probe: all });
   assert.equal(r.agent, 'codex');
-  assert.equal(r.model, 'gpt-5-codex');
-  assert.equal(r.isolation, 'worktree');
   assert.equal(r.warning, null);
 });
 
-test('carries the skill binding through', () => {
-  const r = resolveRole(CONFIG, 'red-team', { probe: all });
-  assert.equal(r.skill, 'red-team');
-});
-
-test('falls back when the agent is unavailable, and warns', () => {
-  const r = resolveRole(CONFIG, 'reviewer', { probe: none });
+test('an unavailable agent falls back to on_unavailable, with a warning', () => {
+  const r = resolveMember(CONFIG, 'implementer', { probe: only('claude') });
   assert.equal(r.agent, 'claude');
-  assert.match(r.warning, /codex.*unavailable.*claude/);
+  assert.match(r.warning, /codex/);
+  assert.match(r.warning, /claude/);
 });
 
-test('isolation defaults to read-only when unset', () => {
-  const cfg = { ...CONFIG, roles: { researcher: { agent: 'claude' } } };
-  assert.equal(resolveRole(cfg, 'researcher', { probe: all }).isolation, 'read-only');
+test('no usable fallback is an error, not a silent skip', () => {
+  assert.throws(() => resolveMember(CONFIG, 'implementer', { probe: none }), /no usable fallback/);
 });
 
-test('model and skill default to null when the role omits them', () => {
-  const cfg = { ...CONFIG, roles: { researcher: { agent: 'claude' } } };
-  const r = resolveRole(cfg, 'researcher', { probe: all });
-  assert.equal(r.model, null);
-  assert.equal(r.skill, null);
-});
-
-test('distinct_from stops a self-review instead of falling back', () => {
+test('distinct_from is checked AFTER fallback, so a fallback cannot smuggle in self-review', () => {
   assert.throws(
-    () => resolveRole(CONFIG, 'red-team', {
-      probe: all,
-      assignments: { implementer: 'grok' }
-    }),
-    /distinct_from/
-  );
-});
-
-test('distinct_from also blocks a violation introduced BY the fallback', () => {
-  // grok is unavailable so red-team falls back to claude, but claude
-  // already implemented — the fallback must not be allowed to stand.
-  assert.throws(
-    () => resolveRole(CONFIG, 'red-team', {
-      probe: none,
+    () => resolveMember(CONFIG, 'reviewer', {
+      probe: only('claude'),
       assignments: { implementer: 'claude' }
     }),
-    /distinct_from/
+    /refusing to let an agent review its own work/
   );
 });
 
-test('throws when neither the agent nor the fallback is available', () => {
+test('the distinct_from error says the conflict was reached through a fallback', () => {
   assert.throws(
-    () => resolveRole(CONFIG, 'reviewer', { probe: () => false }),
-    /no usable fallback/
+    () => resolveMember(CONFIG, 'reviewer', {
+      probe: only('claude'),
+      assignments: { implementer: 'claude' }
+    }),
+    /reached via fallback/
   );
 });
 
-test('throws on an unknown role', () => {
-  assert.throws(() => resolveRole(CONFIG, 'nope', { probe: all }), /unknown role/);
+test('distinct_from does not fire when the agents genuinely differ', () => {
+  const r = resolveMember(CONFIG, 'reviewer', { probe: all, assignments: { implementer: 'codex' } });
+  assert.equal(r.agent, 'grok');
+});
+
+test('the resolved member carries its identity fields', () => {
+  const cfg = config({
+    designer: {
+      agent: 'claude', title: 'Designer', charter: 'Own the visual system.',
+      persona: 'Work from the design tokens.', isolation: 'none',
+      deliverable: 'document', output_path: 'docs/design'
+    }
+  });
+  const r = resolveMember(cfg, 'designer', { probe: all });
+  assert.equal(r.title, 'Designer');
+  assert.equal(r.charter, 'Own the visual system.');
+  assert.equal(r.persona, 'Work from the design tokens.');
+  assert.equal(r.isolation, 'none');
+  assert.equal(r.deliverable, 'document');
+  assert.equal(r.output_path, 'docs/design');
+});
+
+test('identity fields the member omits come back null, and title falls back to the name', () => {
+  const r = resolveMember(CONFIG, 'eng-lead', { probe: all });
+  assert.equal(r.title, 'eng-lead');
+  assert.equal(r.charter, null);
+  assert.equal(r.persona, null);
+  assert.equal(r.model, null);
+  assert.equal(r.skill, null);
+  assert.equal(r.output_path, null);
+});
+
+test('the resolved member carries its direct reports and its manager', () => {
+  const lead = resolveMember(CONFIG, 'eng-lead', { probe: all });
+  assert.deepEqual(lead.reports, ['implementer', 'reviewer']);
+  assert.equal(lead.reports_to, null);
+
+  const impl = resolveMember(CONFIG, 'implementer', { probe: all });
+  assert.deepEqual(impl.reports, []);
+  assert.equal(impl.reports_to, 'eng-lead');
 });
