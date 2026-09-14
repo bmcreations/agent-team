@@ -108,3 +108,12 @@ test('pruning removes the workspace directory', () => {
   pruneWorkspace(ws);
   assert.equal(existsSync(ws.dir), false);
 });
+
+test('a denylist matching every tracked file fails clearly, not with a raw git error', () => {
+  const root = repoWithSecrets();
+  assert.throws(() => createWorkspace(root, 'qa', ['**'], 'workspace'), (err) => {
+    assert.match(err.message, /deny_paths/);
+    assert.match(err.message, /qa/);
+    return true;
+  });
+});

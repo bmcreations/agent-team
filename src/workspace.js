@@ -13,13 +13,17 @@ const git = (dir, ...args) =>
 function deniedFiles(dir, denyPaths) {
   writeFileSync(join(dir, '.git', 'info', 'exclude'), `${denyPaths.join('\n')}\n`);
   const tracked = execFileSync('git', ['-C', dir, 'ls-files', '-z']);
-  if (tracked.length === 0) return [];
+  const trackedCount = tracked.length === 0
+    ? 0
+    : tracked.toString().split('\0').filter(Boolean).length;
+  if (trackedCount === 0) return { denied: [], trackedCount };
   const matched = spawnSync(
     'git', ['-C', dir, 'check-ignore', '--no-index', '--stdin', '-z'],
     { input: tracked }
   );
   // exit 1 means nothing matched, which is not an error
-  return matched.stdout.toString().split('\0').filter(Boolean);
+  const denied = matched.stdout.toString().split('\0').filter(Boolean);
+  return { denied, trackedCount };
 }
 
 function otherBranches(dir, keep) {
@@ -54,7 +58,14 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
   git(dir, 'config', 'user.name', 'agent-team');
   git(dir, 'config', 'commit.gpgsign', 'false');
 
-  for (const rel of deniedFiles(dir, denyPaths)) {
+  const { denied, trackedCount } = deniedFiles(dir, denyPaths);
+  if (trackedCount > 0 && denied.length === trackedCount) {
+    throw new Error(
+      `workspace for member "${member}": deny_paths excluded every tracked file ` +
+      `(${trackedCount} of ${trackedCount}) — nothing left to commit`
+    );
+  }
+  for (const rel of denied) {
     rmSync(join(dir, rel), { force: true });
   }
 
