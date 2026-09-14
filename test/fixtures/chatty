@@ -1,0 +1,5 @@
+#!/bin/sh
+cat > /dev/null
+echo "downloading model..."
+echo "thinking..."
+echo '{"status":"ok","summary":"fine"}'
