@@ -532,3 +532,27 @@ test('a distinct_from array naming a real member still loads', () => {
   const cfg = loadConfig(root);
   assert.deepEqual(cfg.members.b.distinct_from, ['a']);
 });
+
+// --- defaults.on_unavailable: the last unvalidated field in defaults ---
+// It is only read when a vendor CLI is actually down (src/resolve.js:19), so a wrong type
+// sits harmless until the worst possible moment and then reports "no usable fallback",
+// blaming the outage rather than the typo that made the fallback unusable.
+test('a non-string on_unavailable is refused at load, not at the moment a fallback is needed', () => {
+  const root = project({ ...OK, defaults: { on_unavailable: 7 } });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /on_unavailable/);
+    assert.match(err.message, /must be a non-empty string/);
+    assert.match(err.message, /7/);
+    return true;
+  });
+});
+
+test('an empty-string on_unavailable is refused', () => {
+  assert.throws(() => loadConfig(project({ ...OK, defaults: { on_unavailable: '' } })),
+    /on_unavailable/);
+});
+
+test('a string on_unavailable still loads', () => {
+  const cfg = loadConfig(project({ ...OK, defaults: { on_unavailable: 'mock' } }));
+  assert.equal(cfg.defaults.on_unavailable, 'mock');
+});

@@ -70,6 +70,18 @@ function validateOutputPath(value, name, path) {
 // turning every manager with reports into a non-manager — no thrown error, no warning, the
 // run still reports status: ok. Number.isInteger rules out NaN, 1.5 and Infinity, which
 // `typeof v === 'number'` would let straight through.
+// Read only when a vendor CLI is actually unavailable (src/resolve.js:19), so a wrong type here
+// stays invisible until an outage and then surfaces as "no usable fallback" — blaming the outage
+// rather than the typo that made the fallback unreachable. Check it at load, like the rest.
+function validateFallbackAgent(value, path) {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(
+      `${path}: "defaults.on_unavailable" must be a non-empty string naming an agent — ` +
+      `got ${JSON.stringify(value)}`
+    );
+  }
+}
+
 function validateBoundedInteger(value, field, minimum, path) {
   if (!Number.isInteger(value) || value < minimum) {
     throw new Error(
@@ -242,6 +254,7 @@ export function loadConfig(projectRoot) {
   // member's first call, which is never a usable configuration.
   validateBoundedInteger(defaults.max_depth, 'max_depth', 0, path);
   validateBoundedInteger(defaults.max_delegations, 'max_delegations', 1, path);
+  validateFallbackAgent(defaults.on_unavailable, path);
 
   return {
     members,
