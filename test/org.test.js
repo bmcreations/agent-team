@@ -66,3 +66,16 @@ test('renderOrg indents each level under its manager', () => {
   assert.match(out, /^ {2}eng-lead$/m);
   assert.match(out, /^ {4}implementer$/m);
 });
+
+test('directReports returns a copy, not the internal array', () => {
+  const org = buildOrg(MEMBERS);
+  const reports = directReports(org, 'eng-lead');
+  reports.push('intruder');
+  assert.deepEqual(directReports(org, 'eng-lead'), ['implementer', 'reviewer']);
+  assert.deepEqual(org.reportsOf['eng-lead'], ['implementer', 'reviewer']);
+});
+
+test('depthOf throws on an unknown member', () => {
+  const org = buildOrg(MEMBERS);
+  assert.throws(() => depthOf(org, 'ghost'), /unknown member: ghost/);
+});

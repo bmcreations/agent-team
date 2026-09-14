@@ -39,7 +39,7 @@ export function buildOrg(members) {
 }
 
 export function directReports(org, name) {
-  return org.reportsOf[name] ?? [];
+  return [...(org.reportsOf[name] ?? [])];
 }
 
 export function canDelegate(org, name) {
@@ -47,6 +47,9 @@ export function canDelegate(org, name) {
 }
 
 export function depthOf(org, name) {
+  if (!(name in org.parentOf)) {
+    throw new Error(`unknown member: ${name}`);
+  }
   let depth = 0;
   let cur = org.parentOf[name];
   while (cur) {
