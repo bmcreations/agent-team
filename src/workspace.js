@@ -144,6 +144,40 @@ function dropSubmodules(dir) {
     { stdio: 'pipe' });
 }
 
+// A symlink is a hole in deny_paths for the same reason a submodule is: deniedFiles
+// matches a tracked path's own *name* against the deny patterns and never looks at what
+// the entry actually resolves to, so a name-based boundary cannot bound it. Two distinct
+// confirmed shapes: (1) a symlink whose name deny_paths never mentions can point anywhere
+// the process can read — an arbitrary-file-read primitive with no name for deny_paths to
+// ever catch, and no warning, since unmatchedDenyPaths only reports entries that were
+// *expected* to match something; (2) a symlink whose name IS a deny_paths entry can still
+// survive: a trailing-slash directory-only pattern (`credentials/`) does not match a
+// symlink entry, because git's directory-only glob semantics require the entry to actually
+// be a directory in the tracked tree, which a symlink is not. Resolving targets and
+// matching the resolved path is racy and still misses shape (1), whose target is not named
+// in deny_paths at all; dropping only symlinks that escape the workspace root closes (1)
+// but not (2). Drop every tracked symlink, unconditionally — same policy as
+// dropSubmodules, and for the same reason: a member that genuinely needs one is a feature
+// request, not something granted here.
+function dropSymlinks(dir) {
+  const staged = execFileSync('git', ['-C', dir, 'ls-files', '--stage', '-z']).toString();
+  const links = staged.split('\0').filter(Boolean).flatMap((entry) => {
+    const tab = entry.indexOf('\t');
+    const mode = entry.slice(0, tab).split(' ')[0];
+    const path = entry.slice(tab + 1);
+    return mode === '120000' ? [path] : [];
+  });
+  for (const rel of links) {
+    // rmSync on a symlink path removes the link itself, never what it points to — even
+    // when the link targets a directory (fs never follows the symlink to decide what to
+    // remove), so this cannot reach outside the workspace clone.
+    rmSync(join(dir, rel), { force: true });
+    execFileSync('git', ['-C', dir, 'rm', '-q', '-f', '--cached', '--ignore-unmatch', rel],
+      { stdio: 'pipe' });
+  }
+  return links;
+}
+
 // Where workspaces live. AGENT_TEAM_WORKSPACE_ROOT overrides for tests and for anyone who
 // wants workspaces somewhere specific; XDG_CACHE_HOME and ~/.cache are the ordinary
 // fallbacks. A stable cache location (not os.tmpdir()) matters because a workspace kept
@@ -204,6 +238,7 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
   // below). A partial build is an unredacted clone of the repo, not evidence worth
   // keeping — remove it before propagating the failure so nothing readable is left behind.
   let unmatchedDenyPaths;
+  let droppedSymlinks;
   try {
     git(dir, 'config', 'user.email', 'agent-team@localhost');
     git(dir, 'config', 'user.name', 'agent-team');
@@ -225,6 +260,7 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     unmatchedDenyPaths = denyPaths.filter((p) => !matchedDenyPaths.has(p));
 
     dropSubmodules(dir);
+    droppedSymlinks = dropSymlinks(dir);
 
     // The orphan commit is what does the work. A plain `git rm` commit leaves the
     // secret readable at HEAD~1; an orphan root commit makes the cloned commit
@@ -260,7 +296,7 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     throw err;
   }
 
-  return { dir, branch, id, kind: isolation, unmatchedDenyPaths };
+  return { dir, branch, id, kind: isolation, unmatchedDenyPaths, droppedSymlinks };
 }
 
 export function pruneWorkspace(workspace) {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
@@ -294,4 +294,35 @@ test('an isolation-none run reports no unmatched deny_paths rather than throwing
   const r = await run(root, script, 'marketer');
   assert.equal(r.status, 'ok');
   assert.deepEqual(r.unmatchedDenyPaths, []);
+});
+
+test('a dropped tracked symlink is warned about and returned in the result', async () => {
+  const { root, script } = project({ status: 'ok', summary: 'clean' });
+  // project() already committed app.js/credentials/key.p8 — add a tracked symlink on top
+  // and re-commit, following the same pattern the workspace.test.js fixtures use.
+  symlinkSync(join(root, 'app.js'), join(root, 'app-link'));
+  execFileSync('git', ['-C', root, 'add', '-A'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'add symlink'], { stdio: 'pipe' });
+
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    const r = await run(root, script, 'implementer');
+    assert.equal(r.status, 'ok');
+    assert.deepEqual(r.droppedSymlinks, ['app-link']);
+    assert.ok(
+      warnings.some((w) => w.includes('app-link')),
+      `expected a console.warn naming the dropped symlink, got: ${JSON.stringify(warnings)}`
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('an isolation-none run reports no dropped symlinks rather than throwing', async () => {
+  const { root, script } = project({ status: 'ok', summary: 'copy written' });
+  const r = await run(root, script, 'marketer');
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.droppedSymlinks, []);
 });

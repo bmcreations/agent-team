@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir, platform } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
@@ -497,4 +497,92 @@ test('deniedFiles arbitrates using the clone\'s core.ignorecase, not tmpdir\'s a
   const sensitive = deniedFiles(dir, ['Credentials/']);
   assert.deepEqual(sensitive.denied, []);
   assert.ok(!sensitive.matchedDenyPaths.has('Credentials/'));
+});
+
+// --- R11-2: a tracked symlink makes name and content different things, which a
+// name-based deny_paths boundary cannot bound ---
+
+function readAllObjectIds(dir) {
+  // --batch-all-objects --batch dumps every object git can find in this repo, reachable or
+  // not, by id — the standard R9 was held to (see the C1b tests above): a plain
+  // working-tree check ("the file is gone") does not prove the blob it pointed at is gone
+  // too. `git rm` alone (no orphan commit + gc) would leave the blob reachable from a
+  // parent commit; this is what actually proves it is not.
+  const out = execFileSync('git', ['-C', dir, 'cat-file', '--batch-all-objects', '--batch'],
+    { encoding: 'buffer' });
+  return out.toString('latin1'); // latin1: a lossless byte-for-byte view, not a decode
+}
+
+function repoWithEscapingSymlink() {
+  const outsideDir = mkdtempSync(join(tmpdir(), 'at-ws-outside-'));
+  const outsideFile = join(outsideDir, 'outside-secret.txt');
+  writeFileSync(outsideFile, 'LEAKED_VIA_ESCAPE_LINK\n');
+
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  writeFileSync(join(root, 'app.js'), 'ok\n');
+  // Not itself named in deny_paths — that is exactly the hole: no name-based rule could
+  // ever catch a symlink whose target is what deny_paths would need to name.
+  symlinkSync(outsideFile, join(root, 'escape-link'));
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return { root, outsideDir, outsideFile };
+}
+
+test('a tracked symlink that escapes the repo is dropped, unreadable, and gone from the object store', () => {
+  const { root, outsideFile } = repoWithEscapingSymlink();
+  const linkBlob = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD:escape-link'], { encoding: 'utf8' }).trim();
+
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+
+  assert.deepEqual(ws.droppedSymlinks, ['escape-link']);
+  assert.throws(() => lstatSync(join(ws.dir, 'escape-link')), /ENOENT/,
+    'the link itself must be gone from the working tree, not merely broken');
+  assert.equal(existsSync(join(ws.dir, 'escape-link')), false);
+  assert.doesNotMatch(readAllObjectIds(ws.dir), new RegExp(linkBlob),
+    `the symlink's own blob (${linkBlob}) must not be reachable in the workspace's object store`);
+  // rmSync on the link must never touch what it points at.
+  assert.equal(existsSync(outsideFile), true, 'the real file outside the repo must be untouched');
+});
+
+function repoWithSymlinkedCredentialsDir() {
+  const realDir = mkdtempSync(join(tmpdir(), 'at-ws-real-'));
+  writeFileSync(join(realDir, 'key.pem'), 'TOP_SECRET_XYZ\n');
+
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  writeFileSync(join(root, 'app.js'), 'ok\n');
+  // 'credentials' IS a deny_paths name below, but as a trailing-slash directory-only
+  // pattern it does not match a symlink entry — the entry survives, unmatched.
+  symlinkSync(realDir, join(root, 'credentials'));
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return { root, realDir };
+}
+
+test('a tracked symlink named for a deny_paths entry is dropped even though the directory-only pattern does not match it', () => {
+  const { root, realDir } = repoWithSymlinkedCredentialsDir();
+  const linkBlob = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD:credentials'], { encoding: 'utf8' }).trim();
+
+  const ws = createWorkspace(root, 'qa', ['credentials/'], 'workspace');
+
+  assert.deepEqual(ws.droppedSymlinks, ['credentials']);
+  assert.deepEqual(ws.unmatchedDenyPaths, ['credentials/'],
+    'the directory-only pattern still does not match a symlink entry — this fix does not change that arbitration');
+  assert.throws(() => lstatSync(join(ws.dir, 'credentials')), /ENOENT/);
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'key.pem')), false);
+  assert.doesNotMatch(readAllObjectIds(ws.dir), new RegExp(linkBlob),
+    `the symlink's own blob (${linkBlob}) must not be reachable in the workspace's object store`);
+  // rmSync on a symlink-to-a-directory must remove only the link, never recurse into and
+  // delete what it points at.
+  assert.equal(existsSync(realDir), true, 'the target directory must survive');
+  assert.equal(existsSync(join(realDir, 'key.pem')), true, 'the target directory\'s content must survive');
 });

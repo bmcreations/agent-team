@@ -74,6 +74,17 @@ async function runMember(ctx) {
       `check whether you meant these to match: ${unmatchedDenyPaths.join(', ')}`
     );
   }
+  // A name-based deny_paths boundary cannot see through a symlink, so createWorkspace drops
+  // every tracked one unconditionally (see dropSymlinks in workspace.js) — worth an
+  // operator's attention the same way an unmatched deny entry is, since it can delete a
+  // symlink some member genuinely relied on.
+  const droppedSymlinks = workspace.droppedSymlinks ?? [];
+  if (droppedSymlinks.length > 0) {
+    console.warn(
+      `agent-team: member "${member}": dropped tracked symlinks from the workspace — ` +
+      `a name-based deny_paths boundary cannot see through them: ${droppedSymlinks.join(', ')}`
+    );
+  }
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;
@@ -134,7 +145,7 @@ async function runMember(ctx) {
     return {
       ...result,
       member, agent: resolved.agent, warning: resolved.warning,
-      workspace, unmatchedDenyPaths, depth, delegated
+      workspace, unmatchedDenyPaths, droppedSymlinks, depth, delegated
     };
   } catch (err) {
     // A throw here (e.g. a reporting-line violation) means this frame's workspace
