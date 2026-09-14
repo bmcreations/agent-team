@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+// Writes a JSON payload whose summary contains a multi-byte UTF-8 character, split across
+// two separate stdout writes so that the character's bytes straddle a chunk boundary on the
+// reading side. The two writes are separated by a real setTimeout tick (not just two
+// back-to-back .write() calls) so the OS/Node cannot coalesce them into a single read — a
+// bare back-to-back write pair is too fast to reliably force two 'data' events.
+cat_stdin();
+
+function cat_stdin() {
+  process.stdin.resume();
+  process.stdin.on('end', run);
+}
+
+function run() {
+  // '€' (U+20AC) encodes as the 3 bytes E2 82 AC. Split after the first 2 bytes so neither
+  // half is a valid UTF-8 sequence on its own.
+  const payload = Buffer.from(JSON.stringify({ status: 'ok', summary: 'a€b' }) + '\n', 'utf8');
+  const euroStart = payload.indexOf(Buffer.from('€', 'utf8'));
+  const splitAt = euroStart + 2;
+  const part1 = payload.subarray(0, splitAt);
+  const part2 = payload.subarray(splitAt);
+
+  process.stdout.write(part1, () => {
+    setTimeout(() => {
+      process.stdout.write(part2, () => process.exit(0));
+    }, 50);
+  });
+}

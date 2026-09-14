@@ -33,6 +33,13 @@ export function runAdapter(execPath, subcommand, {
       resolve(result);
     };
 
+    // `+=` on a raw Buffer chunk calls toString('utf8') on that chunk in isolation, so a
+    // multi-byte character whose bytes straddle a chunk boundary decodes to U+FFFD on both
+    // sides. setEncoding puts a StringDecoder in front of the stream, which buffers a
+    // partial trailing character until the rest of its bytes arrive in the next chunk —
+    // this line looks like a no-op but is load-bearing, don't remove it.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
 

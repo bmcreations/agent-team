@@ -46,6 +46,12 @@ test('only the LAST stdout line is parsed, so chatter is tolerated', async () =>
   assert.equal(res.status, 'ok');
 });
 
+test('a multi-byte character split across two stdout chunks is not corrupted', async () => {
+  const res = await runAdapter(p('test/fixtures/split-multibyte'), 'run', { brief: { task: 't' } });
+  assert.equal(res.status, 'ok');
+  assert.equal(res.summary, 'a€b');
+});
+
 test('a run payload past the 64 KB pipe buffer survives intact through the real mock adapter', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'at-ad-big-'));
   const script = join(dir, 's.json');
