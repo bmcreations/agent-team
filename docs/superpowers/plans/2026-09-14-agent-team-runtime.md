@@ -1471,9 +1471,23 @@ git commit -m "test: add an adapter conformance suite, opt-in for real vendors"
 
 ---
 
-### Task 11: The codex adapter — BLOCKED
+### Task 11: The codex adapter
 
-**Blocked on:** `codex` installed and authenticated (ChatGPT Plus/Pro, or an OpenAI API key). Also blocked behind the Phase 0 ACP spike: if ACP wins, this adapter is rewritten against the protocol instead of the CLI.
+**Previously marked BLOCKED, wrongly.** The block said "`codex` installed and authenticated". That
+determination came from `command -v` in a non-interactive shell and was incorrect: codex-cli
+0.154.0-alpha.6.2 is installed and authenticated (`~/.codex/auth.json`, mode 600), it is simply not
+on that shell's PATH. It resolves only at `~/.codex/plugins/.plugin-appserver/codex`, an internal
+path inside the Codex app that must not be hardcoded — the adapter resolves from PATH with
+`AGENT_TEAM_CODEX_BIN` as the override for a non-PATH install.
+
+The Phase 0 ACP dependency still stands: if ACP wins, this adapter is rewritten against the protocol.
+
+**Flag surface read off the binary**, not from documentation: `exec` runs non-interactively;
+`-C/--cd <DIR>`; `--json` emits JSONL; `--ephemeral` skips session files; `-s/--sandbox` takes
+`read-only|workspace-write|danger-full-access`; `-m/--model`; and `-o/--output-last-message <FILE>`
+writes the final assistant message to a file. That last flag removes this task's original Step 1
+question about which JSONL event carries the final message — read the file instead of guessing an
+event-type name that can change on a version bump.
 
 **Files:**
 - Create: `adapters/codex`
@@ -1520,9 +1534,20 @@ git commit -m "feat(adapters): add the codex adapter"
 
 ---
 
-### Task 12: The grok adapter — BLOCKED
+### Task 12: The grok adapter
 
-**Blocked on:** `grok` installed and authenticated (SuperGrok or X Premium+, or `GROK_CODE_XAI_API_KEY`). Same Phase 0 dependency as Task 11.
+**Previously marked BLOCKED, wrongly**, for the same reason as Task 11. grok 1.0.30 is installed at
+`~/.grok/bin/grok`; `~/.bashrc` puts it on the interactive PATH and `~/.bash_profile` does not, which
+is why a non-interactive shell missed it. Same Phase 0 ACP dependency as Task 11.
+
+**This task's assumed invocation below is wrong.** There is no `-p` flag. Read off the binary:
+the prompt is a bare positional argument, with `--output-format <plain|json|streaming-json>`,
+`--cwd <CWD>`, `-m/--model`, `--always-approve` (required, or it blocks on an interactive approval
+prompt until the dispatcher's SIGKILL), `--sandbox <PROFILE>`, `--disallowed-tools`, `--deny/--allow`,
+and `--disable-web-search`.
+
+**The worktree question this task raises is answered: grok only creates a worktree when passed
+`-w/--worktree`.** It is opt-in, so there is no worktree-inside-a-workspace problem to disable.
 
 **Files:**
 - Create: `adapters/grok`
