@@ -1,10 +1,41 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
+
+// Recursively collects every path anywhere under `root` whose own name contains
+// `needle`, at any depth. Used to make a filesystem claim ("no workspace for X
+// exists anywhere") checkable instead of just asserting on the rejection message.
+function findEntriesMentioning(root, needle) {
+  if (!existsSync(root)) return [];
+  const hits = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.name.includes(needle)) hits.push(full);
+      if (entry.isDirectory()) stack.push(full);
+    }
+  }
+  return hits;
+}
+
+// Gives the callback its own dedicated AGENT_TEAM_WORKSPACE_ROOT, isolated from
+// every other test's workspaces, and restores the previous value afterwards.
+async function withWorkspaceRoot(fn) {
+  const root = mkdtempSync(join(tmpdir(), 'at-dsp-wsroot-'));
+  const prev = process.env.AGENT_TEAM_WORKSPACE_ROOT;
+  process.env.AGENT_TEAM_WORKSPACE_ROOT = root;
+  try {
+    return await fn(root);
+  } finally {
+    process.env.AGENT_TEAM_WORKSPACE_ROOT = prev;
+  }
+}
 
 // dispatch creates workspaces in-process via createWorkspace, which resolves its cache
 // root from AGENT_TEAM_WORKSPACE_ROOT (real process.env, not the `env` object passed to
@@ -77,8 +108,14 @@ test('the adapter is handed a workspace it cannot read the secret from', async (
 });
 
 test('an unknown member fails before any workspace is created', async () => {
-  const { root, script } = project({ status: 'ok', summary: 's' });
-  await assert.rejects(() => run(root, script, 'nope'), /unknown member/);
+  await withWorkspaceRoot(async (wsRoot) => {
+    const { root, script } = project({ status: 'ok', summary: 's' });
+    await assert.rejects(() => run(root, script, 'nope'), /unknown member/);
+    assert.deepEqual(
+      findEntriesMentioning(wsRoot, 'nope'), [],
+      'no directory anywhere under the workspace root should mention the unknown member'
+    );
+  });
 });
 
 test('an isolation-none member runs without a repository', async () => {
