@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import { tmpdir, platform } from 'node:os';
+import { join, dirname, resolve } from 'node:path';
 import { createWorkspace, pruneWorkspace, cloneArgs } from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
@@ -409,3 +410,50 @@ test('a fresh workspace passes git fsck --full cleanly', () => {
   assert.equal(fsck.stderr.trim(), '', fsck.stderr);
   assert.equal(fsck.status, 0);
 });
+
+// --- C5: a cleanup failure must not mask the original error ---
+//
+// force: true on the cleanup rmSync only swallows ENOENT — a real removal failure (a
+// read-only parent, an immutable file) throws too, and that throw used to replace
+// whatever error caused the build to fail in the first place. macOS/BSD's append-only
+// (uappnd) flag on a directory blocks *deleting* entries within it while still allowing
+// *new* ones — set on the workspace's repo-key parent directory before createWorkspace
+// runs, the clone can still create the workspace dir, but the cleanup rmSync in the
+// catch block cannot remove it afterwards. No timing race: the flag is in place for the
+// whole call, so there is nothing to land badly. Only runs on Darwin, where chflags and
+// this flag's semantics are available; skipped elsewhere rather than approximated.
+test(
+  'a cleanup failure does not mask the original error, and is reported instead',
+  { skip: platform() !== 'darwin' && 'chflags uappnd semantics are Darwin/BSD-specific' },
+  () => {
+    const root = repoWithSecrets();
+    const repoKey = createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12);
+    const repoKeyDir = join(WORKSPACE_ROOT, 'agent-team', 'workspaces', repoKey);
+    mkdirSync(repoKeyDir, { recursive: true });
+    execFileSync('chflags', ['uappnd', repoKeyDir]);
+
+    const originalWarn = console.warn;
+    const warnings = [];
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      assert.throws(
+        () => createWorkspace(root, 'lockedparent', ['**'], 'workspace'),
+        (err) => {
+          // The original error must survive — not an rmSync/EPERM error from the
+          // masked cleanup failure.
+          assert.match(err.message, /deny_paths excluded every tracked file/);
+          return true;
+        }
+      );
+      assert.ok(
+        warnings.some((w) => w.includes('lockedparent') || w.includes(repoKeyDir)),
+        `expected a console.warn naming the undeletable directory, got: ${JSON.stringify(warnings)}`
+      );
+    } finally {
+      console.warn = originalWarn;
+      // Undo the flag so this directory (and its undeleted workspace) can be reclaimed —
+      // by this cleanup and, failing that, by the OS reaping WORKSPACE_ROOT's parent tmpdir.
+      execFileSync('chflags', ['nouappnd', repoKeyDir]);
+    }
+  }
+);

@@ -215,7 +215,20 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     git(dir, 'reflog', 'expire', '--expire=now', '--all');
     git(dir, 'gc', '-q', '--prune=now');
   } catch (err) {
-    rmSync(dir, { recursive: true, force: true });
+    // force: true only suppresses ENOENT — a real removal failure (a read-only parent,
+    // an immutable file) throws here too. That must never replace the original error:
+    // losing "deny_paths excluded every tracked file" behind an unrelated ENOTEMPTY
+    // would leave the operator with no idea what actually went wrong. Swallow the
+    // cleanup failure, but not silently — a leftover directory is an unredacted clone,
+    // and silence about it is worse than the extra noise.
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      console.warn(
+        `agent-team: could not remove workspace directory "${dir}" after a build failure ` +
+        `(${cleanupErr.message}) — remove it manually`
+      );
+    }
     throw err;
   }
 
