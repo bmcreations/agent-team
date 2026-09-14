@@ -44,13 +44,45 @@ function gitCapture(label, args, { input, okStatus = [0] } = {}) {
     closeSync(fd);
     fd = undefined;
     if (result.error || result.signal || !okStatus.includes(result.status)) {
-      throw new Error(`agent-team: ${label} failed (status ${result.status})`);
+      throw gitFailure(label, result);
     }
     return readFileSync(outPath);
   } finally {
     if (fd !== undefined) closeSync(fd);
     rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+// Exported and unit-tested white-box: the residual overflow this translates can only be
+// provoked for real by a repo large enough to blow the *stderr* pipe, which is not something
+// worth building a fixture for. Calling it directly on a fabricated spawnSync result pins the
+// wording instead.
+//
+// ENOBUFS used to reach the operator verbatim — `ENOBUFS | spawnSync git ENOBUFS`, with a
+// megabyte-long buffer dump attached and nothing in it naming the cause. It was raised from
+// `ls-files --stage -z`, which adds ~51 bytes of mode/sha/stage per entry and so crossed the
+// 1 MiB bound at roughly `N * (51 + avg path length) < 1048576` — about 12,900 tracked files
+// at 30-character paths. That is an ordinary app repo, and the only signal it produced was a
+// buffer dump. The capture sites no longer have that ceiling; what is left must at least say
+// what happened.
+export function gitFailure(label, result) {
+  if (result.error && result.error.code === 'ENOBUFS') {
+    return new Error(
+      `agent-team: ${label} produced more output than it could buffer — this repository is ` +
+      'larger than the isolation boundary can currently process, so no workspace was built ' +
+      'and no files were released to the CLI'
+    );
+  }
+  if (result.error) {
+    return new Error(`agent-team: ${label} could not be run (${result.error.message})`);
+  }
+  if (result.signal) {
+    return new Error(`agent-team: ${label} was killed by ${result.signal} before it finished`);
+  }
+  const stderr = (result.stderr ? result.stderr.toString('utf8') : '').trim();
+  return new Error(
+    `agent-team: ${label} exited with status ${result.status}${stderr ? `: ${stderr}` : ''}`
+  );
 }
 
 // check-ignore -v reports the source of whichever rule *wins arbitration* across every
@@ -254,7 +286,12 @@ function otherBranches(dir, keep) {
 // re-fetch content deny_paths tried to exclude. Drop both by default. A member that
 // genuinely needs submodule content is a feature request, not something granted here.
 function dropSubmodules(dir) {
-  const staged = execFileSync('git', ['-C', dir, 'ls-files', '--stage', '-z']).toString();
+  // Through gitCapture for the same reason as deniedFiles' ls-files: `--stage` adds ~51 bytes
+  // of mode/sha/stage to every entry, so this is the stream that crosses the 1 MiB pipe bound
+  // first — at roughly 12,900 tracked files at 30-character paths. execFileSync threw there,
+  // so it failed closed, but it failed closed on an ordinary app repo and said only ENOBUFS.
+  const staged = gitCapture('git ls-files --stage (submodule scan)',
+    ['-C', dir, 'ls-files', '--stage', '-z']).toString();
   const gitlinks = staged.split('\0').filter(Boolean).flatMap((entry) => {
     const tab = entry.indexOf('\t');
     const mode = entry.slice(0, tab).split(' ')[0];
@@ -287,7 +324,8 @@ function dropSubmodules(dir) {
 // dropSubmodules, and for the same reason: a member that genuinely needs one is a feature
 // request, not something granted here.
 function dropSymlinks(dir) {
-  const staged = execFileSync('git', ['-C', dir, 'ls-files', '--stage', '-z']).toString();
+  const staged = gitCapture('git ls-files --stage (symlink scan)',
+    ['-C', dir, 'ls-files', '--stage', '-z']).toString();
   const links = staged.split('\0').filter(Boolean).flatMap((entry) => {
     const tab = entry.indexOf('\t');
     const mode = entry.slice(0, tab).split(' ')[0];

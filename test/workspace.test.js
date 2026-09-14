@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir, platform } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import {
-  createWorkspace, pruneWorkspace, cloneArgs, deniedFiles, parseCheckIgnoreOutput
+  createWorkspace, pruneWorkspace, cloneArgs, deniedFiles, parseCheckIgnoreOutput, gitFailure
 } from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
@@ -760,8 +760,15 @@ test('an unexpected check-ignore source in the scratch dir throws instead of sil
 // size-shaped test costs, and the cost is worth paying exactly once.
 
 function repoWithOversizedDenyOutput() {
-  const denyDir = `denied-${'x'.repeat(193)}`;   // 200 chars, so each -v -z record is ~435 bytes
-  const fileCount = 3000;                        // ~1.3 MiB of check-ignore output
+  // Paths are long on purpose, and nested on purpose. Every stream the boundary captures is
+  // sized per tracked path, so one fixture with 413-byte paths pushes all three of them past
+  // the 1 MiB pipe bound at only 3000 files: check-ignore -v -z ~1.9 MiB, ls-files -z
+  // ~1.2 MiB, ls-files --stage -z ~1.3 MiB (--stage adds ~51 bytes of mode/sha/stage per
+  // entry, which is why it overflows first on a repo of ordinary path lengths). Reaching the
+  // same bound with 45-character paths would take ~14,000 files and a much slower fixture.
+  const denyDir = `denied-${'x'.repeat(193)}`;       // 200 chars
+  const subDir = `sub-${'y'.repeat(196)}`;           // 200 chars
+  const fileCount = 3000;
   const root = mkdtempSync(join(tmpdir(), 'at-ws-big-'));
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
@@ -769,9 +776,9 @@ function repoWithOversizedDenyOutput() {
   git('config', 'user.name', 'T');
   git('config', 'commit.gpgsign', 'false');
   writeFileSync(join(root, 'app.js'), 'ok\n');
-  mkdirSync(join(root, denyDir), { recursive: true });
+  mkdirSync(join(root, denyDir, subDir), { recursive: true });
   for (let i = 0; i < fileCount; i += 1) {
-    writeFileSync(join(root, denyDir, `f${String(i).padStart(5, '0')}.txt`), `SECRET-${i}\n`);
+    writeFileSync(join(root, denyDir, subDir, `f${String(i).padStart(5, '0')}.txt`), `SECRET-${i}\n`);
   }
   git('add', '-A');
   git('commit', '-q', '-m', 'init');
@@ -791,8 +798,15 @@ test('no denied file survives a repo whose check-ignore output exceeds the 1 MiB
   // deniedFiles removes files, not directories, so the (now empty) denied directory itself
   // survives on disk — it leaks only a name deny_paths already spelled out. What must not
   // survive is content: no file under it may be left for the CLI to read.
-  assert.deepEqual(existsSync(join(ws.dir, denyDir)) ? readdirSync(join(ws.dir, denyDir)) : [], [],
-    'no denied file may be left in the workspace working tree');
+  const leftOnDisk = [];
+  const walkFiles = (d) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      if (entry.isDirectory()) walkFiles(join(d, entry.name));
+      else leftOnDisk.push(entry.name);
+    }
+  };
+  if (existsSync(join(ws.dir, denyDir))) walkFiles(join(ws.dir, denyDir));
+  assert.deepEqual(leftOnDisk, [], 'no denied file may be left in the workspace working tree');
   assert.equal(existsSync(join(ws.dir, 'app.js')), true, 'an undenied file must survive');
 
   // Absent from the tree is not enough — the blobs must be gone from the object database
@@ -831,4 +845,51 @@ test('parseCheckIgnoreOutput rejects a truncated stream instead of parsing the r
 
   // Empty output (check-ignore matched nothing, exit 1) is complete, not truncated.
   assert.deepEqual(parseCheckIgnoreOutput(Buffer.alloc(0)).denied, []);
+});
+
+// --- A1-2: the failure that remains must say what happened, in words ---
+//
+// The same 1 MiB pipe bound used to hard-fail any repo over ~12,900 tracked files at
+// 30-character paths: ls-files --stage -z adds ~51 bytes of mode/sha/stage per entry, so it
+// crossed the bound long before ls-files -z did. That direction failed closed and cleaned up
+// correctly — it was never a leak — but it surfaced as `ENOBUFS | spawnSync git ENOBUFS`
+// with a megabyte-long buffer dump attached and nothing naming the actual cause, on a repo
+// the plugin simply could not build a workspace for at all.
+//
+// The capture sites no longer have a ceiling (see the size-shaped test above, whose fixture
+// now crosses the bound on all three streams). This covers the residual case — stderr is
+// still piped and still bounded — and pins the wording, white-box, so no 14,000-file fixture
+// is needed to assert it.
+
+test('an overflowing git capture reports the real cause, not a raw ENOBUFS dump', () => {
+  const err = gitFailure('git ls-files --stage (submodule scan)', {
+    error: Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' }),
+    status: null,
+    signal: 'SIGTERM',
+    stdout: null,
+    stderr: null
+  });
+
+  assert.ok(err instanceof Error);
+  assert.match(err.message, /repository is larger than/i,
+    'the message must name the cause — a repo bigger than the boundary can process');
+  assert.match(err.message, /git ls-files --stage \(submodule scan\)/,
+    'and say which step hit it');
+  assert.match(err.message, /no workspace was built/i,
+    'and say what the operator is left with');
+});
+
+test('a git capture that fails for an ordinary reason still reports git\'s own stderr', () => {
+  const err = gitFailure('git check-ignore (deny_paths arbitration)', {
+    error: undefined,
+    status: 128,
+    signal: null,
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.from('fatal: not a git repository\n')
+  });
+
+  assert.match(err.message, /status 128/);
+  assert.match(err.message, /fatal: not a git repository/,
+    'an ordinary git failure must not be flattened into the size message');
+  assert.doesNotMatch(err.message, /repository is larger than/i);
 });
