@@ -95,4 +95,38 @@ test('delegation caps have defaults a config can override', () => {
   const tuned = loadConfig(project({ ...OK, defaults: { max_depth: 1 } }));
   assert.equal(tuned.defaults.max_depth, 1);
   assert.equal(tuned.defaults.on_unavailable, 'claude');
+  assert.equal(tuned.defaults.max_delegations, 20);
+});
+
+test('an explicit null isolation or deliverable falls back to the default, rather than throwing', () => {
+  const cfg = loadConfig(project({
+    members: {
+      a: { agent: 'claude', isolation: null },
+      b: { agent: 'claude', deliverable: null }
+    },
+    deny_paths: ['x']
+  }));
+  assert.equal(cfg.members.a.isolation, 'read-only');
+  assert.equal(cfg.members.a.deliverable, 'review');
+  assert.equal(cfg.members.b.isolation, 'read-only');
+  assert.equal(cfg.members.b.deliverable, 'review');
+});
+
+test('a falsy max_depth of 0 is preserved, not treated as absent', () => {
+  const cfg = loadConfig(project({ ...OK, defaults: { max_depth: 0 } }));
+  assert.equal(cfg.defaults.max_depth, 0);
+  assert.equal(cfg.defaults.on_unavailable, 'claude');
+  assert.equal(cfg.defaults.max_delegations, 20);
+});
+
+test('a malformed config names the file in the JSON parse error', () => {
+  const root = mkdtempSync(join(tmpdir(), 'at-cfg-'));
+  mkdirSync(join(root, '.claude'), { recursive: true });
+  const path = join(root, CONFIG_RELPATH);
+  writeFileSync(path, '{ "members": {, }');
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.ok(err.message.startsWith(`${path}: `), err.message);
+    assert.match(err.message, /Expected|JSON/);
+    return true;
+  });
 });

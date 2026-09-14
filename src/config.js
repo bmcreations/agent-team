@@ -14,7 +14,12 @@ export function loadConfig(projectRoot) {
   if (!existsSync(path)) {
     throw new Error(`no agent-team config at ${path} — run /agent-team-init`);
   }
-  const raw = JSON.parse(readFileSync(path, 'utf8'));
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    throw new Error(`${path}: ${err.message}`);
+  }
 
   if (!raw.members || typeof raw.members !== 'object' || Array.isArray(raw.members)) {
     throw new Error(`${path}: "members" is required and must be an object`);
