@@ -1,11 +1,57 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, readFileSync
+} from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 
 const git = (dir, ...args) =>
   execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' }).toString();
+
+// Every child_process call that captures output through a pipe is bounded by Node's
+// `maxBuffer`, 1 MiB by default. The two failure modes differ, and only one of them is loud:
+//
+//   execFileSync — throws ENOBUFS. Fails closed (no workspace is built), which is the safe
+//                  direction, but the ceiling still makes the boundary unusable on any repo
+//                  big enough to cross it.
+//   spawnSync    — does NOT throw. It SIGTERMs the child, sets `error.code = 'ENOBUFS'`, and
+//                  returns a *truncated* stdout. That is how denied files shipped: the
+//                  check-ignore stream below was cut mid-record, every match past the cut was
+//                  lost, the deny entry was still booked as matched by the records before the
+//                  cut, and `unmatchedDenyPaths` stayed empty. Fails open, silently.
+//
+// Raising `maxBuffer` is not a fix. Any fixed ceiling is crossed by a big enough repo, so a
+// bigger number only widens the window in which the silent variant happens. Redirecting the
+// child's stdout to a file removes the ceiling instead of moving it: `stdio: ['pipe', fd,
+// 'pipe']` keeps `input:` working for stdin and keeps stderr piped for diagnostics, and the
+// output is read back as a Buffer so pathname bytes stay exact (see parseCheckIgnoreOutput).
+//
+// The result object is then checked, always. An unchecked spawnSync result is the actual
+// root cause here — `matched.error` and `matched.status` were both sitting there unread.
+// stderr is still piped and so still bounded, but a git command whose *stderr* overflows has
+// failed anyway, and that now throws rather than being parsed.
+//
+// `okStatus` lists the exit codes that are not failures: check-ignore exits 1 to mean
+// "nothing matched", which is an ordinary answer rather than an error.
+function gitCapture(label, args, { input, okStatus = [0] } = {}) {
+  const scratch = mkdtempSync(join(tmpdir(), 'agent-team-gitout-'));
+  let fd;
+  try {
+    const outPath = join(scratch, 'stdout');
+    fd = openSync(outPath, 'w');
+    const result = spawnSync('git', args, { input, stdio: ['pipe', fd, 'pipe'] });
+    closeSync(fd);
+    fd = undefined;
+    if (result.error || result.signal || !okStatus.includes(result.status)) {
+      throw new Error(`agent-team: ${label} failed (status ${result.status})`);
+    }
+    return readFileSync(outPath);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 // check-ignore -v reports the source of whichever rule *wins arbitration* across every
 // ignore source present in the tree being checked — it is not limited to the exclude
@@ -83,12 +129,34 @@ function splitNulBuffer(buf) {
 // one field that isn't guaranteed to be valid UTF-8, and it's the one used to build a
 // filesystem path afterwards.
 export function parseCheckIgnoreOutput(raw) {
+  // A truncated stream must never be parsed as if it were complete. `-v -z` emits whole
+  // NUL-terminated quads and nothing else, so a stream that does not end on a NUL, or that
+  // does not hold a multiple of four fields, was cut short — and what is missing from it is
+  // an unknown number of *denied* pathnames, every one of which would otherwise ship. The
+  // old `i + 3 < parts.length` bound did the opposite: it discarded the incomplete trailing
+  // record and returned the rest, so the caller could not tell a complete answer from a
+  // partial one. gitCapture above removes the ceiling that produced the truncation in the
+  // first place; these two checks are the second layer, and the one a unit test can reach
+  // without generating megabytes.
+  if (raw.length > 0 && raw[raw.length - 1] !== 0) {
+    throw new Error(
+      'deniedFiles: check-ignore output ends mid-field (no trailing NUL) — the stream was ' +
+      'truncated, so an unknown number of denied paths is missing from it; refusing to ' +
+      'treat a partial answer as a complete one'
+    );
+  }
   const parts = splitNulBuffer(raw);
-  if (parts.length > 0 && parts[parts.length - 1].length === 0) parts.pop();
+  if (parts.length % 4 !== 0) {
+    throw new Error(
+      `deniedFiles: check-ignore output holds ${parts.length} NUL-separated fields, which ` +
+      'is not a whole number of "<source> <linenum> <pattern> <pathname>" records — the ' +
+      'stream was truncated; refusing to treat a partial answer as a complete one'
+    );
+  }
 
   const denied = [];
   const matchedDenyPaths = new Set();
-  for (let i = 0; i + 3 < parts.length; i += 4) {
+  for (let i = 0; i < parts.length; i += 4) {
     const source = parts[i].toString('utf8');
     const pattern = parts[i + 2].toString('utf8');
     const pathname = parts[i + 3]; // raw bytes — see comment above
@@ -123,7 +191,11 @@ function joinBuffer(dir, rel) {
 // Calling this directly on a fabricated clone dir instead lets the test force the clone's
 // core.ignorecase to each value and assert that value — not tmpdir's — governs.
 export function deniedFiles(dir, denyPaths) {
-  const tracked = execFileSync('git', ['-C', dir, 'ls-files', '-z']);
+  // Through gitCapture, not execFileSync: this list is what gets offered to check-ignore, so
+  // a tracked path that falls off the end of a truncated buffer is never arbitrated and so
+  // can never be denied. execFileSync threw on overflow rather than truncating, so this end
+  // failed closed — but it failed closed at 1 MiB, which is a repo of only ~12k files.
+  const tracked = gitCapture('git ls-files (tracked-file scan)', ['-C', dir, 'ls-files', '-z']);
   const trackedCount = tracked.length === 0
     ? 0
     : tracked.toString().split('\0').filter(Boolean).length;
@@ -144,20 +216,25 @@ export function deniedFiles(dir, denyPaths) {
     // core.ignorecase=<clone's value> is equally load-bearing: without it the scratch dir
     // auto-detects case sensitivity from whatever filesystem os.tmpdir() lands on, which
     // has no relationship to the clone's filesystem — see cloneIgnoreCase above.
-    const matched = spawnSync(
-      'git', ['-C', scratch,
+    //
+    // This is the call that shipped denied files. It ran through a bare `spawnSync` whose
+    // result object was never inspected, so a stdout over `maxBuffer` came back silently
+    // truncated (see gitCapture) and every match past the cut was lost. gitCapture writes
+    // the stream to a file instead of a pipe, so there is no ceiling to cross, and checks
+    // `error`/`signal`/`status` so a failure throws instead of returning a partial answer.
+    // exit 1 means nothing matched, which is not an error.
+    //
+    // The captured stream stays a Buffer: decoding it first (the older
+    // `matched.stdout.toString()`) uses the lossy default 'utf8' codec, which mangles a
+    // pathname that isn't valid UTF-8. Parsing the Buffer directly keeps every pathname
+    // byte-exact through to the rmSync call below.
+    const matched = gitCapture('git check-ignore (deny_paths arbitration)',
+      ['-C', scratch,
         '-c', 'core.excludesFile=/dev/null',
         '-c', `core.ignorecase=${cloneIgnoreCase(dir)}`,
         'check-ignore', '--no-index', '-v', '-z', '--stdin'],
-      { input: tracked }
-    );
-    // exit 1 means nothing matched, which is not an error.
-    //
-    // matched.stdout is already a Buffer (no `encoding` option was passed above) — the bug
-    // this fixes is that it used to be decoded via `.toString()` (implicit utf8) before
-    // being split, which silently mangles a pathname that isn't valid UTF-8. Parsing the
-    // Buffer directly keeps every pathname byte-exact through to the rmSync call below.
-    const { denied, matchedDenyPaths } = parseCheckIgnoreOutput(matched.stdout);
+      { input: tracked, okStatus: [0, 1] });
+    const { denied, matchedDenyPaths } = parseCheckIgnoreOutput(matched);
     return { denied, trackedCount, matchedDenyPaths };
   } finally {
     rmSync(scratch, { recursive: true, force: true });

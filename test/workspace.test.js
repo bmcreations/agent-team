@@ -740,3 +740,95 @@ test('an unexpected check-ignore source in the scratch dir throws instead of sil
     process.env.PATH = originalPath;
   }
 });
+
+// --- A1-1: a truncated check-ignore stream must never be parsed as if it were complete ---
+//
+// spawnSync captures a child's stdout through a pipe bounded by Node's `maxBuffer` (1 MiB
+// by default) and — unlike execFileSync — does NOT throw when that bound is crossed. It
+// SIGTERMs the child, sets `error.code = 'ENOBUFS'`, and returns a *truncated* stdout.
+// deniedFiles used to parse that buffer without ever inspecting `matched.error` or
+// `matched.status`, so on a repo with more than ~1 MiB of check-ignore output every denied
+// file past the cut was never seen: it shipped into the workspace and into the orphan
+// commit. And because the records *before* the cut still booked the deny entry as matched,
+// `unmatchedDenyPaths` stayed empty — the failure was open, with both operator signals clean.
+//
+// The suite had no size-shaped fixture at all, so nothing here could ever have crossed that
+// boundary. This one does. The deny directory's name is long on purpose: -v -z emits
+// "<source>\0<linenum>\0<pattern>\0<pathname>\0" per file, so long paths reach 1 MiB in a
+// few thousand files rather than tens of thousands, which keeps this to a couple of seconds
+// instead of a minute. It is still the slowest test in this file; that is what a
+// size-shaped test costs, and the cost is worth paying exactly once.
+
+function repoWithOversizedDenyOutput() {
+  const denyDir = `denied-${'x'.repeat(193)}`;   // 200 chars, so each -v -z record is ~435 bytes
+  const fileCount = 3000;                        // ~1.3 MiB of check-ignore output
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-big-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  writeFileSync(join(root, 'app.js'), 'ok\n');
+  mkdirSync(join(root, denyDir), { recursive: true });
+  for (let i = 0; i < fileCount; i += 1) {
+    writeFileSync(join(root, denyDir, `f${String(i).padStart(5, '0')}.txt`), `SECRET-${i}\n`);
+  }
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return { root, denyDir, fileCount };
+}
+
+test('no denied file survives a repo whose check-ignore output exceeds the 1 MiB pipe bound', () => {
+  const { root, denyDir, fileCount } = repoWithOversizedDenyOutput();
+
+  const ws = createWorkspace(root, 'qa', [`${denyDir}/**`], 'workspace');
+
+  const tracked = execFileSync('git', ['-C', ws.dir, 'ls-files', '-z'], { maxBuffer: 1 << 28 })
+    .toString().split('\0').filter(Boolean);
+  const leaked = tracked.filter((p) => p.startsWith(denyDir));
+  assert.deepEqual(leaked, [],
+    `${leaked.length} of ${fileCount} denied files were still tracked in the workspace commit`);
+  // deniedFiles removes files, not directories, so the (now empty) denied directory itself
+  // survives on disk — it leaks only a name deny_paths already spelled out. What must not
+  // survive is content: no file under it may be left for the CLI to read.
+  assert.deepEqual(existsSync(join(ws.dir, denyDir)) ? readdirSync(join(ws.dir, denyDir)) : [], [],
+    'no denied file may be left in the workspace working tree');
+  assert.equal(existsSync(join(ws.dir, 'app.js')), true, 'an undenied file must survive');
+
+  // Absent from the tree is not enough — the blobs must be gone from the object database
+  // too, or `git cat-file` in the workspace still hands the CLI the content.
+  const lastBlob = execFileSync('git', ['-C', root, 'hash-object', '--stdin'],
+    { input: `SECRET-${fileCount - 1}\n`, encoding: 'utf8' }).trim();
+  assert.notEqual(tryGit(ws.dir, 'cat-file', '-e', lastBlob).status, 0,
+    'the last denied file\'s blob must not be reachable in the workspace object store');
+});
+
+test('parseCheckIgnoreOutput rejects a truncated stream instead of parsing the records before the cut', () => {
+  // The guarantee must not depend on generating megabytes: this is the same truncation the
+  // size-shaped test above provokes for real, cut directly. `-v -z` always emits complete
+  // NUL-terminated quads, so a stream that does not end on a NUL, or that does not hold a
+  // whole number of four-field records, was cut short — and an unknown number of denied
+  // pathnames is missing from it.
+  const nul = Buffer.from([0]);
+  const record = (path) => Buffer.concat([
+    Buffer.from('.git/info/exclude'), nul, Buffer.from('1'), nul,
+    Buffer.from('credentials/**'), nul, Buffer.from(path), nul
+  ]);
+  const whole = Buffer.concat([record('credentials/a.pem'), record('credentials/b.pem')]);
+
+  // Sanity: the untruncated stream still parses, so the guard is not rejecting everything.
+  assert.equal(parseCheckIgnoreOutput(whole).denied.length, 2);
+
+  // Cut mid-pathname: the first record is complete and would previously have been returned
+  // on its own, silently losing the second denied file.
+  const midField = whole.subarray(0, whole.length - 6);
+  assert.throws(() => parseCheckIgnoreOutput(midField), /truncat/i);
+
+  // Cut exactly on a field boundary: three of the second record's four fields survive, so
+  // the old `i + 3 < parts.length` bound discarded the remainder without a word.
+  const midRecord = whole.subarray(0, whole.length - 'credentials/b.pem'.length - 1);
+  assert.throws(() => parseCheckIgnoreOutput(midRecord), /truncat/i);
+
+  // Empty output (check-ignore matched nothing, exit 1) is complete, not truncated.
+  assert.deepEqual(parseCheckIgnoreOutput(Buffer.alloc(0)).denied, []);
+});
