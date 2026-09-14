@@ -6,6 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
 
+// dispatch creates workspaces in-process via createWorkspace, which resolves its cache
+// root from AGENT_TEAM_WORKSPACE_ROOT (real process.env, not the `env` object passed to
+// dispatch — that only reaches the adapter subprocess). Point it at a throwaway root so
+// these tests never write into the developer's real ~/.cache.
+process.env.AGENT_TEAM_WORKSPACE_ROOT = mkdtempSync(join(tmpdir(), 'at-dsp-wsroot-'));
+
 const TEAM = {
   'eng-lead': { agent: 'mock', isolation: 'read-only', deliverable: 'decision' },
   implementer: { agent: 'mock', reports_to: 'eng-lead', isolation: 'workspace' },

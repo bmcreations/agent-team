@@ -1,12 +1,34 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { createWorkspace, pruneWorkspace } from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
+
+// createWorkspace resolves its cache root from AGENT_TEAM_WORKSPACE_ROOT (falling back to
+// XDG_CACHE_HOME, then ~/.cache). Every test in this file that builds a workspace- or
+// read-only-isolation workspace must run against a throwaway root, never the developer's
+// real cache directory.
+const WORKSPACE_ROOT = mkdtempSync(join(tmpdir(), 'at-wsroot-'));
+process.env.AGENT_TEAM_WORKSPACE_ROOT = WORKSPACE_ROOT;
+
+function listWorkspaceDirs(root) {
+  const found = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        const full = join(dir, entry.name);
+        found.push(full);
+        walk(full);
+      }
+    }
+  };
+  if (existsSync(root)) walk(root);
+  return found;
+}
 
 function repoWithSecrets() {
   const root = mkdtempSync(join(tmpdir(), 'at-ws-'));
@@ -116,4 +138,100 @@ test('a denylist matching every tracked file fails clearly, not with a raw git e
     assert.match(err.message, /qa/);
     return true;
   });
+});
+
+// --- B1: a partial build must not strand a readable, unredacted clone ---
+
+test('a failure partway through building leaves no readable clone behind', () => {
+  const root = repoWithSecrets();
+  assert.throws(() => createWorkspace(root, 'failmemberone', ['**'], 'workspace'));
+  // The repo-key parent directory created by mkdirSync(dirname(dir)) before the clone is
+  // harmless litter (empty, no repo content) — what matters is that no cloned git
+  // repository for this member survives under the workspaces root.
+  const leftover = listWorkspaceDirs(WORKSPACE_ROOT).filter((d) => d.includes('failmemberone'));
+  assert.deepEqual(leftover, []);
+});
+
+test('after a partial-build throw, no directory anywhere under the workspaces root mentions the failed member', () => {
+  const root = repoWithSecrets();
+  assert.throws(() => createWorkspace(root, 'failmembertwo', ['**'], 'workspace'));
+  const leftover = listWorkspaceDirs(WORKSPACE_ROOT).filter((d) => d.includes('failmembertwo'));
+  assert.deepEqual(leftover, []);
+});
+
+// --- B2: workspaces must not live inside the repository ---
+
+test('the workspace lives outside the repository, under the workspaces root env override', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.ok(ws.dir.startsWith(WORKSPACE_ROOT + '/'), ws.dir);
+  assert.ok(!ws.dir.startsWith(root), 'workspace must not be nested inside the repo it protects');
+  assert.equal(existsSync(join(root, '.claude', 'workspaces')), false);
+});
+
+test('read-only isolation also lands outside the repository', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'read-only');
+  assert.ok(ws.dir.startsWith(WORKSPACE_ROOT + '/'), ws.dir);
+});
+
+test('two different repos get workspaces filed under different repo-key directories', () => {
+  const rootA = repoWithSecrets();
+  const rootB = repoWithSecrets();
+  const wsA = createWorkspace(rootA, 'qa', DENY, 'workspace');
+  const wsB = createWorkspace(rootB, 'qa', DENY, 'workspace');
+  assert.notEqual(dirname(wsA.dir), dirname(wsB.dir));
+});
+
+test('the repo cannot be derived as a relative path from the workspace cwd', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  // Nested under the repo, `../../..` from the workspace dir would land back at repoRoot.
+  // Outside it, walking up from the workspace dir must never reach repoRoot.
+  let cur = ws.dir;
+  for (let i = 0; i < 6; i += 1) {
+    assert.notEqual(cur, root);
+    cur = dirname(cur);
+  }
+});
+
+// --- B3: submodules are a hole in deny_paths ---
+
+function repoWithSubmodule() {
+  const subRoot = mkdtempSync(join(tmpdir(), 'at-sub-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', subRoot]);
+  const subGit = (...a) => execFileSync('git', ['-C', subRoot, ...a], { stdio: 'pipe' });
+  subGit('config', 'user.email', 't@e.com');
+  subGit('config', 'user.name', 'T');
+  subGit('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(subRoot, 'credentials'), { recursive: true });
+  writeFileSync(join(subRoot, 'credentials', 'sub-secret.p8'), 'SUBMODULE SECRET\n');
+  subGit('add', '-A');
+  subGit('commit', '-q', '-m', 'sub init');
+
+  const root = repoWithSecrets();
+  execFileSync('git', [
+    '-C', root, '-c', 'protocol.file.allow=always',
+    'submodule', 'add', '-q', subRoot, 'vendor/sub'
+  ], { stdio: 'pipe' });
+  execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'add submodule'], { stdio: 'pipe' });
+  return root;
+}
+
+test('the workspace has no .gitmodules and no gitlink for the submodule', () => {
+  const root = repoWithSubmodule();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.equal(existsSync(join(ws.dir, '.gitmodules')), false);
+  const shown = tryGit(ws.dir, 'show', 'HEAD:.gitmodules');
+  assert.notEqual(shown.status, 0, '.gitmodules must not survive in the workspace commit');
+  const listed = tryGit(ws.dir, 'ls-files').stdout;
+  assert.doesNotMatch(listed, /vendor\/sub/);
+});
+
+test('git submodule update --init cannot recover the submodule content from the workspace', () => {
+  const root = repoWithSubmodule();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  spawnSync('git', ['-C', ws.dir, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init'],
+    { encoding: 'utf8' });
+  assert.equal(existsSync(join(ws.dir, 'vendor', 'sub', 'credentials', 'sub-secret.p8')), false);
 });
