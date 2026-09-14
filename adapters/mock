@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 const sub = process.argv[2];
 
@@ -23,19 +23,22 @@ if (sub === 'run') {
     process.exit(2);
   }
   const scripted = JSON.parse(readFileSync(scriptPath, 'utf8'));
-  let picked = (scripted.by_member && scripted.by_member[brief.member]) || scripted;
+  const entry = (scripted.by_member && scripted.by_member[brief.member]) ?? scripted;
 
-  // A brief carrying "Results from your reports" is a synthesis call — the manager
-  // already delegated once and got its reports' answers back. A script that scripts
-  // "delegating" statically has no way to answer differently on this second call, so
-  // treat it the way a real agent would once it has results in hand: it synthesizes
-  // rather than delegating again.
-  if (
-    picked.status === 'delegating' &&
-    typeof brief.task === 'string' &&
-    brief.task.includes('Results from your reports')
-  ) {
-    picked = { status: 'ok', summary: 'synthesized from delegated results' };
+  // A member's scripted answer is either a single object (used for every call) or an
+  // array of answers consumed one per call — e.g. delegate on round one, synthesize on
+  // round two. The mock is a separate process per invocation, so "one per call" needs
+  // state on disk: a counter file next to the script, keyed by member.
+  let picked;
+  if (Array.isArray(entry)) {
+    const countsPath = `${scriptPath}.calls.json`;
+    const counts = existsSync(countsPath) ? JSON.parse(readFileSync(countsPath, 'utf8')) : {};
+    const count = counts[brief.member] ?? 0;
+    picked = entry[Math.min(count, entry.length - 1)];
+    counts[brief.member] = count + 1;
+    writeFileSync(countsPath, JSON.stringify(counts));
+  } else {
+    picked = entry;
   }
 
   if (picked.hang) {

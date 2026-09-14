@@ -86,7 +86,10 @@ test('an isolation-none member runs without a repository', async () => {
 test('a manager delegates, its report runs, and the manager synthesises', async () => {
   const { root, script } = project({
     by_member: {
-      'eng-lead': { status: 'delegating', delegations: [{ to: 'implementer', task: 'build it' }] },
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'build it' }] },
+        { status: 'ok', summary: 'synthesized from delegated results' }
+      ],
       implementer: { status: 'ok', summary: 'built' }
     }
   });
