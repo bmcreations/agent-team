@@ -1,13 +1,13 @@
 export function buildOrg(members) {
   const names = Object.keys(members).sort();
-  const parentOf = {};
+  const parentOf = Object.create(null);
 
   for (const name of names) {
     const parent = members[name].reports_to ?? null;
     if (parent === name) {
       throw new Error(`member "${name}": reports_to itself`);
     }
-    if (parent !== null && !members[parent]) {
+    if (parent !== null && !Object.prototype.hasOwnProperty.call(members, parent)) {
       throw new Error(`member "${name}": reports_to "${parent}" is not a configured member`);
     }
     parentOf[name] = parent;
@@ -25,7 +25,7 @@ export function buildOrg(members) {
     }
   }
 
-  const reportsOf = Object.fromEntries(names.map((n) => [n, []]));
+  const reportsOf = Object.assign(Object.create(null), Object.fromEntries(names.map((n) => [n, []])));
   for (const name of names) {
     if (parentOf[name]) reportsOf[parentOf[name]].push(name);
   }

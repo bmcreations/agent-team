@@ -87,6 +87,50 @@ test('a name colliding with Object.prototype is treated as unknown, not inherite
   assert.equal(canDelegate(org, 'toString'), false);
 });
 
+test('reports_to "toString" is refused as a clean config error, not a TypeError', () => {
+  assert.throws(
+    () => buildOrg({ ceo: { agent: 'x' }, a: { agent: 'y', reports_to: 'toString' } }),
+    (err) => {
+      assert.match(err.message, /reports_to "toString" is not a configured member/);
+      assert.notEqual(err.constructor.name, 'TypeError');
+      return true;
+    }
+  );
+});
+
+test('reports_to "constructor" is refused as a clean config error, not a TypeError', () => {
+  assert.throws(
+    () => buildOrg({ ceo: { agent: 'x' }, a: { agent: 'y', reports_to: 'constructor' } }),
+    (err) => {
+      assert.match(err.message, /reports_to "constructor" is not a configured member/);
+      assert.notEqual(err.constructor.name, 'TypeError');
+      return true;
+    }
+  );
+});
+
+test('reports_to "hasOwnProperty" is refused as a clean config error, not a TypeError', () => {
+  assert.throws(
+    () => buildOrg({ ceo: { agent: 'x' }, a: { agent: 'y', reports_to: 'hasOwnProperty' } }),
+    (err) => {
+      assert.match(err.message, /reports_to "hasOwnProperty" is not a configured member/);
+      assert.notEqual(err.constructor.name, 'TypeError');
+      return true;
+    }
+  );
+});
+
+test('reports_to "valueOf" is refused as a clean config error, not a TypeError', () => {
+  assert.throws(
+    () => buildOrg({ ceo: { agent: 'x' }, a: { agent: 'y', reports_to: 'valueOf' } }),
+    (err) => {
+      assert.match(err.message, /reports_to "valueOf" is not a configured member/);
+      assert.notEqual(err.constructor.name, 'TypeError');
+      return true;
+    }
+  );
+});
+
 test('a real member named toString still works', () => {
   const org = buildOrg({ ...MEMBERS, toString: { agent: 'claude', reports_to: 'coo' } });
   assert.equal(depthOf(org, 'toString'), 1);
