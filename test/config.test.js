@@ -250,3 +250,93 @@ test('deny_paths entries that do work still load', () => {
   const cfg = loadConfig(root);
   assert.deepEqual(cfg.deny_paths, ['credentials/**', '/credentials/**', 'credentials/', '**/.env*', '!credentials/public.txt']);
 });
+
+// --- Group B: a member field of the wrong type crashed with a raw TypeError ---
+
+test('a member whose value is null is refused, not crashed on with a raw TypeError', () => {
+  const root = project({ members: { gamma: null }, deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), /member "gamma" must be an object/);
+});
+
+test('a member whose value is an array is refused', () => {
+  const root = project({ members: { gamma: ['agent'] }, deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), /member "gamma" must be an object/);
+});
+
+test('a member whose value is a string is still handled by the existing "agent" is required message', () => {
+  const root = project({ members: { gamma: 'claude' }, deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), /member "gamma": "agent" is required/);
+});
+
+test('a non-string skill is refused, not handed to path.join', () => {
+  const root = memberProject('a', { skill: 42 });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /"skill"/);
+    assert.match(err.message, /42/);
+    return true;
+  });
+});
+
+test('a skill name that path-traverses is refused, the same as a member name', () => {
+  const root = memberProject('a', { skill: '../../etc/passwd' });
+  assert.throws(() => loadConfig(root), /"skill"/);
+});
+
+test('a skill name with a slash is refused', () => {
+  const root = memberProject('a', { skill: 'foo/bar' });
+  assert.throws(() => loadConfig(root), /"skill"/);
+});
+
+test('an ordinary skill name still loads', () => {
+  const root = memberProject('a', { skill: 'red-team' });
+  const cfg = loadConfig(root);
+  assert.equal(cfg.members.a.skill, 'red-team');
+});
+
+// --- Group C: title, charter, persona, output_path, defaults must be the documented types ---
+
+test('a non-string title is refused', () => {
+  const root = memberProject('a', { title: ['Lead'] });
+  assert.throws(() => loadConfig(root), /"title"/);
+});
+
+test('a non-string charter is refused', () => {
+  const root = memberProject('a', { charter: 42 });
+  assert.throws(() => loadConfig(root), /"charter"/);
+});
+
+test('a non-string persona is refused', () => {
+  const root = memberProject('a', { persona: {} });
+  assert.throws(() => loadConfig(root), /"persona"/);
+});
+
+test('a non-string output_path is refused', () => {
+  const root = memberProject('a', { output_path: 42 });
+  assert.throws(() => loadConfig(root), /"output_path"/);
+});
+
+test('an output_path that escapes with .. is refused', () => {
+  const root = memberProject('a', { output_path: '../escape' });
+  assert.throws(() => loadConfig(root), /"output_path"/);
+});
+
+test('an absolute output_path is refused', () => {
+  const root = memberProject('a', { output_path: '/etc/passwd' });
+  assert.throws(() => loadConfig(root), /"output_path"/);
+});
+
+test('an ordinary relative output_path still loads', () => {
+  const root = memberProject('a', { output_path: 'docs/design' });
+  const cfg = loadConfig(root);
+  assert.equal(cfg.members.a.output_path, 'docs/design');
+});
+
+test('a non-object defaults block is refused', () => {
+  const root = project({ ...OK, defaults: 'nope' });
+  assert.throws(() => loadConfig(root), /"defaults" must be an object/);
+});
+
+test('an array defaults block is refused', () => {
+  const root = project({ ...OK, defaults: [] });
+  assert.throws(() => loadConfig(root), /"defaults" must be an object/);
+});

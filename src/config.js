@@ -16,17 +16,52 @@ const DELIVERABLE_FOR = { none: 'document', 'read-only': 'review', workspace: 'd
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/i;
 const MEMBER_NAME_MAX_LENGTH = 64;
 
-function validateMemberName(name, path) {
+// Shared shape check for anything that gets interpolated into a filesystem path the same
+// way a member name does (currently: member names themselves, and `skill`, which
+// dispatch.js joins as skillsDir/<skill>/SKILL.md). One regex, one length cap, one message
+// shape — `subject` supplies the noun phrase so each caller's error reads naturally.
+function validateNameShape(value, subject, path) {
   if (
-    typeof name !== 'string' ||
-    name.length === 0 ||
-    name.length > MEMBER_NAME_MAX_LENGTH ||
-    !MEMBER_NAME_RE.test(name)
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > MEMBER_NAME_MAX_LENGTH ||
+    !MEMBER_NAME_RE.test(value)
   ) {
     throw new Error(
-      `${path}: member name ${JSON.stringify(name)} is invalid — names must start with a letter ` +
+      `${path}: ${subject} ${JSON.stringify(value)} is invalid — must start with a letter ` +
       `or digit and contain only letters, digits, "_" or "-" (matching ${MEMBER_NAME_RE}), ` +
       `at most ${MEMBER_NAME_MAX_LENGTH} characters`
+    );
+  }
+}
+
+function validateMemberName(name, path) {
+  validateNameShape(name, 'member name', path);
+}
+
+// title/charter/persona pass through untouched into the brief's prompt text — a non-string
+// still "works" but renders as JSON-ish garbage (e.g. an array joined into a sentence).
+function validateStringField(value, name, field, path) {
+  if (typeof value !== 'string') {
+    throw new Error(
+      `${path}: member "${name}": "${field}" must be a string — got ${JSON.stringify(value)}`
+    );
+  }
+}
+
+// output_path is a path a member writes to (relative to its workspace), so unlike
+// title/charter/persona it also gets the traversal treatment: no absolute path, no ".."
+// segment that could walk it out of the workspace directory.
+function validateOutputPath(value, name, path) {
+  validateStringField(value, name, 'output_path', path);
+  if (value === '') {
+    throw new Error(`${path}: member "${name}": "output_path" must be a non-empty string`);
+  }
+  const segments = value.split('/');
+  if (value.startsWith('/') || segments.includes('..') || segments.includes('.')) {
+    throw new Error(
+      `${path}: member "${name}": "output_path" ${JSON.stringify(value)} must be a relative ` +
+      `path with no ".." or "." segments and no leading "/"`
     );
   }
 }
@@ -71,12 +106,40 @@ export function loadConfig(projectRoot) {
   for (const entry of raw.deny_paths) {
     validateDenyPath(entry, path);
   }
+  if (raw.defaults !== undefined && raw.defaults !== null) {
+    if (typeof raw.defaults !== 'object' || Array.isArray(raw.defaults)) {
+      throw new Error(`${path}: "defaults" must be an object — got ${JSON.stringify(raw.defaults)}`);
+    }
+  }
 
   const members = {};
   for (const [name, m] of Object.entries(raw.members)) {
     validateMemberName(name, path);
+    // A string/number/boolean member value already lands on the "agent" is required message
+    // below (property access on a primitive returns undefined, it doesn't throw). Only null
+    // and arrays need a guard here: null throws reading .agent off it, and an array's .agent
+    // is silently undefined too, but calling that out explicitly beats a misleading
+    // "agent is required" for a value that was never going to have one.
+    if (m === null || Array.isArray(m)) {
+      throw new Error(`${path}: member "${name}" must be an object — got ${JSON.stringify(m)}`);
+    }
     if (typeof m.agent !== 'string' || m.agent === '') {
       throw new Error(`${path}: member "${name}": "agent" is required`);
+    }
+    if (m.skill !== undefined && m.skill !== null) {
+      validateNameShape(m.skill, `member "${name}": "skill"`, path);
+    }
+    if (m.title !== undefined && m.title !== null) {
+      validateStringField(m.title, name, 'title', path);
+    }
+    if (m.charter !== undefined && m.charter !== null) {
+      validateStringField(m.charter, name, 'charter', path);
+    }
+    if (m.persona !== undefined && m.persona !== null) {
+      validateStringField(m.persona, name, 'persona', path);
+    }
+    if (m.output_path !== undefined && m.output_path !== null) {
+      validateOutputPath(m.output_path, name, path);
     }
     const isolation = m.isolation ?? 'read-only';
     if (!ISOLATIONS.includes(isolation)) {
