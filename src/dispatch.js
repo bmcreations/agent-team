@@ -62,6 +62,18 @@ async function runMember(ctx) {
   }
 
   const workspace = createWorkspace(projectRoot, member, config.deny_paths, resolved.isolation);
+  // The same agent-team.json commonly gets reused across projects, so a deny_paths entry
+  // matching nothing in this particular repo is not itself an error (see workspace.js).
+  // But it is worth an operator's attention — it may mean the entry was meant to match
+  // here and doesn't (e.g. a rename, or a scope narrower than intended) — so surface it
+  // loudly rather than leaving it reachable only via workspace.unmatchedDenyPaths.
+  const unmatchedDenyPaths = workspace.unmatchedDenyPaths ?? [];
+  if (unmatchedDenyPaths.length > 0) {
+    console.warn(
+      `agent-team: member "${member}": deny_paths entries matched nothing in this repo — ` +
+      `check whether you meant these to match: ${unmatchedDenyPaths.join(', ')}`
+    );
+  }
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;
@@ -122,7 +134,7 @@ async function runMember(ctx) {
     return {
       ...result,
       member, agent: resolved.agent, warning: resolved.warning,
-      workspace, depth, delegated
+      workspace, unmatchedDenyPaths, depth, delegated
     };
   } catch (err) {
     // A throw here (e.g. a reporting-line violation) means this frame's workspace

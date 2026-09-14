@@ -50,7 +50,7 @@ const TEAM = {
   marketer: { agent: 'mock', isolation: 'none' }
 };
 
-function project(scripted, { members = TEAM, defaults = {} } = {}) {
+function project(scripted, { members = TEAM, defaults = {}, denyPaths = ['credentials/**'] } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'at-dsp-'));
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
@@ -63,7 +63,7 @@ function project(scripted, { members = TEAM, defaults = {} } = {}) {
   writeFileSync(join(root, 'credentials', 'key.p8'), 'SECRET\n');
   writeFileSync(join(root, '.claude', 'agent-team.json'), JSON.stringify({
     members,
-    deny_paths: ['credentials/**'],
+    deny_paths: denyPaths,
     defaults: { on_unavailable: 'mock', ...defaults }
   }));
   const script = join(root, 'script.json');
@@ -263,4 +263,35 @@ test('max_delegations bounds the total number of adapter runs', async () => {
   const r = await run(root, script, 'eng-lead');
   assert.equal(r.status, 'failed');
   assert.match(r.summary, /budget/);
+});
+
+test('a deny_paths entry matching nothing is warned about and returned in the result', async () => {
+  const { root, script } = project(
+    { status: 'ok', summary: 'clean' },
+    { denyPaths: ['credentials/**', 'nope/never/matches/**'] }
+  );
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    const r = await run(root, script, 'implementer');
+    assert.equal(r.status, 'ok');
+    assert.deepEqual(r.unmatchedDenyPaths, ['nope/never/matches/**']);
+    assert.ok(
+      warnings.some((w) => w.includes('nope/never/matches/**')),
+      `expected a console.warn naming the unmatched entry, got: ${JSON.stringify(warnings)}`
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('an isolation-none run reports no unmatched deny_paths rather than throwing', async () => {
+  const { root, script } = project(
+    { status: 'ok', summary: 'copy written' },
+    { denyPaths: ['credentials/**', 'nope/never/matches/**'] }
+  );
+  const r = await run(root, script, 'marketer');
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.unmatchedDenyPaths, []);
 });
