@@ -106,6 +106,19 @@ function validateDenyPath(entry, path) {
       `${JSON.stringify(entry)}`
     );
   }
+  // One member short of the "./"/"../" class above: once this entry is written into
+  // src/workspace.js's exclude file, an unescaped leading "#" starts a gitignore comment
+  // and the whole line does nothing — silently, since the entry is simply absent from
+  // arbitration rather than reported as a syntax error. "\#" escapes it into an ordinary
+  // pattern matching a literal "#" (verified end to end in test/workspace.test.js).
+  if (entry.startsWith('#')) {
+    const suggestion = `\\${entry}`;
+    throw new Error(
+      `${path}: "deny_paths" entry ${JSON.stringify(entry)} can never match — a leading "#" ` +
+      `starts a comment under gitignore semantics, so the entry can never match; write ` +
+      `${JSON.stringify(suggestion)} to mean it literally, not ${JSON.stringify(entry)}`
+    );
+  }
 }
 
 export function loadConfig(projectRoot) {

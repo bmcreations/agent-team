@@ -245,6 +245,28 @@ test('an empty-string deny_paths entry is refused', () => {
   assert.throws(() => loadConfig(root), /deny_paths/);
 });
 
+// --- A2-1: a leading "#" is an inert gitignore comment, one member of the same class as
+// leading "./" and "../" — the entry is written into src/workspace.js's exclude file
+// verbatim, where "#" starts a comment and the whole line is silently ignored. ---
+
+test('a deny_paths entry with a leading # is refused', () => {
+  const root = denyProject(['#k.pem']);
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /#k\.pem/);
+    assert.match(err.message, /comment/i);
+    // The message must say how to mean it literally, the same way the ./ and ../ message
+    // names the corrected spelling.
+    assert.match(err.message, /\\#k\.pem/);
+    return true;
+  });
+});
+
+test('an escaped leading \\# is not rejected — it is the way to mean a literal #', () => {
+  const root = denyProject(['\\#k.pem']);
+  const cfg = loadConfig(root);
+  assert.deepEqual(cfg.deny_paths, ['\\#k.pem']);
+});
+
 test('deny_paths entries that do work still load', () => {
   const root = denyProject(['credentials/**', '/credentials/**', 'credentials/', '**/.env*', '!credentials/public.txt']);
   const cfg = loadConfig(root);

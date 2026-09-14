@@ -449,6 +449,37 @@ test('a deny_paths list that matches everything reports no unmatched entries', (
   assert.deepEqual(ws.unmatchedDenyPaths, []);
 });
 
+// --- A2-1: an escaped leading "\#" actually denies a file named with a literal "#" ---
+//
+// src/config.js rejects an unescaped leading "#" at load (it is an inert gitignore
+// comment once written into the exclude file below), and tells the operator to write it
+// as "\#" instead. deniedFiles/createWorkspace never re-validate deny_paths — config
+// validation is the only gate — so this proves directly, at the layer that actually writes
+// the exclude file and asks git to arbitrate it, that the suggested escape really works and
+// is not just a plausible-looking string in an error message.
+
+test('an escaped leading \\# in a deny_paths entry denies a file whose name starts with #', () => {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-hash-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  writeFileSync(join(root, 'credentials', '#k.pem'), 'PRIVATE KEY\n');
+  writeFileSync(join(root, 'app.js'), 'ok\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+
+  const ws = createWorkspace(root, 'qa', ['\\#k.pem'], 'workspace');
+
+  assert.equal(existsSync(join(ws.dir, 'credentials', '#k.pem')), false,
+    'the escaped pattern must actually deny the literal "#"-named file');
+  assert.equal(existsSync(join(ws.dir, 'app.js')), true, 'an undenied file must survive');
+  assert.deepEqual(ws.unmatchedDenyPaths, [],
+    'the escaped entry actually matched a file — it must not be reported as unmatched');
+});
+
 // --- C3: clone args, white-box — dropping file:// or --depth 1 is invisible black-box ---
 
 test('cloneArgs clones over file:// with a shallow depth', () => {
