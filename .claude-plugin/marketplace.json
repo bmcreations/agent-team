@@ -1,0 +1,11 @@
+{
+  "name": "agent-team",
+  "owner": { "name": "bmcreations" },
+  "plugins": [
+    {
+      "name": "agent-team",
+      "source": "./",
+      "description": "Delegate a task to Codex, Grok, or Claude by naming a team member rather than a vendor"
+    }
+  ]
+}
