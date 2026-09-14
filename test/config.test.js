@@ -340,3 +340,79 @@ test('an array defaults block is refused', () => {
   const root = project({ ...OK, defaults: [] });
   assert.throws(() => loadConfig(root), /"defaults" must be an object/);
 });
+
+// --- A1: max_depth and max_delegations must be integers, not just truthy values ---
+//
+// src/brief.js computes `canDelegate = hasReports && depth < maxDepth`. A non-number
+// maxDepth makes that comparison false forever — a manager with reports silently loses
+// the ability to delegate, with no thrown error and no warning. That is a behavioural
+// regression, not a crash, so these assert on the eventual boolean, not on a throw.
+
+test('a string max_depth is refused, naming the field and the value', () => {
+  const root = project({ ...OK, defaults: { max_depth: 'three' } });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /max_depth/);
+    assert.match(err.message, /"three"/);
+    return true;
+  });
+});
+
+test('a null max_depth is refused', () => {
+  const root = project({ ...OK, defaults: { max_depth: null } });
+  assert.throws(() => loadConfig(root), /max_depth/);
+});
+
+test('a negative max_depth is refused', () => {
+  const root = project({ ...OK, defaults: { max_depth: -1 } });
+  assert.throws(() => loadConfig(root), /max_depth/);
+});
+
+test('a non-integer (fractional) max_depth is refused', () => {
+  const root = project({ ...OK, defaults: { max_depth: 1.5 } });
+  assert.throws(() => loadConfig(root), /max_depth/);
+});
+
+test('a max_depth of 0 is accepted — it means "no delegation at all", a real, tested setting', () => {
+  // src/brief.js: canDelegate = hasReports && depth < maxDepth. At depth 0, max_depth 0
+  // deterministically refuses delegation for every member, which is a valid, intentional
+  // configuration (see test/dispatch.test.js: "max_depth stops a manager from delegating
+  // past the limit", which configures exactly this and asserts it works). Rejecting 0
+  // here would break that real, currently-passing behaviour.
+  const cfg = loadConfig(project({ ...OK, defaults: { max_depth: 0 } }));
+  assert.equal(cfg.defaults.max_depth, 0);
+});
+
+test('a string max_delegations is refused, naming the field and the value', () => {
+  const root = project({ ...OK, defaults: { max_delegations: 'lots' } });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /max_delegations/);
+    assert.match(err.message, /"lots"/);
+    return true;
+  });
+});
+
+test('a null max_delegations is refused', () => {
+  const root = project({ ...OK, defaults: { max_delegations: null } });
+  assert.throws(() => loadConfig(root), /max_delegations/);
+});
+
+test('a negative max_delegations is refused', () => {
+  const root = project({ ...OK, defaults: { max_delegations: -1 } });
+  assert.throws(() => loadConfig(root), /max_delegations/);
+});
+
+test('a non-integer (fractional) max_delegations is refused', () => {
+  const root = project({ ...OK, defaults: { max_delegations: 1.5 } });
+  assert.throws(() => loadConfig(root), /max_delegations/);
+});
+
+test('a max_delegations of 0 is refused — zero runs is not a usable budget', () => {
+  const root = project({ ...OK, defaults: { max_delegations: 0 } });
+  assert.throws(() => loadConfig(root), /max_delegations/);
+});
+
+test('valid max_depth and max_delegations still load', () => {
+  const cfg = loadConfig(project({ ...OK, defaults: { max_depth: 5, max_delegations: 50 } }));
+  assert.equal(cfg.defaults.max_depth, 5);
+  assert.equal(cfg.defaults.max_delegations, 50);
+});

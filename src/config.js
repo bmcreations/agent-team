@@ -66,6 +66,18 @@ function validateOutputPath(value, name, path) {
   }
 }
 
+// A non-number maxDepth makes `depth < maxDepth` in src/brief.js false forever, silently
+// turning every manager with reports into a non-manager — no thrown error, no warning, the
+// run still reports status: ok. Number.isInteger rules out NaN, 1.5 and Infinity, which
+// `typeof v === 'number'` would let straight through.
+function validateBoundedInteger(value, field, minimum, path) {
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(
+      `${path}: "defaults.${field}" must be an integer >= ${minimum} — got ${JSON.stringify(value)}`
+    );
+  }
+}
+
 function validateDenyPath(entry, path) {
   if (typeof entry !== 'string' || entry === '') {
     throw new Error(
@@ -160,15 +172,25 @@ export function loadConfig(projectRoot) {
   // is a config error, not something discovered three delegations deep.
   const org = buildOrg(members);
 
+  const defaults = {
+    on_unavailable: 'claude',
+    max_depth: 3,
+    max_delegations: 20,
+    ...(raw.defaults ?? {})
+  };
+  // Checked after the merge, not on raw.defaults, so a bad value baked into the hardcoded
+  // default would be caught too — not just a bad override. max_depth's floor is 0, not 1:
+  // 0 is a real, intentional setting meaning "no delegation at all" (see test/dispatch.test.js
+  // "max_depth stops a manager from delegating past the limit"), so it must stay legal.
+  // max_delegations has no such use for 0 — it would exhaust the run budget before the root
+  // member's first call, which is never a usable configuration.
+  validateBoundedInteger(defaults.max_depth, 'max_depth', 0, path);
+  validateBoundedInteger(defaults.max_delegations, 'max_delegations', 1, path);
+
   return {
     members,
     org,
     deny_paths: raw.deny_paths,
-    defaults: {
-      on_unavailable: 'claude',
-      max_depth: 3,
-      max_delegations: 20,
-      ...(raw.defaults ?? {})
-    }
+    defaults
   };
 }
