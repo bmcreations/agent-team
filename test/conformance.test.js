@@ -10,6 +10,8 @@ const adapterDir = new URL('../adapters/', import.meta.url).pathname;
 const MOCK = join(adapterDir, 'mock');
 const CRASH = new URL('./fixtures/crash', import.meta.url).pathname;
 const WRITES_DESPITE_READ_ONLY = new URL('./fixtures/writes-despite-read-only', import.meta.url).pathname;
+const COMMITS_DESPITE_READ_ONLY = new URL('./fixtures/commits-despite-read-only', import.meta.url).pathname;
+const BRANCHES_DESPITE_READ_ONLY = new URL('./fixtures/branches-despite-read-only', import.meta.url).pathname;
 
 function writeMockScript(dir, scripted) {
   const scriptPath = join(dir, 'script.json');
@@ -139,6 +141,58 @@ test('a run status outside the valid set is reported non-conformant', async () =
   assert.ok(
     report.failures.some((f) => f.step === 'run' && /banana/.test(f.detail)),
     JSON.stringify(report.failures)
+  );
+});
+
+test('a read_only run that commits is reported non-conformant even though the tree is clean', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-commits-'));
+  initGitFixtureRepo(dir);
+
+  const report = await conformanceReport(COMMITS_DESPITE_READ_ONLY, { cwd: dir });
+
+  assert.equal(report.brief.read_only, true);
+  // The defect this guards against: a commit leaves porcelain status clean, so the
+  // working-tree-only check must not be the only signal that fires here.
+  assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: dir }).toString(), '');
+  assert.equal(report.conformant, false);
+  assert.ok(
+    report.failures.some((f) => f.step === 'read-only-git-head' && /moved HEAD/.test(f.detail)),
+    JSON.stringify(report.failures)
+  );
+});
+
+test('a read_only run that creates a branch is reported non-conformant', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-branch-'));
+  initGitFixtureRepo(dir);
+
+  const report = await conformanceReport(BRANCHES_DESPITE_READ_ONLY, { cwd: dir });
+
+  assert.equal(report.brief.read_only, true);
+  assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: dir }).toString(), '');
+  assert.equal(report.conformant, false);
+  assert.ok(
+    report.failures.some((f) => f.step === 'read-only-git-refs' && /unauthorized-branch/.test(f.detail)),
+    JSON.stringify(report.failures)
+  );
+});
+
+test('a read_only conformance run notes that a reverted write is outside what this check can detect', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-honesty-'));
+  initGitFixtureRepo(dir);
+  const scriptDir = mkdtempSync(join(tmpdir(), 'at-conf-honesty-script-'));
+  const scriptPath = writeMockScript(scriptDir, {
+    status: 'ok', summary: 'mock reply', findings: [], checked_sound: []
+  });
+
+  const report = await conformanceReport(MOCK, {
+    cwd: dir,
+    env: { AGENT_TEAM_MOCK_SCRIPT: scriptPath }
+  });
+
+  assert.equal(report.brief.read_only, true);
+  assert.ok(
+    report.notes.some((n) => n.step === 'read-only-git-status' && /revert/.test(n.detail)),
+    JSON.stringify(report.notes)
   );
 });
 

@@ -15,6 +15,36 @@ function gitPorcelainStatus(cwd) {
   }
 }
 
+// A commit moves HEAD and leaves the working tree clean, so gitPorcelainStatus alone cannot
+// see it. Same null-on-failure contract as gitPorcelainStatus: not a git repo, or git failed.
+function gitRevParseHead(cwd) {
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd, stdio: 'pipe' }).toString().trim();
+  } catch {
+    return null;
+  }
+}
+
+// A new branch or tag moves neither the working tree nor the current HEAD, so it needs its
+// own comparison. Same null-on-failure contract as the other two git-state readers.
+function gitRefList(cwd) {
+  try {
+    return execFileSync('git', ['for-each-ref', "--format=%(refname) %(objectname)"], {
+      cwd, stdio: 'pipe'
+    }).toString();
+  } catch {
+    return null;
+  }
+}
+
+function refListDiff(before, after) {
+  const beforeSet = new Set((before ?? '').split('\n').filter(Boolean));
+  const afterSet = new Set((after ?? '').split('\n').filter(Boolean));
+  const added = [...afterSet].filter((r) => !beforeSet.has(r));
+  const removed = [...beforeSet].filter((r) => !afterSet.has(r));
+  return { added, removed };
+}
+
 export async function conformanceReport(execPath, { env = {}, cwd = undefined, reports = [] } = {}) {
   const failures = [];
   const notes = [];
@@ -66,7 +96,12 @@ export async function conformanceReport(execPath, { env = {}, cwd = undefined, r
   // Captured around the run itself — probe/capabilities are not expected to touch brief.cwd,
   // and this is the one code path a real vendor CLI actually runs through (conformanceReport,
   // not the mock-only inline assertion this replaces), so it is the only path worth guarding.
+  //
+  // Three independent facts, because a working tree can be clean while git state still moved:
+  // a commit moves HEAD without dirtying the tree, and a new branch or tag moves neither.
   const statusBeforeRun = brief.read_only ? gitPorcelainStatus(brief.cwd) : null;
+  const headBeforeRun = brief.read_only ? gitRevParseHead(brief.cwd) : null;
+  const refsBeforeRun = brief.read_only ? gitRefList(brief.cwd) : null;
 
   const run = await runAdapter(execPath, 'run', { env, cwd, timeoutMs: 120_000, brief });
 
@@ -86,6 +121,36 @@ export async function conformanceReport(execPath, { env = {}, cwd = undefined, r
             : `read-only run dirtied the working tree: ${statusAfterRun.trim()}`
         });
       }
+
+      const headAfterRun = gitRevParseHead(brief.cwd);
+      if (headAfterRun !== headBeforeRun) {
+        failures.push({
+          step: 'read-only-git-head',
+          detail: `read-only run moved HEAD from ${headBeforeRun ?? '(no commit yet)'} to ` +
+            `${headAfterRun ?? '(no commit)'} — the adapter committed despite read_only`
+        });
+      }
+
+      const refsAfterRun = gitRefList(brief.cwd);
+      if (refsAfterRun !== refsBeforeRun) {
+        const { added, removed } = refListDiff(refsBeforeRun, refsAfterRun);
+        failures.push({
+          step: 'read-only-git-refs',
+          detail: `read-only run changed the ref list — added: [${added.join(', ') || 'none'}], ` +
+            `removed: [${removed.join(', ') || 'none'}]`
+        });
+      }
+
+      // Honesty about the blind spot: this whole section is a before/after comparison, so a
+      // write (or commit, or branch) that the adapter made and then reverted before exiting —
+      // `rm` the file it wrote, `git reset --hard`, `git branch -D` the branch it made — leaves
+      // no trace here. A conformant result means no write or ref change SURVIVED the run, not
+      // that the adapter never wrote anything. Do not read more into a green run than that.
+      notes.push({
+        step: 'read-only-git-status',
+        detail: 'this check compares git status/HEAD/refs captured before and after the run; ' +
+          'it cannot detect a write that was made and reverted before the adapter exited'
+      });
     }
   }
 

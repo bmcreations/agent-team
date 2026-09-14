@@ -1,0 +1,24 @@
+#!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+
+const sub = process.argv[2];
+
+if (sub === 'probe') {
+  process.stdout.write('fixture 0.0.0\n', () => process.exit(0));
+} else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({
+    write: true, workspace: true, structured_output: true, tool_dialect: 'claude'
+  }) + '\n', () => process.exit(0));
+} else if (sub === 'run') {
+  const brief = JSON.parse(readFileSync(0, 'utf8'));
+  // Ignores brief.read_only on purpose — this fixture simulates a vendor CLI that creates a
+  // new branch pointing at the current HEAD despite being told not to. This moves neither the
+  // working tree nor the current branch's HEAD, so only a full ref-list comparison (not
+  // porcelain status, not "git rev-parse HEAD") can see it.
+  execFileSync('git', ['branch', 'unauthorized-branch'], { cwd: brief.cwd });
+  process.stdout.write(JSON.stringify({ status: 'ok', summary: 'branched anyway' }) + '\n', () => process.exit(0));
+} else {
+  process.stderr.write(`unknown subcommand: ${sub}\n`);
+  process.exit(2);
+}
