@@ -506,6 +506,74 @@ test('an escaped leading \\# in a deny_paths entry denies a file whose name star
     'the escaped entry actually matched a file — it must not be reported as unmatched');
 });
 
+// --- A2-3: the denied directory skeleton must not survive on disk ---
+//
+// rmSync(..., { force: true }) on a denied file removes only the file — the directories
+// that held it are left behind, empty. They are not in the commit (git never tracked an
+// empty directory), but they are on disk where the vendor CLI runs, disclosing the shape
+// of the secret tree (`credentials/prod/`, `credentials/staging/`) even once its contents
+// are gone. Names, not content — real, but small, which is why this is one of the six
+// findings that leak no file content.
+
+function repoWithNestedDeniedTree() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-nested-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  writeFileSync(join(root, 'app.js'), 'ok\n');
+  mkdirSync(join(root, 'credentials', 'prod'), { recursive: true });
+  mkdirSync(join(root, 'credentials', 'staging'), { recursive: true });
+  writeFileSync(join(root, 'credentials', 'prod', 'secret.pem'), 'PROD KEY\n');
+  writeFileSync(join(root, 'credentials', 'staging', 'secret.pem'), 'STAGING KEY\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return root;
+}
+
+test('deleting every file under a denied directory tree also removes the now-empty directories', () => {
+  const root = repoWithNestedDeniedTree();
+  const ws = createWorkspace(root, 'qa', ['credentials/**'], 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'app.js')), true, 'an undenied file must survive');
+  // Not just "credentials/prod/secret.pem is gone" — the directory names themselves,
+  // which deny_paths never explicitly enumerated (prod, staging), must not be left on
+  // disk for the vendor CLI to enumerate.
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'prod')), false,
+    'the now-empty "prod" directory must be removed, not just its file');
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'staging')), false,
+    'the now-empty "staging" directory must be removed, not just its file');
+  assert.equal(existsSync(join(ws.dir, 'credentials')), false,
+    'the now-empty "credentials" directory must be removed too, bottom-up');
+});
+
+function repoWithMixedDeniedAndKeptSiblings() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-mixed-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  writeFileSync(join(root, 'app.js'), 'ok\n');
+  mkdirSync(join(root, 'credentials', 'prod'), { recursive: true });
+  writeFileSync(join(root, 'credentials', 'prod', 'secret.pem'), 'PROD KEY\n');
+  writeFileSync(join(root, 'credentials', 'keep.txt'), 'not a secret\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return root;
+}
+
+test('a directory that still holds an undenied sibling file is left in place, only the emptied one goes', () => {
+  const root = repoWithMixedDeniedAndKeptSiblings();
+  const ws = createWorkspace(root, 'qa', ['credentials/prod/**'], 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'prod')), false,
+    'the now-empty "prod" directory must be removed');
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'keep.txt')), true,
+    'an undenied sibling file must survive');
+  assert.equal(existsSync(join(ws.dir, 'credentials')), true,
+    '"credentials" is not empty (keep.txt is still there) — it must not be removed');
+});
+
 // --- C3: clone args, white-box — dropping file:// or --depth 1 is invisible black-box ---
 
 test('cloneArgs clones over file:// with a shallow depth', () => {
@@ -912,9 +980,12 @@ test('no denied file survives a repo whose check-ignore output exceeds the 1 MiB
   const leaked = tracked.filter((p) => p.startsWith(denyDir));
   assert.deepEqual(leaked, [],
     `${leaked.length} of ${fileCount} denied files were still tracked in the workspace commit`);
-  // deniedFiles removes files, not directories, so the (now empty) denied directory itself
-  // survives on disk — it leaks only a name deny_paths already spelled out. What must not
-  // survive is content: no file under it may be left for the CLI to read.
+  // Denied-file removal also removes any directory the deletion leaves empty (see
+  // removeEmptyAncestors in workspace.js), so the (now empty) denied directory itself should
+  // be gone from disk too, not just its content — the `if (existsSync(...))` guard below
+  // means this walk simply finds nothing to do when that holds. What this assertion actually
+  // pins is narrower and holds either way: no file under the denied directory may be left for
+  // the CLI to read.
   const leftOnDisk = [];
   const walkFiles = (d) => {
     for (const entry of readdirSync(d, { withFileTypes: true })) {

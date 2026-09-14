@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, readFileSync
+  mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, readFileSync,
+  readdirSync, rmdirSync
 } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { tmpdir, homedir } from 'node:os';
@@ -289,6 +290,44 @@ function joinBuffer(dir, rel) {
   return Buffer.concat([Buffer.from(dir), Buffer.from('/'), relBuf]);
 }
 
+// Byte-exact parent of a relative path, mirroring node:path's dirname without ever routing
+// the (possibly not-valid-UTF-8) bytes through a string codec — same reasoning as
+// joinBuffer above. Returns null once `rel` has no more "/" in it, i.e. it names something
+// directly under the workspace root: there is no denied-tree directory left to remove.
+function bufferParentRel(rel) {
+  const idx = rel.lastIndexOf(0x2f); // '/'
+  return idx === -1 ? null : rel.subarray(0, idx);
+}
+
+// Removing a denied FILE (see the rmSync loop in createWorkspace) leaves the directories
+// that held it behind — git never tracks an empty directory, so they are absent from the
+// commit, but they are still on disk, right where the vendor CLI runs, disclosing the shape
+// of the secret tree (`credentials/prod/`, `credentials/staging/`) even once its content is
+// gone. Walk from the deleted file's parent upward, removing each directory that the
+// deletion left empty, and stop climbing the moment a directory still has something in it
+// — nothing above an occupied directory could have been emptied by this file's removal.
+//
+// Because git does not track empty directories, a fresh orphan-branch working tree can only
+// ever contain a directory that holds at least one (denied or undenied) tracked file. So an
+// empty directory found here, after the denied files above it are gone, was made empty by
+// that removal — never a directory that was "supposed" to stay empty for some other reason.
+function removeEmptyAncestors(dir, deniedRel) {
+  let relDir = bufferParentRel(deniedRel);
+  while (relDir !== null) {
+    const absDir = joinBuffer(dir, relDir);
+    try {
+      if (readdirSync(absDir).length > 0) break; // still holds something — stop climbing
+      rmdirSync(absDir);
+    } catch (err) {
+      // ENOENT: another denied file under the same directory already removed it on its
+      // way up. Anything else is a real filesystem error and must propagate.
+      if (err.code === 'ENOENT') break;
+      throw err;
+    }
+    relDir = bufferParentRel(relDir);
+  }
+}
+
 // Exported and unit-tested white-box, same reasoning as cloneArgs below: the
 // core.ignorecase divergence this function guards against cannot be forced on this
 // machine without a second, deliberately-differently-cased filesystem (see the test).
@@ -551,6 +590,9 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
       // would force a lossy decode right back in here, so the path is built by
       // concatenating Buffers instead. rmSync accepts a Buffer path directly.
       rmSync(joinBuffer(dir, rel), { force: true });
+      // The file is gone; the directories that held it are not, until this removes the
+      // ones the deletion left empty (see removeEmptyAncestors above).
+      removeEmptyAncestors(dir, rel);
     }
     // A config's deny_paths commonly outlives the specific repo it's used on (the same
     // config is reused across projects); an entry matching nothing here is expected, not
