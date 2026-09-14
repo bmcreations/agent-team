@@ -49,6 +49,74 @@ function cloneIgnoreCase(dir) {
   return value === 'false' ? 'false' : 'true';
 }
 
+// Splits a Buffer on NUL bytes, mirroring `string.split('\0')` but without ever decoding
+// through a text codec first. A NUL byte cannot occur inside a POSIX filename, so slicing
+// on it is exact for -v -z's "<source>\0<linenum>\0<pattern>\0<pathname>\0" records
+// regardless of what bytes the surrounding fields hold.
+function splitNulBuffer(buf) {
+  const parts = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0) {
+      parts.push(buf.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) parts.push(buf.subarray(start));
+  return parts;
+}
+
+// Exported and unit-tested white-box: a tracked filename with bytes that are not valid
+// UTF-8 is ordinary on Linux ext4/xfs (filenames there are opaque bytes) but cannot be
+// created on this machine — APFS rejects it outright. Calling this directly with a
+// fabricated Buffer lets the test prove the pathname field survives such bytes untouched,
+// which an end-to-end fixture on this filesystem never could.
+//
+// `raw` must be the check-ignore -v -z output as a Buffer, not a decoded string: decoding
+// first (the previous `matched.stdout.toString()`) uses the lossy default 'utf8' codec,
+// which replaces any invalid byte sequence with U+FFFD before this function ever sees it.
+// A corrupted pathname means the later `rmSync(joinBuffer(dir, rel), { force: true })`
+// targets a path that does not exist; `force: true` swallows the resulting ENOENT, and the
+// real file silently survives into the commit and ships. `source` and `pattern` are decoded as text
+// because they are always git-internal, ASCII-safe strings (a config source path and a
+// deny_paths pattern) — `pathname` is kept as a raw Buffer end to end, because it is the
+// one field that isn't guaranteed to be valid UTF-8, and it's the one used to build a
+// filesystem path afterwards.
+export function parseCheckIgnoreOutput(raw) {
+  const parts = splitNulBuffer(raw);
+  if (parts.length > 0 && parts[parts.length - 1].length === 0) parts.pop();
+
+  const denied = [];
+  const matchedDenyPaths = new Set();
+  for (let i = 0; i + 3 < parts.length; i += 4) {
+    const source = parts[i].toString('utf8');
+    const pattern = parts[i + 2].toString('utf8');
+    const pathname = parts[i + 3]; // raw bytes — see comment above
+    if (source !== EXCLUDE_SOURCE) {
+      // The scratch dir contains nothing but the exclude file written above — there
+      // is no other ignore source it could legitimately report. An unexpected source
+      // means the isolation this function depends on has broken; silently dropping
+      // the match here would reproduce the exact shadowing bug the scratch dir exists
+      // to prevent, one layer down.
+      throw new Error(
+        `deniedFiles: unexpected check-ignore source "${source}" for ` +
+        `"${pathname.toString('utf8')}" in scratch dir — expected only "${EXCLUDE_SOURCE}"`
+      );
+    }
+    denied.push(pathname);
+    matchedDenyPaths.add(pattern);
+  }
+  return { denied, matchedDenyPaths };
+}
+
+// Joins a directory (a plain string this module controls) with a relative path that may
+// hold bytes which are not valid UTF-8, without ever routing that relative path through a
+// string codec. node:path's `join` is string-only, so this concatenates Buffers instead.
+function joinBuffer(dir, rel) {
+  const relBuf = Buffer.isBuffer(rel) ? rel : Buffer.from(rel);
+  return Buffer.concat([Buffer.from(dir), Buffer.from('/'), relBuf]);
+}
+
 // Exported and unit-tested white-box, same reasoning as cloneArgs below: the
 // core.ignorecase divergence this function guards against cannot be forced on this
 // machine without a second, deliberately-differently-cased filesystem (see the test).
@@ -83,31 +151,13 @@ export function deniedFiles(dir, denyPaths) {
         'check-ignore', '--no-index', '-v', '-z', '--stdin'],
       { input: tracked }
     );
-    // exit 1 means nothing matched, which is not an error
-    const raw = matched.stdout.toString();
-    const parts = raw.length === 0 ? [] : raw.split('\0');
-    if (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
-
-    const denied = [];
-    const matchedDenyPaths = new Set();
-    for (let i = 0; i + 3 < parts.length; i += 4) {
-      const source = parts[i];
-      const pattern = parts[i + 2];
-      const pathname = parts[i + 3];
-      if (source !== EXCLUDE_SOURCE) {
-        // The scratch dir contains nothing but the exclude file written above — there
-        // is no other ignore source it could legitimately report. An unexpected source
-        // means the isolation this function depends on has broken; silently dropping
-        // the match here would reproduce the exact shadowing bug the scratch dir exists
-        // to prevent, one layer down.
-        throw new Error(
-          `deniedFiles: unexpected check-ignore source "${source}" for "${pathname}" ` +
-          `in scratch dir — expected only "${EXCLUDE_SOURCE}"`
-        );
-      }
-      denied.push(pathname);
-      matchedDenyPaths.add(pattern);
-    }
+    // exit 1 means nothing matched, which is not an error.
+    //
+    // matched.stdout is already a Buffer (no `encoding` option was passed above) — the bug
+    // this fixes is that it used to be decoded via `.toString()` (implicit utf8) before
+    // being split, which silently mangles a pathname that isn't valid UTF-8. Parsing the
+    // Buffer directly keeps every pathname byte-exact through to the rmSync call below.
+    const { denied, matchedDenyPaths } = parseCheckIgnoreOutput(matched.stdout);
     return { denied, trackedCount, matchedDenyPaths };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -252,7 +302,10 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
       );
     }
     for (const rel of denied) {
-      rmSync(join(dir, rel), { force: true });
+      // `rel` is a raw Buffer (see parseCheckIgnoreOutput) — path.join is string-only and
+      // would force a lossy decode right back in here, so the path is built by
+      // concatenating Buffers instead. rmSync accepts a Buffer path directly.
+      rmSync(joinBuffer(dir, rel), { force: true });
     }
     // A config's deny_paths commonly outlives the specific repo it's used on (the same
     // config is reused across projects); an entry matching nothing here is expected, not

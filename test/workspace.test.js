@@ -5,7 +5,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlink
 import { createHash } from 'node:crypto';
 import { tmpdir, platform } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
-import { createWorkspace, pruneWorkspace, cloneArgs, deniedFiles } from '../src/workspace.js';
+import {
+  createWorkspace, pruneWorkspace, cloneArgs, deniedFiles, parseCheckIgnoreOutput
+} from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
 
@@ -490,7 +492,9 @@ test('deniedFiles arbitrates using the clone\'s core.ignorecase, not tmpdir\'s a
   // arbitration is case-insensitive.
   setClone('true');
   const insensitive = deniedFiles(dir, ['Credentials/']);
-  assert.deepEqual(insensitive.denied, ['credentials/secret.txt']);
+  // `denied` entries are raw Buffers as of R11-3 — decode for comparison here, since
+  // these fixture paths are plain ASCII and round-trip losslessly.
+  assert.deepEqual(insensitive.denied.map((b) => b.toString('utf8')), ['credentials/secret.txt']);
   assert.ok(insensitive.matchedDenyPaths.has('Credentials/'));
 
   setClone('false');
@@ -585,4 +589,86 @@ test('a tracked symlink named for a deny_paths entry is dropped even though the 
   // delete what it points at.
   assert.equal(existsSync(realDir), true, 'the target directory must survive');
   assert.equal(existsSync(join(realDir, 'key.pem')), true, 'the target directory\'s content must survive');
+});
+
+// --- R11-3: check-ignore -v -z output must be parsed as bytes, not decoded as UTF-8 ---
+//
+// `git check-ignore -v -z` emits <source>\0<linenum>\0<pattern>\0<pathname>\0 records. A NUL
+// byte cannot occur inside a filename, so slicing on NUL is exact regardless of what other
+// bytes a pathname holds — but the previous implementation ran the whole buffer through
+// `.toString()` (an implicit, lossy UTF-8 decode) before splitting, which corrupts any
+// pathname containing invalid UTF-8. A corrupted pathname makes the later rmSync target a
+// path that does not exist; with `force: true` the resulting ENOENT is swallowed and the
+// real, still-denied file ships. These tests cover both halves: pathnames that are valid
+// UTF-8 but awkward for naive string handling (round-trip on this filesystem), and a
+// pathname that is not valid UTF-8 at all (cannot be built on APFS, so exercised white-box
+// against the exported parser directly).
+
+function repoWithTrickyFilenames() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-tricky-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  const names = [
+    'line\nbreak.txt',      // embedded newline
+    'quo"te.txt',           // embedded double quote
+    'back\\slash.txt',      // embedded backslash
+    '--leading-dashdash.txt' // leading "--", which looks like an option/separator
+  ];
+  for (const name of names) {
+    writeFileSync(join(root, 'credentials', name), 'PRIVATE KEY\n');
+  }
+  writeFileSync(join(root, 'README.md'), 'keep me\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return { root, names };
+}
+
+test('deniedFiles correctly removes tracked files whose names hold characters that are awkward for naive string parsing', () => {
+  const { root, names } = repoWithTrickyFilenames();
+
+  const ws = createWorkspace(root, 'qa', ['credentials/**'], 'workspace');
+
+  for (const name of names) {
+    assert.equal(existsSync(join(ws.dir, 'credentials', name)), false,
+      `"${name}" must be removed from the workspace's working tree`);
+  }
+  assert.deepEqual(ws.unmatchedDenyPaths, []);
+  const tracked = execFileSync('git', ['-C', ws.dir, 'ls-files'], { encoding: 'utf8' });
+  for (const name of names) {
+    assert.doesNotMatch(tracked, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      `"${name}" must not be tracked in the workspace's commit either`);
+  }
+  assert.equal(existsSync(join(ws.dir, 'README.md')), true, 'an undenied file must survive');
+});
+
+test('parseCheckIgnoreOutput keeps a pathname that is not valid UTF-8 byte-exact, rather than corrupting it via decode', () => {
+  // A tracked filename with invalid-UTF-8 bytes is ordinary on Linux (filenames there are
+  // opaque bytes) but cannot be created on this machine — APFS rejects it outright. This
+  // fabricates the raw check-ignore -v -z record directly to exercise the parser the same
+  // way a real invalid-UTF-8 pathname would, without needing such a filesystem.
+  const source = Buffer.from('.git/info/exclude', 'utf8');
+  const linenum = Buffer.from('1', 'utf8');
+  const pattern = Buffer.from('credentials/**', 'utf8');
+  // 0xFF can never appear in valid UTF-8. Embed it between two ASCII segments so a
+  // corrupting decode (which maps it to the 3-byte replacement character U+FFFD) would
+  // change both the byte content and the byte length of the field.
+  const pathname = Buffer.concat([
+    Buffer.from('credentials/', 'utf8'), Buffer.from([0xff]), Buffer.from('secret.bin', 'utf8')
+  ]);
+  const nul = Buffer.from([0]);
+  const raw = Buffer.concat([
+    source, nul, linenum, nul, pattern, nul, pathname, nul
+  ]);
+
+  const { denied, matchedDenyPaths } = parseCheckIgnoreOutput(raw);
+
+  assert.equal(denied.length, 1);
+  assert.ok(Buffer.isBuffer(denied[0]), 'pathname must be returned as a raw Buffer, not a decoded string');
+  assert.equal(Buffer.compare(denied[0], pathname), 0,
+    'the invalid-UTF-8 pathname must survive byte-for-byte — a lossy decode would replace 0xff with U+FFFD (0xef 0xbf 0xbd), changing both content and length');
+  assert.ok(matchedDenyPaths.has('credentials/**'));
 });
