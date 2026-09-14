@@ -8,7 +8,8 @@ import { createHash } from 'node:crypto';
 import { tmpdir, platform } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import {
-  createWorkspace, pruneWorkspace, cloneArgs, deniedFiles, parseCheckIgnoreOutput, gitFailure
+  createWorkspace, pruneWorkspace, cloneArgs, deniedFiles, parseCheckIgnoreOutput, gitFailure,
+  normalisationAliases, resolveDeniedPaths
 } from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
@@ -892,4 +893,106 @@ test('a git capture that fails for an ordinary reason still reports git\'s own s
   assert.match(err.message, /fatal: not a git repository/,
     'an ordinary git failure must not be flattened into the size message');
   assert.doesNotMatch(err.message, /repository is larger than/i);
+});
+
+// --- A1-3: a path differing only by Unicode normalisation must not ship, and must not be
+// the thing that makes the deny entry look satisfied ---
+//
+// check-ignore matches pathname *bytes*. "crédentials" written NFC (é as U+00E9) and the
+// same visible name written NFD (e + U+0301) are different byte strings, so a deny entry
+// spelled one way does not match a tracked path spelled the other. On its own that at least
+// raises the entry in unmatchedDenyPaths. The dangerous shape is a repo holding *both*
+// spellings — ordinary when contributors are on mixed platforms, since macOS hands NFD to
+// the filesystem and Linux and Windows do not, or when files come out of an archive. Then
+// the NFC sibling satisfies the entry, the entry is booked as matched, unmatchedDenyPaths
+// comes back empty, and the NFD file ships with no signal at all.
+//
+// APFS folds the two spellings to one name on disk, so the second spelling is put into the
+// index through plumbing rather than through the filesystem. That is not a workaround for
+// the test's sake: it is exactly the state a clone from a Linux contributor arrives in, and
+// `git ls-files` — the list deniedFiles arbitrates over — reports the index, byte for byte.
+
+const NFC_DIR = 'crédentials';       // é precomposed
+const NFD_DIR = 'crédentials';      // e + combining acute
+
+function repoWithBothUnicodeSpellings() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-nfd-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  // Without this, git precomposes paths it reads back off this filesystem and the two
+  // spellings collapse before they ever reach the index.
+  git('config', 'core.precomposeunicode', 'false');
+  writeFileSync(join(root, 'app.js'), 'ok\n');
+  git('add', '-A');
+  const blob = execFileSync('git', ['-C', root, 'hash-object', '-w', '--stdin'],
+    { input: 'PRIVATE KEY\n', encoding: 'utf8' }).trim();
+  execFileSync('git', ['-C', root, 'update-index', '--index-info'], {
+    input: `100644 ${blob} 0\t${NFC_DIR}/a.pem\n100644 ${blob} 0\t${NFD_DIR}/b.pem\n`,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  git('commit', '-q', '-m', 'init');
+  return { root, blob };
+}
+
+test('a tracked path that differs from a deny_paths entry only by Unicode normalisation does not ship', () => {
+  const { root, blob } = repoWithBothUnicodeSpellings();
+
+  // Precondition: the fixture really does hold both spellings, or this test proves nothing.
+  const sourceTracked = execFileSync('git', ['-C', root, 'ls-files', '-z'], { encoding: 'buffer' })
+    .toString('utf8').split('\0').filter(Boolean);
+  assert.equal(sourceTracked.length, 3, 'source repo must track app.js plus both spellings');
+  assert.ok(sourceTracked.includes(`${NFC_DIR}/a.pem`) && sourceTracked.includes(`${NFD_DIR}/b.pem`));
+
+  // Only the NFC spelling is named in deny_paths — the NFD sibling is never mentioned.
+  const ws = createWorkspace(root, 'qa', [`${NFC_DIR}/**`], 'workspace');
+
+  const tracked = execFileSync('git', ['-C', ws.dir, 'ls-files', '-z'], { encoding: 'buffer' })
+    .toString('utf8').split('\0').filter(Boolean);
+  assert.deepEqual(tracked, ['app.js'],
+    'neither spelling may survive into the workspace commit — the NFD one is the leak');
+  assert.notEqual(tryGit(ws.dir, 'cat-file', '-e', blob).status, 0,
+    'the secret blob must be gone from the workspace object store, not merely untracked');
+  // The signal was empty before this fix too, which is why the leak was silent: the NFC
+  // sibling booked the entry as matched. It must stay empty for the right reason now.
+  assert.deepEqual(ws.unmatchedDenyPaths, []);
+});
+
+test('normalisationAliases offers both spellings to check-ignore and maps matches back byte-exact', () => {
+  const nul = Buffer.from([0]);
+  const nfcPath = Buffer.from(`${NFC_DIR}/a.pem`, 'utf8');
+  const nfdPath = Buffer.from(`${NFD_DIR}/b.pem`, 'utf8');
+  const plain = Buffer.from('app.js', 'utf8');
+  const tracked = Buffer.concat([plain, nul, nfcPath, nul, nfdPath, nul]);
+
+  const { stdin, byPathname } = normalisationAliases(tracked);
+  const offered = stdin.toString('utf8').split('\0').filter(Boolean);
+
+  // app.js and the NFC path are already their own NFC form, so they are offered once each.
+  // The NFD path is offered twice: its own bytes, plus the NFC spelling the deny pattern is
+  // written in. Offering the alias is what lets `crédentials/**` match it at all.
+  assert.deepEqual(offered, [
+    'app.js', `${NFC_DIR}/a.pem`, `${NFD_DIR}/b.pem`, `${NFC_DIR}/b.pem`
+  ]);
+
+  // A hit on the alias must resolve to the tracked path's ORIGINAL bytes — the alias is a
+  // matching aid, never something rmSync is pointed at.
+  const aliasHit = Buffer.from(`${NFC_DIR}/b.pem`, 'utf8');
+  const resolved = resolveDeniedPaths([aliasHit], byPathname);
+  assert.equal(resolved.length, 1);
+  assert.equal(Buffer.compare(resolved[0], nfdPath), 0,
+    'the NFC alias must resolve back to the NFD bytes actually on disk');
+
+  // A hit on a path that was never aliased passes straight through, unchanged.
+  assert.equal(Buffer.compare(resolveDeniedPaths([plain], byPathname)[0], plain), 0);
+
+  // Reported under both its own spelling and an alias, a path is still listed once.
+  assert.equal(resolveDeniedPaths([nfdPath, aliasHit], byPathname).length, 1);
+
+  // A repo with no normalisation variance offers exactly the tracked list and nothing more,
+  // so this is a no-op everywhere it is not needed.
+  const plainOnly = normalisationAliases(Buffer.concat([plain, nul]));
+  assert.equal(Buffer.compare(plainOnly.stdin, Buffer.concat([plain, nul])), 0);
 });

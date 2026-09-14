@@ -209,6 +209,73 @@ export function parseCheckIgnoreOutput(raw) {
   return { denied, matchedDenyPaths };
 }
 
+// check-ignore matches pathname *bytes*, so a deny entry written NFC ("é" as U+00E9) does not
+// match a tracked path spelled NFD ("e" + U+0301). They are the same visible name and
+// different byte strings. On its own that at least surfaces the entry in unmatchedDenyPaths.
+//
+// The shape with no signal at all is a repo holding *both* spellings of the same visible
+// directory — ordinary when contributors are on mixed platforms (macOS hands NFD to the
+// filesystem, Linux and Windows do not) or when files come out of an archive. The NFC sibling
+// satisfies the deny entry, so the entry is booked as matched, unmatchedDenyPaths comes back
+// empty, and the NFD file ships in silence.
+//
+// The fold has to happen on what check-ignore *arbitrates over*, not on the answers it gives
+// back. deny_paths entries are gitignore patterns, so the leaked file usually shares no
+// basename with the denied one — `crédentials/**` denies `crédentials/a.pem` and leaves
+// `crédentials/b.pem` (NFD) behind, and comparing those two paths' NFC forms to each other
+// never connects them. Offering check-ignore the NFC spelling as well lets the pattern itself
+// do the matching, which is the whole reason deny_paths goes through git's ignore engine
+// instead of reimplementing globs.
+//
+// So each tracked path is offered under its own bytes and, when it differs, under its NFC
+// form as well. byPathname maps every spelling check-ignore might report back to the real
+// tracked path(s) it stands for, so a match on an alias deletes the file that actually exists,
+// byte-exact — the alias itself is never treated as a path. This is purely additive: nothing
+// that was denied before stops being denied, and the extra hits go in the over-deletion
+// direction the rest of this file takes (see cloneIgnoreCase).
+//
+// One consequence worth naming: a pathname that is not valid UTF-8 decodes to U+FFFD, so two
+// such names can share an alias and a denied one can sweep in its neighbour. That deletes one
+// file too many, which is the safe side of this boundary.
+export function normalisationAliases(trackedRaw) {
+  const nul = Buffer.from([0]);
+  const lines = [];
+  const byPathname = new Map();
+  const add = (key, path) => {
+    const existing = byPathname.get(key);
+    if (!existing) byPathname.set(key, [path]);
+    else if (!existing.some((p) => Buffer.compare(p, path) === 0)) existing.push(path);
+  };
+  for (const path of splitNulBuffer(trackedRaw)) {
+    if (path.length === 0) continue;
+    lines.push(path, nul);
+    add(path.toString('hex'), path);
+    const nfc = Buffer.from(path.toString('utf8').normalize('NFC'), 'utf8');
+    if (Buffer.compare(nfc, path) === 0) continue;
+    lines.push(nfc, nul);
+    add(nfc.toString('hex'), path);
+  }
+  return { stdin: Buffer.concat(lines), byPathname };
+}
+
+// Maps check-ignore's reported pathnames back onto real tracked paths, byte-exact. A pathname
+// with no entry in byPathname is passed through unchanged so this stays a no-op for every
+// caller and every repo where no alias was ever offered. Deduplicated, because a path can be
+// reported under both its own spelling and an alias.
+export function resolveDeniedPaths(denied, byPathname) {
+  const out = [];
+  const seen = new Set();
+  for (const pathname of denied) {
+    for (const path of byPathname.get(pathname.toString('hex')) ?? [pathname]) {
+      const key = path.toString('hex');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(path);
+    }
+  }
+  return out;
+}
+
 // Joins a directory (a plain string this module controls) with a relative path that may
 // hold bytes which are not valid UTF-8, without ever routing that relative path through a
 // string codec. node:path's `join` is string-only, so this concatenates Buffers instead.
@@ -232,6 +299,8 @@ export function deniedFiles(dir, denyPaths) {
     ? 0
     : tracked.toString().split('\0').filter(Boolean).length;
   if (trackedCount === 0) return { denied: [], trackedCount, matchedDenyPaths: new Set() };
+
+  const { stdin, byPathname } = normalisationAliases(tracked);
 
   const scratch = mkdtempSync(join(tmpdir(), 'agent-team-denyscratch-'));
   try {
@@ -265,9 +334,9 @@ export function deniedFiles(dir, denyPaths) {
         '-c', 'core.excludesFile=/dev/null',
         '-c', `core.ignorecase=${cloneIgnoreCase(dir)}`,
         'check-ignore', '--no-index', '-v', '-z', '--stdin'],
-      { input: tracked, okStatus: [0, 1] });
+      { input: stdin, okStatus: [0, 1] });
     const { denied, matchedDenyPaths } = parseCheckIgnoreOutput(matched);
-    return { denied, trackedCount, matchedDenyPaths };
+    return { denied: resolveDeniedPaths(denied, byPathname), trackedCount, matchedDenyPaths };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
