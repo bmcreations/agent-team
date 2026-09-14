@@ -23,15 +23,29 @@ if (sub === 'run') {
     process.exit(2);
   }
   const scripted = JSON.parse(readFileSync(scriptPath, 'utf8'));
+  let picked = (scripted.by_member && scripted.by_member[brief.member]) || scripted;
 
-  if (scripted.hang) {
+  // A brief carrying "Results from your reports" is a synthesis call — the manager
+  // already delegated once and got its reports' answers back. A script that scripts
+  // "delegating" statically has no way to answer differently on this second call, so
+  // treat it the way a real agent would once it has results in hand: it synthesizes
+  // rather than delegating again.
+  if (
+    picked.status === 'delegating' &&
+    typeof brief.task === 'string' &&
+    brief.task.includes('Results from your reports')
+  ) {
+    picked = { status: 'ok', summary: 'synthesized from delegated results' };
+  }
+
+  if (picked.hang) {
     // never exits; the caller's timeout has to kill the process group. Task 8 exercises this.
     setInterval(() => {}, 1000);
   } else {
-    process.stdout.write(JSON.stringify({ ...scripted, received: brief }) + '\n');
+    process.stdout.write(JSON.stringify({ ...picked, received: brief }) + '\n');
     process.exit(0);
   }
+} else {
+  process.stderr.write(`unknown subcommand: ${sub}\n`);
+  process.exit(2);
 }
-
-process.stderr.write(`unknown subcommand: ${sub}\n`);
-process.exit(2);
