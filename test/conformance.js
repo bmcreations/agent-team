@@ -51,7 +51,7 @@ export async function conformanceReport(execPath, { env = {}, cwd = undefined, r
       charter: null,
       persona: null,
       isolation: 'read-only',
-      deliverable: 'text',
+      deliverable: 'review',
       output_path: null,
       reports_to: null,
       reports,
