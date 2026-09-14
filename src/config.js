@@ -115,8 +115,8 @@ function validateDenyPath(entry, path) {
     const suggestion = `\\${entry}`;
     throw new Error(
       `${path}: "deny_paths" entry ${JSON.stringify(entry)} can never match — a leading "#" ` +
-      `starts a comment under gitignore semantics, so the entry can never match; write ` +
-      `${JSON.stringify(suggestion)} to mean it literally, not ${JSON.stringify(entry)}`
+      `starts a comment under gitignore semantics; write ${JSON.stringify(suggestion)} to mean ` +
+      `it literally, not ${JSON.stringify(entry)}`
     );
   }
   // Not "can never match" — the opposite problem. "!" negation is not implemented here:
