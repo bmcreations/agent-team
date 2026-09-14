@@ -239,6 +239,38 @@ test('delegating with an empty list is a protocol error, not an infinite loop', 
   assert.match(r.summary, /no delegations/);
 });
 
+// delegations comes straight from adapter stdout, which this project's own threat model
+// treats as untrusted — a malformed entry must produce a clear error, not crash reading
+// .to off it.
+test('a null delegation entry produces a clear error, not a raw TypeError', async () => {
+  const { root, script } = project({
+    by_member: { 'eng-lead': { status: 'delegating', delegations: [null] } }
+  });
+  await assert.rejects(() => run(root, script, 'eng-lead'), (err) => {
+    assert.match(err.message, /malformed delegation/);
+    assert.doesNotMatch(err.message, /Cannot read propert/);
+    return true;
+  });
+});
+
+test('a delegation entry with a non-string "to" produces a clear error', async () => {
+  const { root, script } = project({
+    by_member: { 'eng-lead': { status: 'delegating', delegations: [{ to: 42, task: 'x' }] } }
+  });
+  await assert.rejects(() => run(root, script, 'eng-lead'), (err) => {
+    assert.match(err.message, /malformed delegation/);
+    assert.match(err.message, /42/);
+    return true;
+  });
+});
+
+test('a delegation entry with an empty "to" produces a clear error', async () => {
+  const { root, script } = project({
+    by_member: { 'eng-lead': { status: 'delegating', delegations: [{ to: '', task: 'x' }] } }
+  });
+  await assert.rejects(() => run(root, script, 'eng-lead'), /malformed delegation/);
+});
+
 test('max_depth stops a manager from delegating past the limit', async () => {
   const { root, script } = project({
     by_member: {

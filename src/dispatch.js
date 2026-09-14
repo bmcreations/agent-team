@@ -134,6 +134,11 @@ async function runMember(ctx) {
         result = { ...result, status: 'failed', summary: 'answered "delegating" with no delegations' };
         break;
       }
+      // max_depth exhaustion is a budget: it degrades to status: 'failed' like any other
+      // ordinary outcome, because a manager can legitimately run into it during normal use.
+      // The reporting-line check just below is a boundary, not a budget — delegating outside
+      // it is treated as a security violation and stays a throw (see finding 3's CLI
+      // wrapping for why that surfaces as clean JSON instead of a stack trace).
       if (depth >= maxDepth) {
         result = { ...result, status: 'failed', summary: `delegation refused: already at max_depth ${maxDepth}` };
         break;
@@ -141,6 +146,17 @@ async function runMember(ctx) {
 
       const round = [];
       for (const req of requests) {
+        // delegations comes straight off adapter stdout, which this project's threat model
+        // treats as untrusted — guard the shape before trusting req.to, so a malformed
+        // entry (null, or a "to" that isn't a non-empty string) gets a clear error instead
+        // of a raw TypeError reading .to off it.
+        if (req === null || typeof req !== 'object' || Array.isArray(req) ||
+            typeof req.to !== 'string' || req.to === '') {
+          throw new Error(
+            `member "${member}" answered "delegating" with a malformed delegation entry — ` +
+            `"to" must be a non-empty string naming a direct report, got ${JSON.stringify(req)}`
+          );
+        }
         // The reporting line is a hard boundary: a manager may reach its own reports and no one else.
         if (!resolved.reports.includes(req.to)) {
           throw new Error(
