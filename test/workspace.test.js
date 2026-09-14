@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { createWorkspace, pruneWorkspace } from '../src/workspace.js';
+import { createWorkspace, pruneWorkspace, cloneArgs } from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
 
@@ -122,6 +122,7 @@ test('isolation none gives a scratch directory with no repository at all', () =>
   assert.equal(existsSync(join(ws.dir, '.git')), false);
   assert.equal(ws.branch, null);
   assert.equal(ws.kind, 'none');
+  pruneWorkspace(ws); // isolation:'none' workspaces live under os.tmpdir(), not WORKSPACE_ROOT — prune or leak
 });
 
 test('pruning removes the workspace directory', () => {
@@ -234,4 +235,76 @@ test('git submodule update --init cannot recover the submodule content from the 
   spawnSync('git', ['-C', ws.dir, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init'],
     { encoding: 'utf8' });
   assert.equal(existsSync(join(ws.dir, 'vendor', 'sub', 'credentials', 'sub-secret.p8')), false);
+});
+
+// --- C1: deniedFiles must key off the exclude file it wrote, not the repo's own .gitignore ---
+
+function repoWithTrackedGitignore() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  writeFileSync(join(root, '.gitignore'), '*.log\n');
+  writeFileSync(join(root, 'keep-me.log'), 'not a secret, just noisy\n');
+  writeFileSync(join(root, 'credentials', 'signing.p8'), 'PRIVATE KEY\n');
+  // -f: keep-me.log matches the tracked .gitignore's *.log pattern, but we force-add it
+  // anyway — a real project can track a file its own .gitignore would otherwise exclude.
+  git('add', '-A', '-f');
+  git('commit', '-q', '-m', 'init');
+  return root;
+}
+
+test('a tracked .gitignore does not make deniedFiles remove files deny_paths never mentioned', () => {
+  const root = repoWithTrackedGitignore();
+  // deny_paths says nothing about *.log or keep-me.log — only the repo's own tracked
+  // .gitignore matches it. `check-ignore --no-index --stdin` can't tell that apart from
+  // an actual deny_paths hit; -v's per-match source is what makes the distinction.
+  const ws = createWorkspace(root, 'qa', ['credentials/**'], 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'keep-me.log')), true,
+    'a file only matched by a tracked .gitignore must survive — deny_paths never named it');
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'signing.p8')), false,
+    'the actually denied secret must still be removed');
+});
+
+// --- C2: a deny_paths entry matching nothing is reported, not fatal ---
+
+test('deny_paths entries that match no tracked file are returned, not thrown', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', ['credentials/**', 'nope/never/matches/**'], 'workspace');
+  assert.deepEqual(ws.unmatchedDenyPaths, ['nope/never/matches/**']);
+});
+
+test('a deny_paths list that matches everything reports no unmatched entries', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.deepEqual(ws.unmatchedDenyPaths, []);
+});
+
+// --- C3: clone args, white-box — dropping file:// or --depth 1 is invisible black-box ---
+
+test('cloneArgs clones over file:// with a shallow depth', () => {
+  const args = cloneArgs('/some/repo', '/some/dir');
+  // file:// forces the transport codepath: without it, a same-machine clone silently
+  // hardlinks objects (or points objects/info/alternates back at the source repo) and
+  // ignores --depth entirely — the clone would carry the source's full object database.
+  assert.ok(args.includes('file:///some/repo'), args.join(' '));
+  // --depth 1 keeps the clone shallow. Dropping it still produces a working clone, just
+  // one that carries full history — including any commit deny_paths ever meant to hide.
+  const depthIdx = args.indexOf('--depth');
+  assert.notEqual(depthIdx, -1, args.join(' '));
+  assert.equal(args[depthIdx + 1], '1');
+});
+
+// --- C4: git remote remove leaves a dangling refs/remotes/origin/HEAD symref ---
+
+test('a fresh workspace passes git fsck --full cleanly', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  const fsck = spawnSync('git', ['-C', ws.dir, 'fsck', '--full'], { encoding: 'utf8' });
+  assert.equal(fsck.stdout.trim(), '', fsck.stdout);
+  assert.equal(fsck.stderr.trim(), '', fsck.stderr);
+  assert.equal(fsck.status, 0);
 });
