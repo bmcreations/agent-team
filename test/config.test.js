@@ -293,6 +293,28 @@ test('an ordinary skill name still loads', () => {
   assert.equal(cfg.members.a.skill, 'red-team');
 });
 
+test('a member agent that path-traverses is refused, the same as a member name', () => {
+  const root = project({ members: { a: { agent: '../../somewhere/evil' } }, deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /"agent"/);
+    assert.match(err.message, /\.\.\/\.\.\/somewhere\/evil/);
+    return true;
+  });
+});
+
+test('an on_unavailable fallback agent that path-traverses is refused', () => {
+  const root = project({
+    members: { a: { agent: 'claude' } },
+    deny_paths: ['x'],
+    defaults: { on_unavailable: '../../somewhere/evil' }
+  });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /on_unavailable/);
+    assert.match(err.message, /\.\.\/\.\.\/somewhere\/evil/);
+    return true;
+  });
+});
+
 // --- Group C: title, charter, persona, output_path, defaults must be the documented types ---
 
 test('a non-string title is refused', () => {

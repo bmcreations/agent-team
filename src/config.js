@@ -17,9 +17,10 @@ const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/i;
 const MEMBER_NAME_MAX_LENGTH = 64;
 
 // Shared shape check for anything that gets interpolated into a filesystem path the same
-// way a member name does (currently: member names themselves, and `skill`, which
-// dispatch.js joins as skillsDir/<skill>/SKILL.md). One regex, one length cap, one message
-// shape — `subject` supplies the noun phrase so each caller's error reads naturally.
+// way a member name does (currently: member names themselves, `skill`, which dispatch.js
+// joins as skillsDir/<skill>/SKILL.md, and `agent`/`defaults.on_unavailable`, which
+// dispatch.js's adapterPath joins as adapterDir/<agent>). One regex, one length cap, one
+// message shape — `subject` supplies the noun phrase so each caller's error reads naturally.
 function validateNameShape(value, subject, path) {
   if (
     typeof value !== 'string' ||
@@ -80,6 +81,7 @@ function validateFallbackAgent(value, path) {
       `got ${JSON.stringify(value)}`
     );
   }
+  validateNameShape(value, '"defaults.on_unavailable"', path);
 }
 
 function validateBoundedInteger(value, field, minimum, path) {
@@ -152,6 +154,7 @@ export function loadConfig(projectRoot) {
     if (typeof m.agent !== 'string' || m.agent === '') {
       throw new Error(`${path}: member "${name}": "agent" is required`);
     }
+    validateNameShape(m.agent, `member "${name}": "agent"`, path);
     if (m.skill !== undefined && m.skill !== null) {
       validateNameShape(m.skill, `member "${name}": "skill"`, path);
     }
