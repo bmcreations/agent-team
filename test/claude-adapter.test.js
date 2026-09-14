@@ -309,6 +309,45 @@ test('a diff too large to read is reported as unreadable, not as an empty diff',
   assert.equal(res.artifacts.diff, '', 'an unreadable diff must not be silently reported as an empty (no-change) diff');
 });
 
+test('a non-numeric diff maxBuffer override falls back to the default instead of swallowing a real diff', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-badbuffer-'));
+  initGitFixtureRepo(cwd);
+  writeFileSync(join(cwd, 'f.txt'), 'x'.repeat(5000));
+
+  const stubDir = createSuccessClaudeStub();
+  const brief = briefForCwd(cwd);
+  const res = await runAdapter(ADAPTER, 'run', {
+    brief,
+    env: { PATH: `${stubDir}:${process.env.PATH}`, AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER: 'not-a-number' }
+  });
+
+  assert.equal(res.status, 'ok');
+  // The dangerous direction this guards against: Number('not-a-number') is NaN, execFileSync
+  // throws ERR_OUT_OF_RANGE, the catch block does not recognize it, and the genuine diff comes
+  // back silently empty. A bad override must not read as "no diff".
+  assert.ok(res.artifacts.diff.length > 0, 'a bad override must not swallow a real diff');
+  assert.equal(res.artifacts.diff_unreadable, false);
+  assert.equal(res.artifacts.diff_max_buffer_invalid_override, 'not-a-number');
+});
+
+test('a negative diff maxBuffer override falls back to the default instead of swallowing a real diff', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-negbuffer-'));
+  initGitFixtureRepo(cwd);
+  writeFileSync(join(cwd, 'f.txt'), 'x'.repeat(5000));
+
+  const stubDir = createSuccessClaudeStub();
+  const brief = briefForCwd(cwd);
+  const res = await runAdapter(ADAPTER, 'run', {
+    brief,
+    env: { PATH: `${stubDir}:${process.env.PATH}`, AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER: '-1000' }
+  });
+
+  assert.equal(res.status, 'ok');
+  assert.ok(res.artifacts.diff.length > 0, 'a bad override must not swallow a real diff');
+  assert.equal(res.artifacts.diff_unreadable, false);
+  assert.equal(res.artifacts.diff_max_buffer_invalid_override, '-1000');
+});
+
 test('a nonexistent brief.cwd is reported as a specific failure, not "claude exited null"', async () => {
   const brief = { ...briefForCwd(mkdtempSync(join(tmpdir(), 'agent-team-claude-tmpl-'))), cwd: '/no/such/directory/at/all' };
 

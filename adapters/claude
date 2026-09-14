@@ -14,7 +14,30 @@ const DIFF_KEEP_CHARS = 200_000;
 // git diff's own stdout buffer. Node's default (~1 MB) is comfortably smaller than diffs this
 // tool needs to read; overridable only for tests, so a deliberately tiny buffer can exercise
 // the "diff too large to read" path without committing a multi-megabyte fixture.
-const DIFF_MAX_BUFFER = Number(process.env.AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER ?? 20_000_000);
+const DIFF_MAX_BUFFER_DEFAULT = 20_000_000;
+const rawDiffMaxBufferOverride = process.env.AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER;
+
+// Only a finite positive integer is accepted. Anything else (non-numeric, negative, zero,
+// fractional, Infinity) falls back to the default rather than reaching execFileSync: a bad
+// value there throws ERR_OUT_OF_RANGE, which the diff-reading catch block below does not
+// recognize (it only knows ENOBUFS / ERR_CHILD_PROCESS_STDIO_MAXBUFFER), so the throw is
+// swallowed and a real diff silently comes back empty — the dangerous direction, since an
+// unreadable diff must never read the same as "no diff". An operator's typo in this env var
+// should not fail the run, but it must not be invisible either, hence diffMaxBufferInvalidOverride.
+let DIFF_MAX_BUFFER = DIFF_MAX_BUFFER_DEFAULT;
+let diffMaxBufferInvalidOverride = null;
+if (rawDiffMaxBufferOverride !== undefined) {
+  const parsed = Number(rawDiffMaxBufferOverride);
+  if (Number.isInteger(parsed) && parsed > 0) {
+    DIFF_MAX_BUFFER = parsed;
+  } else {
+    diffMaxBufferInvalidOverride = rawDiffMaxBufferOverride;
+    console.warn(
+      `AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER=${JSON.stringify(rawDiffMaxBufferOverride)} is not a ` +
+      `positive integer; falling back to the default of ${DIFF_MAX_BUFFER_DEFAULT} bytes`
+    );
+  }
+}
 
 if (sub === 'probe') {
   const r = spawnSync('claude', ['--version'], { stdio: 'pipe' });
@@ -99,7 +122,8 @@ if (sub === 'probe') {
           diff: diff.slice(0, DIFF_KEEP_CHARS),
           diff_truncated: diff.length > DIFF_KEEP_CHARS,
           diff_full_length: diff.length,
-          diff_unreadable: diffUnreadable
+          diff_unreadable: diffUnreadable,
+          diff_max_buffer_invalid_override: diffMaxBufferInvalidOverride
         },
         log_path: logPath
       }) + '\n', () => process.exit(0));
