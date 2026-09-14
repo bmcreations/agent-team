@@ -1,10 +1,20 @@
 #!/usr/bin/env node
-import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const sub = process.argv[2];
+
+// How much diff text to keep verbatim in the report. Anything past this is truncated, but
+// the truncation is signaled explicitly (diff_truncated / diff_full_length) rather than
+// silently dropped.
+const DIFF_KEEP_CHARS = 200_000;
+
+// git diff's own stdout buffer. Node's default (~1 MB) is comfortably smaller than diffs this
+// tool needs to read; overridable only for tests, so a deliberately tiny buffer can exercise
+// the "diff too large to read" path without committing a multi-megabyte fixture.
+const DIFF_MAX_BUFFER = Number(process.env.AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER ?? 20_000_000);
 
 if (sub === 'probe') {
   const r = spawnSync('claude', ['--version'], { stdio: 'pipe' });
@@ -19,41 +29,81 @@ if (sub === 'probe') {
   const logDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-'));
   const logPath = join(logDir, 'session.log');
 
-  const args = ['-p', brief.task, '--output-format', 'json'];
-  if (brief.model) args.push('--model', brief.model);
-  if (brief.read_only) args.push('--permission-mode', 'plan');
-
-  const r = spawnSync('claude', args, {
-    cwd: brief.cwd, stdio: 'pipe', timeout: (brief.timeout_s ?? 900) * 1000
-  });
-
-  writeFileSync(logPath, (r.stdout ?? '').toString() + (r.stderr ?? '').toString());
-
-  if (r.status !== 0) {
+  if (!existsSync(brief.cwd)) {
+    // Checked up front, before spawning: spawnSync's own ENOENT is reported identically
+    // whether the "claude" binary is missing from PATH or brief.cwd itself does not exist, so
+    // cwd is verified here to keep the two causes apart instead of guessing after the fact.
+    writeFileSync(logPath, '');
     process.stdout.write(JSON.stringify({
-      status: 'failed', summary: `claude exited ${r.status}`, log_path: logPath
+      status: 'failed', summary: `cwd does not exist: ${brief.cwd}`, log_path: logPath
     }) + '\n', () => process.exit(0));
   } else {
-    let summary = '';
-    try { summary = JSON.parse(r.stdout.toString()).result ?? ''; }
-    catch { summary = r.stdout.toString().slice(0, 4000); }
+    const args = ['-p', brief.task, '--output-format', 'json'];
+    if (brief.model) args.push('--model', brief.model);
+    if (brief.read_only) args.push('--permission-mode', 'plan');
 
-    let diff = '';
-    try { diff = execFileSync('git', ['-C', brief.cwd, 'diff', 'HEAD'], { stdio: 'pipe' }).toString(); }
-    catch { /* no repo, no diff */ }
+    const timeoutMs = (brief.timeout_s ?? 900) * 1000;
+    const r = spawnSync('claude', args, { cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs });
 
-    let branch = null;
-    try { branch = execFileSync('git', ['-C', brief.cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
-    catch { /* ignore */ }
+    writeFileSync(logPath, (r.stdout ?? '').toString() + (r.stderr ?? '').toString());
 
-    process.stdout.write(JSON.stringify({
-      status: 'ok',
-      summary,
-      findings: [],
-      checked_sound: [],
-      artifacts: { branch, diff: diff.slice(0, 200_000) },
-      log_path: logPath
-    }) + '\n', () => process.exit(0));
+    if (r.status === null) {
+      // The process never produced a numeric exit code: it either never started or was killed.
+      // brief.cwd is already known to exist (checked above), so an ENOENT here unambiguously
+      // means the "claude" binary itself is missing from PATH.
+      let summary;
+      if (r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGTERM') {
+        summary = `claude timed out after ${timeoutMs}ms`;
+      } else if (r.error?.code === 'ENOENT') {
+        summary = 'claude is not installed or not on PATH';
+      } else {
+        summary = `claude exited abnormally (signal: ${r.signal ?? 'none'}, error: ${r.error?.code ?? 'unknown'})`;
+      }
+      process.stdout.write(JSON.stringify({
+        status: 'failed', summary, log_path: logPath
+      }) + '\n', () => process.exit(0));
+    } else if (r.status !== 0) {
+      process.stdout.write(JSON.stringify({
+        status: 'failed', summary: `claude exited ${r.status}`, log_path: logPath
+      }) + '\n', () => process.exit(0));
+    } else {
+      let summary = '';
+      try { summary = JSON.parse(r.stdout.toString()).result ?? ''; }
+      catch { summary = r.stdout.toString().slice(0, 4000); }
+
+      let diff = '';
+      let diffUnreadable = false;
+      try {
+        diff = execFileSync('git', ['-C', brief.cwd, 'diff', 'HEAD'], {
+          stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER
+        }).toString();
+      } catch (e) {
+        if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          // The diff exists but is too large to capture — distinct from "no diff", which is
+          // the normal outcome when brief.cwd is not a git repo or has no changes.
+          diffUnreadable = true;
+        }
+      }
+
+      let branch = null;
+      try { branch = execFileSync('git', ['-C', brief.cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
+      catch { /* ignore */ }
+
+      process.stdout.write(JSON.stringify({
+        status: 'ok',
+        summary,
+        findings: [],
+        checked_sound: [],
+        artifacts: {
+          branch,
+          diff: diff.slice(0, DIFF_KEEP_CHARS),
+          diff_truncated: diff.length > DIFF_KEEP_CHARS,
+          diff_full_length: diff.length,
+          diff_unreadable: diffUnreadable
+        },
+        log_path: logPath
+      }) + '\n', () => process.exit(0));
+    }
   }
 } else {
   process.stderr.write(`unknown subcommand: ${sub}\n`);

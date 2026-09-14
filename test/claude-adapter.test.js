@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { buildBrief } from '../src/brief.js';
 import { runAdapter } from '../src/adapter.js';
 
@@ -227,4 +227,127 @@ test('a run payload past the 64 KB pipe buffer survives intact through the real 
   assert.ok(elapsed < 5000, `must not have reached the real claude binary (took ${elapsed}ms)`);
   assert.equal(res.status, 'ok');
   assert.equal(res.summary.length, RESULT_LENGTH);
+});
+
+function initGitFixtureRepo(dir) {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 't@e.st'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: dir });
+  writeFileSync(join(dir, 'f.txt'), 'original\n');
+  execFileSync('git', ['add', '.'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: dir });
+}
+
+// A stub that always succeeds and carries no bookkeeping requirement (unlike createClaudeStub,
+// it needs no CLAUDE_STUB_RECORD env var) — for tests that only care about the adapter's
+// post-run diff handling, not argv or cwd captured from the stub itself.
+function createSuccessClaudeStub() {
+  const stubDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-ok-stub-'));
+  const stubPath = join(stubDir, 'claude');
+  writeFileSync(stubPath, [
+    '#!/usr/bin/env node',
+    "process.stdout.write(JSON.stringify({ result: 'ok' }) + '\\n');",
+    ''
+  ].join('\n'));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+function briefForCwd(cwd) {
+  const resolved = {
+    member: 'implementer',
+    title: 'Implementer',
+    agent: 'claude',
+    model: null,
+    skill: null,
+    charter: null,
+    persona: null,
+    isolation: 'workspace',
+    deliverable: 'diff',
+    output_path: null,
+    reports_to: null,
+    reports: [],
+    warning: null
+  };
+  return buildBrief({ resolved, task: 'x', cwd, denyPaths: ['**/.env*'] });
+}
+
+test('a diff past the display cap is truncated with an explicit signal, not silently', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-bigdiff-'));
+  initGitFixtureRepo(cwd);
+  // Comfortably past the adapter's 200,000-char display cap.
+  writeFileSync(join(cwd, 'f.txt'), 'x'.repeat(500_000));
+
+  const stubDir = createSuccessClaudeStub();
+  const brief = briefForCwd(cwd);
+  const res = await runAdapter(ADAPTER, 'run', { brief, env: { PATH: `${stubDir}:${process.env.PATH}` } });
+
+  assert.equal(res.status, 'ok');
+  assert.equal(res.artifacts.diff.length, 200_000);
+  assert.equal(res.artifacts.diff_truncated, true);
+  assert.ok(res.artifacts.diff_full_length > 200_000, `expected full_length > 200000, got ${res.artifacts.diff_full_length}`);
+  assert.equal(res.artifacts.diff_unreadable, false);
+});
+
+test('a diff too large to read is reported as unreadable, not as an empty diff', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-unreadable-'));
+  initGitFixtureRepo(cwd);
+  writeFileSync(join(cwd, 'f.txt'), 'x'.repeat(50_000));
+
+  const stubDir = createSuccessClaudeStub();
+  const brief = briefForCwd(cwd);
+  // Force the diff-reading buffer well under the diff's real size, without needing a
+  // multi-megabyte fixture to exceed the adapter's production default.
+  const res = await runAdapter(ADAPTER, 'run', {
+    brief,
+    env: { PATH: `${stubDir}:${process.env.PATH}`, AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER: '1000' }
+  });
+
+  assert.equal(res.status, 'ok');
+  assert.equal(res.artifacts.diff_unreadable, true);
+  assert.equal(res.artifacts.diff, '', 'an unreadable diff must not be silently reported as an empty (no-change) diff');
+});
+
+test('a nonexistent brief.cwd is reported as a specific failure, not "claude exited null"', async () => {
+  const brief = { ...briefForCwd(mkdtempSync(join(tmpdir(), 'agent-team-claude-tmpl-'))), cwd: '/no/such/directory/at/all' };
+
+  const res = await runAdapter(ADAPTER, 'run', { brief, env: {} });
+
+  assert.equal(res.status, 'failed');
+  assert.match(res.summary, /cwd does not exist/);
+});
+
+test('a missing claude binary is reported distinctly from a nonexistent cwd', async () => {
+  // PATH restricted to node's own directory: this adapter script (invoked via its #!/usr/bin/env
+  // node shebang) still resolves, but "claude" resolves to nothing, while brief.cwd is real.
+  const nodeOnlyPath = dirname(process.execPath);
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-realcwd-'));
+  const brief = briefForCwd(cwd);
+
+  const res = await runAdapter(ADAPTER, 'run', { brief, env: { PATH: nodeOnlyPath } });
+
+  assert.equal(res.status, 'failed');
+  assert.match(res.summary, /not installed or not on PATH/);
+});
+
+test('a hung claude is reported as a timeout, distinctly from a missing binary or bad cwd', async () => {
+  const stubDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-hang-'));
+  const stubPath = join(stubDir, 'claude');
+  writeFileSync(stubPath, [
+    '#!/usr/bin/env node',
+    'setInterval(() => {}, 1000);',
+    ''
+  ].join('\n'));
+  chmodSync(stubPath, 0o755);
+
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-timeoutcwd-'));
+  const brief = { ...briefForCwd(cwd), timeout_s: 0.2 };
+
+  const res = await runAdapter(ADAPTER, 'run', {
+    brief, env: { PATH: `${stubDir}:${process.env.PATH}` }, timeoutMs: 10_000
+  });
+
+  assert.equal(res.status, 'failed');
+  assert.match(res.summary, /timed out/);
 });
