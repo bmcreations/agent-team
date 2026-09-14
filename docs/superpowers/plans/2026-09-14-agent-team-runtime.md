@@ -293,6 +293,13 @@ test('isolation defaults to read-only when unset', () => {
   assert.equal(resolveRole(cfg, 'researcher', { probe: all }).isolation, 'read-only');
 });
 
+test('model and skill default to null when the role omits them', () => {
+  const cfg = { ...CONFIG, roles: { researcher: { agent: 'claude' } } };
+  const r = resolveRole(cfg, 'researcher', { probe: all });
+  assert.equal(r.model, null);
+  assert.equal(r.skill, null);
+});
+
 test('distinct_from stops a self-review instead of falling back', () => {
   assert.throws(
     () => resolveRole(CONFIG, 'red-team', {
@@ -383,7 +390,7 @@ export function resolveRole(config, roleName, { probe, assignments = {} } = {}) 
 - [ ] **Step 4: Run the tests and watch them pass**
 
 Run: `npm test`
-Expected: PASS, 8 new tests
+Expected: PASS, 9 new tests
 
 - [ ] **Step 5: Commit**
 
@@ -423,6 +430,7 @@ function repoWithSecrets() {
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   git('config', 'user.email', 'test@example.com');
   git('config', 'user.name', 'Test');
+  git('config', 'commit.gpgsign', 'false');   // global commit.gpgsign=true would break the fixture
   mkdirSync(join(root, 'src'), { recursive: true });
   mkdirSync(join(root, 'credentials'), { recursive: true });
   writeFileSync(join(root, 'src', 'app.js'), 'export const ok = 1;\n');
@@ -1029,6 +1037,7 @@ function project(scripted) {
   const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
   git('config', 'user.email', 't@e.com');
   git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');   // global commit.gpgsign=true would break the fixture
   mkdirSync(join(root, '.claude'), { recursive: true });
   mkdirSync(join(root, 'credentials'), { recursive: true });
   writeFileSync(join(root, 'app.js'), 'ok\n');

@@ -40,6 +40,13 @@ test('isolation defaults to read-only when unset', () => {
   assert.equal(resolveRole(cfg, 'researcher', { probe: all }).isolation, 'read-only');
 });
 
+test('model and skill default to null when the role omits them', () => {
+  const cfg = { ...CONFIG, roles: { researcher: { agent: 'claude' } } };
+  const r = resolveRole(cfg, 'researcher', { probe: all });
+  assert.equal(r.model, null);
+  assert.equal(r.skill, null);
+});
+
 test('distinct_from stops a self-review instead of falling back', () => {
   assert.throws(
     () => resolveRole(CONFIG, 'red-team', {
