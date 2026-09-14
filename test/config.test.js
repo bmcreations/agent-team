@@ -416,3 +416,119 @@ test('valid max_depth and max_delegations still load', () => {
   assert.equal(cfg.defaults.max_depth, 5);
   assert.equal(cfg.defaults.max_delegations, 50);
 });
+
+// --- A2: reports_to accepts a single-element array and coerces it to an object key ---
+
+test('an array reports_to is refused, not silently coerced to a string key', () => {
+  const root = project({
+    members: { boss: { agent: 'claude' }, worker: { agent: 'claude', reports_to: ['boss'] } },
+    deny_paths: ['x']
+  });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /"reports_to"/);
+    assert.match(err.message, /worker/);
+    return true;
+  });
+});
+
+test('a numeric reports_to is refused by the explicit type check, not by accident', () => {
+  const root = project({
+    members: { worker: { agent: 'claude', reports_to: 7 } },
+    deny_paths: ['x']
+  });
+  assert.throws(() => loadConfig(root), /"reports_to"/);
+});
+
+test('an ordinary string reports_to still loads', () => {
+  const cfg = loadConfig(project(OK));
+  assert.equal(cfg.members['eng-lead'].reports_to, 'coo');
+});
+
+// --- A3: model is handed to the vendor CLI verbatim via spawnSync, which stringifies ---
+
+test('an object model is refused before it reaches the vendor CLI', () => {
+  const root = memberProject('a', { model: { size: 'big' } });
+  assert.throws(() => loadConfig(root), /"model"/);
+});
+
+test('an array model is refused', () => {
+  const root = memberProject('a', { model: ['x', 'y'] });
+  assert.throws(() => loadConfig(root), /"model"/);
+});
+
+test('a numeric model is refused', () => {
+  const root = memberProject('a', { model: 7 });
+  assert.throws(() => loadConfig(root), /"model"/);
+});
+
+test('an empty-string model is refused', () => {
+  const root = memberProject('a', { model: '' });
+  assert.throws(() => loadConfig(root), /"model"/);
+});
+
+test('an ordinary string model still loads', () => {
+  const root = memberProject('a', { model: 'claude-opus-4' });
+  const cfg = loadConfig(root);
+  assert.equal(cfg.members.a.model, 'claude-opus-4');
+});
+
+// --- B1: distinct_from of any non-array type threw a raw, unhelpful TypeError ---
+
+test('a string distinct_from is refused, and the message suggests the array form', () => {
+  const root = project({
+    members: { a: { agent: 'claude' }, b: { agent: 'claude', distinct_from: 'a' } },
+    deny_paths: ['x']
+  });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /"distinct_from"/);
+    assert.match(err.message, /\["a"\]/);
+    return true;
+  });
+});
+
+test('a numeric distinct_from is refused', () => {
+  const root = project({
+    members: { a: { agent: 'claude' }, b: { agent: 'claude', distinct_from: 3 } },
+    deny_paths: ['x']
+  });
+  assert.throws(() => loadConfig(root), /"distinct_from"/);
+});
+
+test('an object distinct_from is refused', () => {
+  const root = project({
+    members: { a: { agent: 'claude' }, b: { agent: 'claude', distinct_from: {} } },
+    deny_paths: ['x']
+  });
+  assert.throws(() => loadConfig(root), /"distinct_from"/);
+});
+
+test('a distinct_from entry naming no configured member is refused, not silently accepted', () => {
+  // A typo'd name here silently disables the self-review guard distinct_from exists to
+  // enforce, so it must be a load-time error, not a no-op.
+  const root = project({
+    members: { a: { agent: 'claude' }, b: { agent: 'claude', distinct_from: ['ghost'] } },
+    deny_paths: ['x']
+  });
+  assert.throws(() => loadConfig(root), (err) => {
+    assert.match(err.message, /"distinct_from"/);
+    assert.match(err.message, /ghost/);
+    return true;
+  });
+});
+
+test('a non-string entry inside a distinct_from array is refused', () => {
+  const root = project({
+    members: { a: { agent: 'claude' }, b: { agent: 'claude', distinct_from: [3] } },
+    deny_paths: ['x']
+  });
+  assert.throws(() => loadConfig(root), /"distinct_from"/);
+});
+
+test('a distinct_from array naming a real member still loads', () => {
+  const root = project({
+    members: { a: { agent: 'claude' }, b: { agent: 'claude', distinct_from: ['a'] } },
+    deny_paths: ['x']
+  });
+  const cfg = loadConfig(root);
+  assert.deepEqual(cfg.members.b.distinct_from, ['a']);
+});

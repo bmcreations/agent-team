@@ -124,6 +124,8 @@ export function loadConfig(projectRoot) {
     }
   }
 
+  const memberNames = new Set(Object.keys(raw.members));
+
   const members = {};
   for (const [name, m] of Object.entries(raw.members)) {
     validateMemberName(name, path);
@@ -152,6 +154,60 @@ export function loadConfig(projectRoot) {
     }
     if (m.output_path !== undefined && m.output_path !== null) {
       validateOutputPath(m.output_path, name, path);
+    }
+    // src/org.js reads reports_to and uses it as an object key, so a single-element array
+    // like ["boss"] stringifies to "boss" and resolves — the chart builds "correctly" but
+    // parentOf/resolved.reports_to end up holding the array, not the string, and anything
+    // that later compares reports_to === 'boss' is silently wrong.
+    if (m.reports_to !== undefined && m.reports_to !== null) {
+      if (typeof m.reports_to !== 'string' || m.reports_to === '') {
+        throw new Error(
+          `${path}: member "${name}": "reports_to" must be a string naming another member — ` +
+          `got ${JSON.stringify(m.reports_to)}`
+        );
+      }
+    }
+    // model is handed to the vendor CLI's spawnSync verbatim (see adapters/codex,
+    // adapters/grok: `if (brief.model) args.push('-m', brief.model)`), which stringifies
+    // whatever it's given — an object arg becomes the literal argument "[object Object]".
+    // That spends a real API call asking the vendor for a model by that name instead of
+    // failing here, for free, before anything is spawned.
+    if (m.model !== undefined && m.model !== null) {
+      if (typeof m.model !== 'string' || m.model === '') {
+        throw new Error(
+          `${path}: member "${name}": "model" must be a non-empty string — got ${JSON.stringify(m.model)}`
+        );
+      }
+    }
+    // src/resolve.js does `(member.distinct_from ?? []).filter(...)`, which throws a raw
+    // "distinct_from.filter is not a function" for any non-array — including the single
+    // most natural way to write one exclusion, distinct_from: "reviewer". A typo'd member
+    // name inside the array is also refused (not silently accepted): it would otherwise
+    // disable the self-review guard distinct_from exists to enforce.
+    if (m.distinct_from !== undefined && m.distinct_from !== null) {
+      if (!Array.isArray(m.distinct_from)) {
+        const suggestion = typeof m.distinct_from === 'string'
+          ? ` — did you mean ${JSON.stringify([m.distinct_from])}?`
+          : '';
+        throw new Error(
+          `${path}: member "${name}": "distinct_from" must be an array of member names — ` +
+          `got ${JSON.stringify(m.distinct_from)}${suggestion}`
+        );
+      }
+      for (const other of m.distinct_from) {
+        if (typeof other !== 'string' || other === '') {
+          throw new Error(
+            `${path}: member "${name}": "distinct_from" entries must be non-empty strings — ` +
+            `got ${JSON.stringify(other)}`
+          );
+        }
+        if (!memberNames.has(other)) {
+          throw new Error(
+            `${path}: member "${name}": "distinct_from" names "${other}", which is not a ` +
+            `configured member`
+          );
+        }
+      }
     }
     const isolation = m.isolation ?? 'read-only';
     if (!ISOLATIONS.includes(isolation)) {
