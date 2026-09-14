@@ -1,0 +1,145 @@
+#!/usr/bin/env node
+import { readFileSync, mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// Binary resolution: PATH is the contract ("codex" must resolve there for a normal install).
+// The env var is only an escape hatch for a non-PATH install — on this machine codex-cli
+// 0.154.0-alpha.6.2 lives at an internal path inside the Codex app's plugin directory
+// (.plugin-appserver/), which is an implementation detail of that specific build and would
+// break on upgrade (and on any other machine) if hardcoded here.
+const BIN = process.env.AGENT_TEAM_CODEX_BIN || 'codex';
+
+const sub = process.argv[2];
+
+// Observed, verbatim, from `codex exec --help` on codex-cli 0.154.0-alpha.6.2:
+//   exec                          "Run Codex non-interactively"
+//   -C, --cd <DIR>                working root
+//   --json                        "Print events to stdout as JSONL"
+//   --ephemeral                   "Run without persisting session files to disk"
+//   -s, --sandbox <MODE>          possible values: read-only, workspace-write, danger-full-access
+//   -m, --model <MODEL>
+//   -o, --output-last-message <FILE>   "file where the last message from the agent should be written"
+//   --color <always|never|auto>
+//   [PROMPT]                      positional; if absent or `-`, read from stdin
+//   --skip-git-repo-check         "Allow running Codex outside a Git repository"
+//
+// --skip-git-repo-check is NOT in the plan and was found by actually running the binary: by
+// default `codex exec` refuses to run at all ("Not inside a trusted directory and
+// --skip-git-repo-check was not specified") when brief.cwd is not a git repository. A member's
+// workspace is not guaranteed to be a git repo (the conformance suite's own throwaway cwd is
+// not one), so this flag is always passed rather than only when needed.
+
+// How much diff text to keep verbatim in the report — same contract as adapters/claude.
+const DIFF_KEEP_CHARS = 200_000;
+const DIFF_MAX_BUFFER = 20_000_000;
+
+if (sub === 'probe') {
+  const r = spawnSync(BIN, ['--version'], { stdio: 'pipe' });
+  if (r.status !== 0) { process.stderr.write('codex not on PATH\n'); process.exit(1); }
+  process.stdout.write(r.stdout.toString().trim() + '\n', () => process.exit(0));
+} else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({
+    // `workspace`, not `worktree` — the plan text predates 9177874, which renamed the key.
+    write: true, workspace: true, structured_output: true, tool_dialect: 'codex'
+  }) + '\n', () => process.exit(0));
+} else if (sub === 'run') {
+  const brief = JSON.parse(readFileSync(0, 'utf8'));
+  const logDir = mkdtempSync(join(tmpdir(), 'agent-team-codex-'));
+  const logPath = join(logDir, 'session.log');
+  const lastMessagePath = join(logDir, 'last-message.txt');
+
+  if (!existsSync(brief.cwd)) {
+    // Checked up front: spawnSync's own ENOENT is byte-identical whether "codex" is missing
+    // from PATH or brief.cwd itself does not exist, so cwd is verified here to keep the two
+    // causes apart instead of guessing after the fact (same disambiguation as adapters/claude).
+    writeFileSync(logPath, '');
+    process.stdout.write(JSON.stringify({
+      status: 'failed', summary: `cwd does not exist: ${brief.cwd}`, log_path: logPath
+    }) + '\n', () => process.exit(0));
+  } else {
+    const args = [
+      'exec', '--json', '--ephemeral', '--color', 'never', '--skip-git-repo-check',
+      '-C', brief.cwd, '-o', lastMessagePath
+    ];
+    if (brief.model) args.push('-m', brief.model);
+    // Pinned on BOTH branches, not just when read_only. Unlike claude (whose default is
+    // already interactive-approval), codex's default sandbox comes from the user's own
+    // config.toml and could be danger-full-access — inheriting that would let a rival CLI
+    // write anywhere on disk regardless of what this brief asked for.
+    args.push('-s', brief.read_only ? 'read-only' : 'workspace-write');
+    args.push(brief.task); // positional prompt LAST, after all flags
+
+    const timeoutMs = (brief.timeout_s ?? 900) * 1000;
+    const r = spawnSync(BIN, args, { cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs });
+
+    writeFileSync(logPath, (r.stdout ?? '').toString() + (r.stderr ?? '').toString());
+
+    if (r.status === null) {
+      // Same ETIMEDOUT-is-the-only-timeout-discriminator logic as adapters/claude (R10/R12):
+      // on Node v26, spawnSync's own `timeout` sets BOTH signal: 'SIGTERM' and
+      // error.code: 'ETIMEDOUT'. An externally-delivered SIGTERM sets signal: 'SIGTERM' with
+      // error: undefined. Branching on the signal would report every external kill as "timed
+      // out after Nms", which is a lie — so branch on error.code === 'ETIMEDOUT' instead.
+      let summary;
+      if (r.error?.code === 'ETIMEDOUT') {
+        summary = `codex timed out after ${timeoutMs}ms`;
+      } else if (r.error?.code === 'ENOENT') {
+        summary = 'codex is not installed or not on PATH (or brief.cwd was removed after being checked)';
+      } else if (r.signal) {
+        summary = `codex was terminated by signal ${r.signal}`;
+      } else {
+        summary = `codex exited abnormally (signal: none, error: ${r.error?.code ?? 'unknown'})`;
+      }
+      process.stdout.write(JSON.stringify({
+        status: 'failed', summary, log_path: logPath
+      }) + '\n', () => process.exit(0));
+    } else if (r.status !== 0) {
+      process.stdout.write(JSON.stringify({
+        status: 'failed', summary: `codex exited ${r.status}`, log_path: logPath
+      }) + '\n', () => process.exit(0));
+    } else {
+      // -o/--output-last-message makes the "which JSONL event carries the final assistant
+      // message" question moot — read the file it wrote instead of parsing the --json stream.
+      // --json is still passed, but only to fill log_path, never to derive the summary.
+      let summary = '';
+      try { summary = readFileSync(lastMessagePath, 'utf8'); }
+      catch { summary = r.stdout.toString().slice(0, 4000); }
+
+      let diff = '';
+      let diffUnreadable = false;
+      try {
+        diff = execFileSync('git', ['-C', brief.cwd, 'diff', 'HEAD'], {
+          stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER
+        }).toString();
+      } catch (e) {
+        if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          diffUnreadable = true;
+        }
+      }
+
+      let branch = null;
+      try { branch = execFileSync('git', ['-C', brief.cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
+      catch { /* ignore */ }
+
+      process.stdout.write(JSON.stringify({
+        status: 'ok',
+        summary,
+        findings: [],
+        checked_sound: [],
+        artifacts: {
+          branch,
+          diff: diff.slice(0, DIFF_KEEP_CHARS),
+          diff_truncated: diff.length > DIFF_KEEP_CHARS,
+          diff_full_length: diff.length,
+          diff_unreadable: diffUnreadable
+        },
+        log_path: logPath
+      }) + '\n', () => process.exit(0));
+    }
+  }
+} else {
+  process.stderr.write(`unknown subcommand: ${sub}\n`);
+  process.exit(2);
+}
