@@ -155,6 +155,71 @@ test('delegating outside your direct reports is refused', async () => {
   await assert.rejects(() => run(root, script, 'eng-lead'), /not a direct report/);
 });
 
+test('a 1-level delegation-boundary violation leaves nothing under the workspace root', async () => {
+  await withWorkspaceRoot(async (wsRoot) => {
+    const { root, script } = project({
+      by_member: {
+        'eng-lead': { status: 'delegating', delegations: [{ to: 'marketer', task: 'x' }] }
+      }
+    });
+    await assert.rejects(() => run(root, script, 'eng-lead'), /not a direct report/);
+    assert.deepEqual(
+      findEntriesMentioning(wsRoot, 'eng-lead'), [],
+      'the manager workspace should be pruned, not stranded, when the boundary throws'
+    );
+  });
+});
+
+test('a 3-level delegation-boundary violation cleans both ancestor workspaces', async () => {
+  const CHAIN = {
+    manager: { agent: 'mock', isolation: 'workspace' },
+    b: { agent: 'mock', reports_to: 'manager', isolation: 'workspace' },
+    outsider: { agent: 'mock', isolation: 'workspace' }
+  };
+  await withWorkspaceRoot(async (wsRoot) => {
+    const { root, script } = project({
+      by_member: {
+        manager: { status: 'delegating', delegations: [{ to: 'b', task: 'x' }] },
+        b: { status: 'delegating', delegations: [{ to: 'outsider', task: 'y' }] }
+      }
+    }, { members: CHAIN });
+    await assert.rejects(() => run(root, script, 'manager'), /not a direct report/);
+    const stranded = [
+      ...findEntriesMentioning(wsRoot, 'manager-'),
+      ...findEntriesMentioning(wsRoot, 'b-')
+    ];
+    assert.deepEqual(
+      stranded, [],
+      'both ancestor workspaces (manager and b) should be pruned as the error propagates'
+    );
+  });
+});
+
+test('the reporting-line error message is unchanged by the pruning fix', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': { status: 'delegating', delegations: [{ to: 'marketer', task: 'x' }] }
+    }
+  });
+  await assert.rejects(
+    () => run(root, script, 'eng-lead'),
+    /member "eng-lead" may not delegate to "marketer" — not a direct report \(reports: implementer, reviewer\)/
+  );
+});
+
+test('a failed result still keeps its workspace even after the pruning fix', async () => {
+  await withWorkspaceRoot(async (wsRoot) => {
+    const { root, script } = project({ status: 'failed', summary: 'exploded' });
+    const r = await run(root, script, 'implementer');
+    assert.equal(r.status, 'failed');
+    assert.equal(existsSync(r.workspace.dir), true);
+    assert.notDeepEqual(
+      findEntriesMentioning(wsRoot, 'implementer-'), [],
+      'a failed result must still leave its workspace on disk for inspection'
+    );
+  });
+});
+
 test('delegating with an empty list is a protocol error, not an infinite loop', async () => {
   const { root, script } = project({
     by_member: { 'eng-lead': { status: 'delegating', delegations: [] } }

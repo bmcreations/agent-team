@@ -64,60 +64,75 @@ async function runMember(ctx) {
   let priorResults = null;
   let result;
 
-  for (;;) {
-    if (budget.runs <= 0) {
-      result = { status: 'failed', summary: `delegation budget exhausted (max_delegations)` };
-      break;
-    }
-    budget.runs -= 1;
-
-    const brief = buildBrief({
-      resolved, task, cwd: workspace.dir, denyPaths: config.deny_paths,
-      skillText, dialectText, timeoutSec: Math.floor(timeoutMs / 1000),
-      depth, maxDepth, priorResults
-    });
-
-    result = await runAdapter(adapterPath(adapterDir, resolved.agent), 'run', {
-      brief, timeoutMs, env, cwd: workspace.dir
-    });
-
-    if (result.status !== 'delegating') break;
-
-    const requests = result.delegations ?? [];
-    if (requests.length === 0) {
-      result = { ...result, status: 'failed', summary: 'answered "delegating" with no delegations' };
-      break;
-    }
-    if (depth >= maxDepth) {
-      result = { ...result, status: 'failed', summary: `delegation refused: already at max_depth ${maxDepth}` };
-      break;
-    }
-
-    const round = [];
-    for (const req of requests) {
-      // The reporting line is a hard boundary: a manager may reach its own reports and no one else.
-      if (!resolved.reports.includes(req.to)) {
-        throw new Error(
-          `member "${member}" may not delegate to "${req.to}" — not a direct report ` +
-          `(reports: ${resolved.reports.join(', ') || 'none'})`
-        );
+  try {
+    for (;;) {
+      if (budget.runs <= 0) {
+        result = { status: 'failed', summary: `delegation budget exhausted (max_delegations)` };
+        break;
       }
-      const sub = await runMember({
-        ...ctx, member: req.to, task: req.task, depth: depth + 1, priorResults: null
+      budget.runs -= 1;
+
+      const brief = buildBrief({
+        resolved, task, cwd: workspace.dir, denyPaths: config.deny_paths,
+        skillText, dialectText, timeoutSec: Math.floor(timeoutMs / 1000),
+        depth, maxDepth, priorResults
       });
-      round.push(sub);
-      delegated.push(sub);
+
+      result = await runAdapter(adapterPath(adapterDir, resolved.agent), 'run', {
+        brief, timeoutMs, env, cwd: workspace.dir
+      });
+
+      if (result.status !== 'delegating') break;
+
+      const requests = result.delegations ?? [];
+      if (requests.length === 0) {
+        result = { ...result, status: 'failed', summary: 'answered "delegating" with no delegations' };
+        break;
+      }
+      if (depth >= maxDepth) {
+        result = { ...result, status: 'failed', summary: `delegation refused: already at max_depth ${maxDepth}` };
+        break;
+      }
+
+      const round = [];
+      for (const req of requests) {
+        // The reporting line is a hard boundary: a manager may reach its own reports and no one else.
+        if (!resolved.reports.includes(req.to)) {
+          throw new Error(
+            `member "${member}" may not delegate to "${req.to}" — not a direct report ` +
+            `(reports: ${resolved.reports.join(', ') || 'none'})`
+          );
+        }
+        const sub = await runMember({
+          ...ctx, member: req.to, task: req.task, depth: depth + 1, priorResults: null
+        });
+        round.push(sub);
+        delegated.push(sub);
+      }
+      priorResults = round.map((r) => ({
+        member: r.member, status: r.status, summary: r.summary ?? null
+      }));
     }
-    priorResults = round.map((r) => ({
-      member: r.member, status: r.status, summary: r.summary ?? null
-    }));
+
+    if (result.status === 'ok') pruneWorkspace(workspace);
+
+    return {
+      ...result,
+      member, agent: resolved.agent, warning: resolved.warning,
+      workspace, depth, delegated
+    };
+  } catch (err) {
+    // A throw here (e.g. a reporting-line violation) means this frame's workspace
+    // holds no work product and nothing can ever reach it again — prune it. This is
+    // NOT the keep-on-failure pattern: a `failed`/`timeout` RESULT returns normally,
+    // above, with `workspace` still attached for a human to inspect. The cleanup runs
+    // in its own try/catch so a failure while pruning can never mask or replace the
+    // original error.
+    try {
+      pruneWorkspace(workspace);
+    } catch {
+      // ignore — the original error is what must propagate
+    }
+    throw err;
   }
-
-  if (result.status === 'ok') pruneWorkspace(workspace);
-
-  return {
-    ...result,
-    member, agent: resolved.agent, warning: resolved.warning,
-    workspace, depth, delegated
-  };
 }
