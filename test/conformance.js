@@ -4,7 +4,7 @@ import { buildBrief } from '../src/brief.js';
 
 const REQUIRED_CAPS = ['write', 'workspace', 'structured_output', 'tool_dialect'];
 
-export async function conformanceReport(execPath, { env = {}, cwd = undefined } = {}) {
+export async function conformanceReport(execPath, { env = {}, cwd = undefined, reports = [] } = {}) {
   const failures = [];
 
   // probe's contract (src/dispatch.js's makeProbe) is exit-code only: a cheap
@@ -42,7 +42,7 @@ export async function conformanceReport(execPath, { env = {}, cwd = undefined } 
       deliverable: 'text',
       output_path: null,
       reports_to: null,
-      reports: [],
+      reports,
       warning: null
     },
     task: 'Reply with a one-sentence summary of what directory you are in. Change nothing.',
@@ -53,14 +53,20 @@ export async function conformanceReport(execPath, { env = {}, cwd = undefined } 
 
   const run = await runAdapter(execPath, 'run', { env, cwd, timeoutMs: 120_000, brief });
 
-  if (!['ok', 'failed', 'timeout'].includes(run.status)) {
-    failures.push({ step: 'run', detail: `status must be ok|failed|timeout, got ${run.status}` });
+  if (!['ok', 'failed', 'timeout', 'delegating'].includes(run.status)) {
+    failures.push({ step: 'run', detail: `status must be ok|failed|timeout|delegating, got ${run.status}` });
   }
   if (run.status === 'ok' && typeof run.summary !== 'string') {
     failures.push({ step: 'run', detail: 'a successful run must carry a string summary' });
   }
+  // A distinct step name — not just wording — so a test can tell this cross-check apart
+  // from the plain status-validity check above without relying on substring matching in
+  // "detail" (both messages legitimately mention "delegating" now that it is a valid status).
   if (brief.can_delegate === false && run.status === 'delegating') {
-    failures.push({ step: 'run', detail: 'answered "delegating" for a brief that forbids delegation' });
+    failures.push({
+      step: 'delegation-guard',
+      detail: 'answered "delegating" for a brief that forbids delegation'
+    });
   }
 
   return { conformant: failures.length === 0, failures, brief };

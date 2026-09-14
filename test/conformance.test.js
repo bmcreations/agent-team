@@ -49,12 +49,32 @@ test('a brief that forbids delegation is reported non-conformant when the adapte
   });
 
   assert.equal(report.conformant, false);
+  // Match the delegation cross-check by its distinct step name, not by a substring of its
+  // message — "delegating" now also legitimately appears in the plain status-validity
+  // failure's message, so a substring match here cannot tell the two apart.
   assert.ok(
-    report.failures.some((f) => /delegating/i.test(f.detail)),
+    report.failures.some((f) => f.step === 'delegation-guard'),
     JSON.stringify(report.failures)
   );
   // The brief really did forbid delegation — otherwise this test proves nothing.
   assert.equal(report.brief.can_delegate, false);
+});
+
+test('a can_delegate brief is reported conformant when the adapter answers delegating', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-delegate-ok-'));
+  const scriptPath = writeMockScript(dir, {
+    status: 'delegating', delegations: [{ to: 'worker', task: 't' }]
+  });
+
+  const report = await conformanceReport(MOCK, {
+    cwd: dir,
+    env: { AGENT_TEAM_MOCK_SCRIPT: scriptPath },
+    reports: ['worker']
+  });
+
+  // The brief really did allow delegation — otherwise this test proves nothing.
+  assert.equal(report.brief.can_delegate, true);
+  assert.equal(report.conformant, true, JSON.stringify(report.failures));
 });
 
 test('a read_only brief leaves the working tree clean', async () => {
