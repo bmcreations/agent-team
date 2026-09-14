@@ -45,3 +45,16 @@ test('only the LAST stdout line is parsed, so chatter is tolerated', async () =>
   const res = await runAdapter(p('test/fixtures/chatty'), 'run', { brief: { task: 't' } });
   assert.equal(res.status, 'ok');
 });
+
+test('a run payload past the 64 KB pipe buffer survives intact through the real mock adapter', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-ad-big-'));
+  const script = join(dir, 's.json');
+  const big = 'y'.repeat(100_000);
+  writeFileSync(script, JSON.stringify({ status: 'ok', summary: big, findings: [], checked_sound: [] }));
+  const res = await runAdapter(p('adapters/mock'), 'run', {
+    brief: { role: 'reviewer', task: 't', cwd: dir },
+    env: { AGENT_TEAM_MOCK_SCRIPT: script }
+  });
+  assert.equal(res.status, 'ok');
+  assert.equal(res.summary.length, 100_000);
+});

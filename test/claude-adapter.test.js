@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildBrief } from '../src/brief.js';
+import { runAdapter } from '../src/adapter.js';
 
 const ADAPTER = new URL('../adapters/claude', import.meta.url).pathname;
 
@@ -129,4 +130,59 @@ test('a read_only brief passes --permission-mode plan, and a writable one does n
   assert.equal(wBrief.read_only, false);
   const wRecord = runAdapterAgainstStub(wBrief);
   assert.equal(wRecord.argv.includes('--permission-mode'), false);
+});
+
+// A stub that emits a `result` string past the 64 KB OS pipe buffer, to prove the adapter's
+// stdout write is fully drained before the process exits — not just that small payloads work.
+function createLargeResultClaudeStub(resultLength) {
+  const stubDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-stub-big-'));
+  const stubPath = join(stubDir, 'claude');
+  const big = 'x'.repeat(resultLength);
+  writeFileSync(stubPath, [
+    '#!/usr/bin/env node',
+    // No process.exit() here: this stub stands in for a well-behaved vendor CLI, and must
+    // not itself carry the premature-exit bug under test. Letting Node exit naturally once
+    // the write drains and the event loop is empty is what a correct binary would do.
+    `process.stdout.write(JSON.stringify({ result: ${JSON.stringify(big)} }) + '\\n');`,
+    ''
+  ].join('\n'));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+test('a run payload past the 64 KB pipe buffer survives intact through the real runAdapter', async () => {
+  const RESULT_LENGTH = 100_000; // comfortably over the 64 KB pipe buffer that truncates it
+  const stubDir = createLargeResultClaudeStub(RESULT_LENGTH);
+
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-cwd-big-'));
+  const resolved = {
+    member: 'implementer',
+    title: 'Implementer',
+    agent: 'claude',
+    model: null,
+    skill: null,
+    charter: null,
+    persona: null,
+    isolation: 'workspace',
+    deliverable: 'diff',
+    output_path: null,
+    reports_to: null,
+    reports: [],
+    warning: null
+  };
+  const brief = buildBrief({ resolved, task: 'x', cwd, denyPaths: ['**/.env*'] });
+
+  const started = Date.now();
+  const res = await runAdapter(ADAPTER, 'run', {
+    brief,
+    env: { PATH: `${stubDir}:${process.env.PATH}` }
+  });
+  const elapsed = Date.now() - started;
+
+  // A real, network-bound `claude` invocation would never return this fast — this is the
+  // adapter's own signal (alongside the stub's presence first on PATH) that the stub, not
+  // the real billable binary, answered.
+  assert.ok(elapsed < 5000, `must not have reached the real claude binary (took ${elapsed}ms)`);
+  assert.equal(res.status, 'ok');
+  assert.equal(res.summary.length, RESULT_LENGTH);
 });

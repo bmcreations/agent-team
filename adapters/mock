@@ -4,18 +4,12 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 const sub = process.argv[2];
 
 if (sub === 'probe') {
-  process.stdout.write('mock 0.1.0\n');
-  process.exit(0);
-}
-
-if (sub === 'capabilities') {
+  process.stdout.write('mock 0.1.0\n', () => process.exit(0));
+} else if (sub === 'capabilities') {
   process.stdout.write(JSON.stringify({
     write: true, workspace: true, structured_output: true, tool_dialect: 'claude'
-  }) + '\n');
-  process.exit(0);
-}
-
-if (sub === 'run') {
+  }) + '\n', () => process.exit(0));
+} else if (sub === 'run') {
   const brief = JSON.parse(readFileSync(0, 'utf8'));
   const scriptPath = process.env.AGENT_TEAM_MOCK_SCRIPT;
   if (!scriptPath) {
@@ -45,8 +39,7 @@ if (sub === 'run') {
     // never exits; the caller's timeout has to kill the process group. Task 8 exercises this.
     setInterval(() => {}, 1000);
   } else {
-    process.stdout.write(JSON.stringify({ ...picked, received: brief }) + '\n');
-    process.exit(0);
+    process.stdout.write(JSON.stringify({ ...picked, received: brief }) + '\n', () => process.exit(0));
   }
 } else {
   process.stderr.write(`unknown subcommand: ${sub}\n`);
