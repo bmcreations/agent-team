@@ -104,3 +104,56 @@ test('the grok dialect exists and mentions skills', () => {
 test('an unknown dialect is null rather than an error', () => {
   assert.equal(loadDialect('nonesuch'), null);
 });
+
+test('loadDialect rejects a traversal outside references, naming the value', () => {
+  assert.throws(() => loadDialect('../../etc/passwd'), /\.\.\/\.\.\/etc\/passwd/);
+});
+
+test('loadDialect rejects a name with a parent-directory segment', () => {
+  assert.throws(() => loadDialect('../package'));
+});
+
+test('loadDialect rejects a traversal disguised inside a longer name', () => {
+  assert.throws(() => loadDialect('grok/../../../etc/passwd'));
+});
+
+test('loadDialect rejects an absolute path', () => {
+  assert.throws(() => loadDialect('/etc/passwd'));
+});
+
+test('buildBrief throws when denyPaths is omitted', () => {
+  assert.throws(() => buildBrief({ resolved: IMPL, task: 't', cwd: '/tmp/ws' }));
+});
+
+test('buildBrief throws when denyPaths is an empty array', () => {
+  assert.throws(() => buildBrief({ resolved: IMPL, task: 't', cwd: '/tmp/ws', denyPaths: [] }));
+});
+
+test('buildBrief throws when denyPaths is null', () => {
+  assert.throws(() => buildBrief({ resolved: IMPL, task: 't', cwd: '/tmp/ws', denyPaths: null }));
+});
+
+test('buildBrief throws when denyPaths is not an array', () => {
+  assert.throws(() => buildBrief({
+    resolved: IMPL, task: 't', cwd: '/tmp/ws', denyPaths: '**/.env*'
+  }));
+});
+
+test('a normal denylist still round-trips intact, including globs', () => {
+  const b = buildBrief({ resolved: IMPL, ...base, denyPaths: ['**/.env*', 'secrets/**'] });
+  assert.deepEqual(b.deny_paths, ['**/.env*', 'secrets/**']);
+});
+
+test('an empty priorResults array is treated as absent — no section emitted', () => {
+  const b = buildBrief({ resolved: LEAD, ...base, task: 'SYNTHESISE', priorResults: [] });
+  assert.doesNotMatch(b.task, /Results from your reports/);
+});
+
+test('a populated priorResults array still renders the section with the summary', () => {
+  const b = buildBrief({
+    resolved: LEAD, ...base, task: 'SYNTHESISE',
+    priorResults: [{ member: 'implementer', status: 'ok', summary: 'SUB-RESULT' }]
+  });
+  assert.match(b.task, /Results from your reports/);
+  assert.match(b.task, /SUB-RESULT/);
+});
