@@ -72,8 +72,12 @@ if (sub === 'probe') {
 
     if (r.status === null) {
       // The process never produced a numeric exit code: it either never started or was killed.
-      // brief.cwd is already known to exist (checked above), so an ENOENT here unambiguously
-      // means the "claude" binary itself is missing from PATH.
+      // brief.cwd was confirmed to exist above, but that check and this spawn are not atomic —
+      // it is a time-of-check/time-of-use gap, not a guarantee. If brief.cwd is removed in the
+      // window between the check and the spawn, the ENOENT below comes from the now-missing
+      // cwd, not from a missing "claude" binary, and the two are indistinguishable from here.
+      // That race is exceedingly unlikely in practice, so the common cause is still named, but
+      // without claiming a certainty this check does not have.
       // Empirically verified on this Node version (v26): spawnSync's own `timeout` option sets
       // BOTH error.code === 'ETIMEDOUT' AND signal === 'SIGTERM' when it fires. So ETIMEDOUT
       // alone is sufficient to identify our own timeout, and a bare SIGTERM with no ETIMEDOUT
@@ -84,7 +88,7 @@ if (sub === 'probe') {
       if (r.error?.code === 'ETIMEDOUT') {
         summary = `claude timed out after ${timeoutMs}ms`;
       } else if (r.error?.code === 'ENOENT') {
-        summary = 'claude is not installed or not on PATH';
+        summary = 'claude is not installed or not on PATH (or brief.cwd was removed after being checked)';
       } else if (r.signal) {
         summary = `claude was terminated by signal ${r.signal}`;
       } else {
