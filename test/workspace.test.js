@@ -716,6 +716,28 @@ test('deniedFiles arbitrates using the clone\'s core.ignorecase, not tmpdir\'s a
   assert.ok(!sensitive.matchedDenyPaths.has('Credentials/'));
 });
 
+// cloneIgnoreCase's own fallback branch — the clone's core.ignorecase key absent or holding a
+// value `--type=bool` cannot parse — has never run in this suite: the test above sets the key
+// to 'true' or 'false' explicitly every time, and a plain `git init` on this machine's
+// case-insensitive APFS volume auto-writes `ignorecase = true` into the new repo's own config,
+// so even an "untouched" fixture never actually reaches the absent-key branch. `git
+// config --unset` forces the key genuinely absent to exercise it. This is a coverage gap, not
+// a live defect — the current default ('true', matching this test) is already the safe
+// direction — but the branch deserves a test regardless of which way it currently defaults.
+test('deniedFiles still arbitrates case-insensitively when the clone has no core.ignorecase key at all', () => {
+  const dir = repoWithCasedTrackedFile();
+  execFileSync('git', ['-C', dir, 'config', '--unset', 'core.ignorecase'], { stdio: 'pipe' });
+  assert.throws(
+    () => execFileSync('git', ['-C', dir, 'config', '--type=bool', '--get', 'core.ignorecase'], { stdio: 'pipe' }),
+    /./,
+    'sanity: the key must be genuinely absent, or this test exercises nothing new'
+  );
+
+  const result = deniedFiles(dir, ['Credentials/']);
+  assert.deepEqual(result.denied.map((b) => b.toString('utf8')), ['credentials/secret.txt']);
+  assert.ok(result.matchedDenyPaths.has('Credentials/'));
+});
+
 // --- R11-2: a tracked symlink makes name and content different things, which a
 // name-based deny_paths boundary cannot bound ---
 
