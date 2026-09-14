@@ -14,10 +14,10 @@ test('probe succeeds', () => {
   assert.match(run(['probe']), /mock/);
 });
 
-test('capabilities reports a writable, worktree-capable agent', () => {
+test('capabilities reports a writable, workspace-capable agent', () => {
   const caps = JSON.parse(run(['capabilities']));
   assert.equal(caps.write, true);
-  assert.equal(caps.worktree, true);
+  assert.equal(caps.workspace, true);
   assert.equal(caps.tool_dialect, 'claude');
 });
 

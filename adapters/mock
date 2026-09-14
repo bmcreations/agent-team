@@ -10,7 +10,7 @@ if (sub === 'probe') {
 
 if (sub === 'capabilities') {
   process.stdout.write(JSON.stringify({
-    write: true, worktree: true, structured_output: true, tool_dialect: 'claude'
+    write: true, workspace: true, structured_output: true, tool_dialect: 'claude'
   }) + '\n');
   process.exit(0);
 }
