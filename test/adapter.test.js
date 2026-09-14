@@ -52,6 +52,24 @@ test('a multi-byte character split across two stdout chunks is not corrupted', a
   assert.equal(res.summary, 'a€b');
 });
 
+// Spreading a parsed value that is not a plain object gives nonsense instead of the clean
+// failure the very next branch (non-JSON on stdout) was written to produce: an array
+// becomes {"0":1,"1":2,...}, a string spreads by character index, and a number/null/boolean
+// spread to nothing at all, vanishing into {"stderr":""} with no status and no summary.
+for (const [kind, payload] of Object.entries({
+  array: '[1,2,3]', string: '"hello"', number: '42', null: 'null', boolean: 'true'
+})) {
+  test(`a parsed ${kind} on stdout is a clean failure, not spread into nonsense`, async () => {
+    const res = await runAdapter(p('test/fixtures/echo-payload'), 'run', {
+      brief: { task: 't' },
+      env: { AGENT_TEAM_TEST_PAYLOAD: payload }
+    });
+    assert.equal(res.status, 'failed');
+    assert.match(res.summary, /not an object/);
+    assert.equal(res.raw, payload);
+  });
+}
+
 test('a run payload past the 64 KB pipe buffer survives intact through the real mock adapter', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'at-ad-big-'));
   const script = join(dir, 's.json');

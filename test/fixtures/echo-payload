@@ -1,0 +1,6 @@
+#!/bin/sh
+# Echoes AGENT_TEAM_TEST_PAYLOAD verbatim as the sole stdout line — used to feed runAdapter
+# arbitrary JSON (including a parsed-but-not-an-object value) without a bespoke fixture per
+# payload shape.
+cat > /dev/null
+echo "$AGENT_TEAM_TEST_PAYLOAD"

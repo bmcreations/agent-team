@@ -63,7 +63,20 @@ export function runAdapter(execPath, subcommand, {
       const last = lines[lines.length - 1] ?? '';
       try {
         const parsed = JSON.parse(last);
-        finish({ ...parsed, stderr: err });
+        // "Parsed, but not a plain object" gets the same clean failure as "did not parse" —
+        // otherwise spreading it produces nonsense instead of an error: an array becomes
+        // {"0":1,"1":2,...}, a string spreads by character index, and null/a number/a
+        // boolean spread to nothing, vanishing into {stderr: ''} with no status or summary.
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          finish({
+            status: 'failed',
+            summary: 'adapter emitted JSON that is not an object',
+            raw: last,
+            stderr: err
+          });
+        } else {
+          finish({ ...parsed, stderr: err });
+        }
       } catch {
         finish({
           status: 'failed',
