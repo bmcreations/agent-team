@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+import { readFileSync, mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// Binary resolution: PATH is the contract ("grok" must resolve there for a normal install).
+// The env var is only an escape hatch for a non-PATH install — on this machine grok 1.0.30
+// lives at ~/.grok/bin/grok, put on PATH only by the interactive shell's ~/.bashrc, which a
+// non-interactive spawn does not source.
+const BIN = process.env.AGENT_TEAM_GROK_BIN || 'grok';
+
+const sub = process.argv[2];
+
+// Observed, verbatim, from `grok --help` and the vendored docs at ~/.grok/docs/user-guide/
+// (14-headless-mode.md, 18-sandbox.md) on grok 1.0.30 (04b7ffed98c6):
+//
+//   --output-format <plain|json|streaming-json|streaming-messages-json>
+//   --cwd <CWD>
+//   -m, --model <MODEL>
+//   --always-approve              auto-approve all tool executions (alias --yolo)
+//   --sandbox <PROFILE>           [env: GROK_SANDBOX=]
+//   --disable-web-search
+//   -p, --single <PROMPT>         the flag that actually triggers headless mode
+//
+// THE PLAN'S ASSUMED INVOCATION WAS WRONG TWICE OVER, not once:
+//
+//   1. There is no `-p` bug in the plan's flag name — `-p` is real — but the plan passed the
+//      prompt as a BARE POSITIONAL ("args.push(brief.task)"), not as `-p`'s value. A bare
+//      positional does not trigger headless mode at all: `grok --output-format json --cwd DIR
+//      "prompt"` (no `-p`) tries to open the interactive TUI, which then fails outside a TTY
+//      with "Error: Device not configured (os error 6)" — a useless, unrelated-looking error
+//      that gives no hint the fix is `-p`. Confirmed by running both forms back to back in an
+//      identical throwaway directory: the bare-positional form fails with that TUI error; the
+//      `-p`-flag form reaches the real headless JSON path (confirmed against
+//      `{"type":"error","message":"Not signed in...`", i.e. it got as far as the auth check).
+//      The vendored headless-mode doc says as much directly: "Passing a prompt non-interactively
+//      triggers headless mode. The most common way is the -p flag." This adapter uses `-p`.
+//
+//   2. `--worktree`/`-w` is opt-in, not default (confirmed against --help) — grok only creates a
+//      worktree when `-w`/`--worktree` is passed. Omitting it, as this adapter does, runs grok in
+//      `--cwd` directly. This was the plan's flagged "most likely Phase 1 surprise"; it is a
+//      non-issue.
+
+// How much diff text to keep verbatim in the report — same contract as adapters/claude.
+const DIFF_KEEP_CHARS = 200_000;
+const DIFF_MAX_BUFFER = 20_000_000;
+
+if (sub === 'probe') {
+  const r = spawnSync(BIN, ['--version'], { stdio: 'pipe' });
+  if (r.status !== 0) { process.stderr.write('grok not on PATH\n'); process.exit(1); }
+  process.stdout.write(r.stdout.toString().trim() + '\n', () => process.exit(0));
+} else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({
+    write: true, workspace: true, structured_output: true, tool_dialect: 'grok'
+  }) + '\n', () => process.exit(0));
+} else if (sub === 'run') {
+  const brief = JSON.parse(readFileSync(0, 'utf8'));
+  const logDir = mkdtempSync(join(tmpdir(), 'agent-team-grok-'));
+  const logPath = join(logDir, 'session.log');
+
+  if (!existsSync(brief.cwd)) {
+    // Same ENOENT-is-ambiguous disambiguation as adapters/claude and adapters/codex: check
+    // brief.cwd up front so a missing workspace is never reported as a missing binary.
+    writeFileSync(logPath, '');
+    process.stdout.write(JSON.stringify({
+      status: 'failed', summary: `cwd does not exist: ${brief.cwd}`, log_path: logPath
+    }) + '\n', () => process.exit(0));
+  } else {
+    const args = [
+      '-p', brief.task,
+      '--output-format', 'json',
+      '--cwd', brief.cwd,
+      '--always-approve', // required: without it grok blocks on an interactive tool-approval
+                           // prompt and the adapter hangs until the dispatcher's process-group
+                           // SIGKILL fires — a timeout, reported as a timeout, with no clue why.
+      '--disable-web-search' // deliberate, not a convenience: the filtered clone exists to
+                              // control what repo content reaches a third party, and a CLI that
+                              // can put a snippet into a web search query walks straight around
+                              // that. Not made configurable per member here — report it as a
+                              // finding if that turns out to be wanted.
+    ];
+    if (brief.model) args.push('-m', brief.model);
+    // Sandbox is OFF BY DEFAULT for grok (per 18-sandbox.md) — unlike codex, where the default
+    // is merely unknown, an unpinned grok run here would always be fully unrestricted. Pinned on
+    // BOTH branches for the same reason codex pins `-s` on both branches: an adapter that
+    // silently inherits "no sandbox" gives a rival CLI unrestricted write outside the workspace.
+    //
+    // read_only uses the built-in `read-only` profile (documented in
+    // ~/.grok/docs/user-guide/18-sandbox.md: "read everywhere, write only to ~/.grok/ + temp
+    // dirs", kernel-enforced via Landlock/Seatbelt — not an app-level check that a rogue tool
+    // call could route around). This is the mechanism established for Task 12's Step 1: a
+    // genuine read-only profile exists, so --disallowed-tools/--deny was not needed as a
+    // fallback.
+    //
+    // CAVEAT, found while testing this adapter and not fixable from here: on this machine
+    // (any macOS machine with Docker Desktop installed at its standard location), `--sandbox
+    // read-only` and `--sandbox strict` both fail to apply — grok logs "runtime-socket deny
+    // resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock:
+    // endpoint is a symlink" and refuses to start ("Refusing to start with its protections
+    // missing"). That is grok failing CLOSED, not open — it never runs unprotected — so a
+    // read_only brief here comes back `status: 'failed'` with that message in log_path rather
+    // than a successful review. `--sandbox workspace` (the write branch) does not hit this,
+    // since only read-only/strict apply the runtime-socket deny. This is a real bug in grok's
+    // sandbox layer on a very common macOS setup, not a defect in this adapter's flag choice —
+    // reported here rather than silently worked around, per the brief.
+    args.push('--sandbox', brief.read_only ? 'read-only' : 'workspace');
+
+    const timeoutMs = (brief.timeout_s ?? 900) * 1000;
+    const r = spawnSync(BIN, args, { cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs });
+
+    writeFileSync(logPath, (r.stdout ?? '').toString() + (r.stderr ?? '').toString());
+
+    if (r.status === null) {
+      // Same ETIMEDOUT-is-the-only-timeout-discriminator logic as adapters/claude and
+      // adapters/codex (R10/R12): on Node v26, spawnSync's own `timeout` sets BOTH
+      // signal: 'SIGTERM' and error.code: 'ETIMEDOUT'. An externally-delivered SIGTERM sets
+      // signal: 'SIGTERM' with error: undefined. Branch on error.code === 'ETIMEDOUT', not on
+      // the signal, or every external kill gets reported as "timed out after Nms" — a lie.
+      let summary;
+      if (r.error?.code === 'ETIMEDOUT') {
+        summary = `grok timed out after ${timeoutMs}ms`;
+      } else if (r.error?.code === 'ENOENT') {
+        summary = 'grok is not installed or not on PATH (or brief.cwd was removed after being checked)';
+      } else if (r.signal) {
+        summary = `grok was terminated by signal ${r.signal}`;
+      } else {
+        summary = `grok exited abnormally (signal: none, error: ${r.error?.code ?? 'unknown'})`;
+      }
+      process.stdout.write(JSON.stringify({
+        status: 'failed', summary, log_path: logPath
+      }) + '\n', () => process.exit(0));
+    } else if (r.status !== 0) {
+      process.stdout.write(JSON.stringify({
+        status: 'failed', summary: `grok exited ${r.status}`, log_path: logPath
+      }) + '\n', () => process.exit(0));
+    } else {
+      // --output-format json emits a single object after the response completes. Per the
+      // vendored docs (14-headless-mode.md) the response text is on `.text` (not `.result`,
+      // unlike claude). Parsed defensively: on any parse failure or shape surprise, fall back
+      // to the raw stdout the way adapters/claude does — never to ''.
+      let summary = '';
+      try {
+        const parsed = JSON.parse(r.stdout.toString());
+        summary = typeof parsed.text === 'string' ? parsed.text : r.stdout.toString().slice(0, 4000);
+      } catch { summary = r.stdout.toString().slice(0, 4000); }
+
+      let diff = '';
+      let diffUnreadable = false;
+      try {
+        diff = execFileSync('git', ['-C', brief.cwd, 'diff', 'HEAD'], {
+          stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER
+        }).toString();
+      } catch (e) {
+        if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          diffUnreadable = true;
+        }
+      }
+
+      let branch = null;
+      try { branch = execFileSync('git', ['-C', brief.cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
+      catch { /* ignore */ }
+
+      process.stdout.write(JSON.stringify({
+        status: 'ok',
+        summary,
+        findings: [],
+        checked_sound: [],
+        artifacts: {
+          branch,
+          diff: diff.slice(0, DIFF_KEEP_CHARS),
+          diff_truncated: diff.length > DIFF_KEEP_CHARS,
+          diff_full_length: diff.length,
+          diff_unreadable: diffUnreadable
+        },
+        log_path: logPath
+      }) + '\n', () => process.exit(0));
+    }
+  }
+} else {
+  process.stderr.write(`unknown subcommand: ${sub}\n`);
+  process.exit(2);
+}
