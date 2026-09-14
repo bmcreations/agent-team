@@ -74,13 +74,21 @@ if (sub === 'probe') {
       // The process never produced a numeric exit code: it either never started or was killed.
       // brief.cwd is already known to exist (checked above), so an ENOENT here unambiguously
       // means the "claude" binary itself is missing from PATH.
+      // Empirically verified on this Node version (v26): spawnSync's own `timeout` option sets
+      // BOTH error.code === 'ETIMEDOUT' AND signal === 'SIGTERM' when it fires. So ETIMEDOUT
+      // alone is sufficient to identify our own timeout, and a bare SIGTERM with no ETIMEDOUT
+      // is something else entirely — the child was killed by something outside this process
+      // (an OOM killer, `pkill claude`, a supervisor). Reporting every SIGTERM as "timed out
+      // after Nms" fabricates a duration and a cause that this signal alone does not establish.
       let summary;
-      if (r.error?.code === 'ETIMEDOUT' || r.signal === 'SIGTERM') {
+      if (r.error?.code === 'ETIMEDOUT') {
         summary = `claude timed out after ${timeoutMs}ms`;
       } else if (r.error?.code === 'ENOENT') {
         summary = 'claude is not installed or not on PATH';
+      } else if (r.signal) {
+        summary = `claude was terminated by signal ${r.signal}`;
       } else {
-        summary = `claude exited abnormally (signal: ${r.signal ?? 'none'}, error: ${r.error?.code ?? 'unknown'})`;
+        summary = `claude exited abnormally (signal: none, error: ${r.error?.code ?? 'unknown'})`;
       }
       process.stdout.write(JSON.stringify({
         status: 'failed', summary, log_path: logPath

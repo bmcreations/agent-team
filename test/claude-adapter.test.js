@@ -390,3 +390,32 @@ test('a hung claude is reported as a timeout, distinctly from a missing binary o
   assert.equal(res.status, 'failed');
   assert.match(res.summary, /timed out/);
 });
+
+test('a claude process killed by an external SIGTERM is reported as signal-terminated, not as our timeout', async () => {
+  const stubDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-sigterm-'));
+  const stubPath = join(stubDir, 'claude');
+  writeFileSync(stubPath, [
+    '#!/usr/bin/env node',
+    // Self-inflicted SIGTERM shortly after starting, standing in for a kill from outside this
+    // process (an OOM killer, `pkill claude`, a supervisor) that has nothing to do with the
+    // adapter's own timeout_s and fires long before it would ever elapse.
+    'setTimeout(() => { process.kill(process.pid, "SIGTERM"); }, 300);',
+    'setInterval(() => {}, 1000);',
+    ''
+  ].join('\n'));
+  chmodSync(stubPath, 0o755);
+
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-sigtermcwd-'));
+  // A generous timeout_s that never comes close to elapsing: if this SIGTERM is misreported
+  // as our timeout, the summary will falsely claim the run took the full 300000ms this brief
+  // allows, when the process was actually killed after ~300ms.
+  const brief = { ...briefForCwd(cwd), timeout_s: 300 };
+
+  const res = await runAdapter(ADAPTER, 'run', {
+    brief, env: { PATH: `${stubDir}:${process.env.PATH}` }, timeoutMs: 10_000
+  });
+
+  assert.equal(res.status, 'failed');
+  assert.doesNotMatch(res.summary, /timed out/);
+  assert.match(res.summary, /SIGTERM/);
+});
