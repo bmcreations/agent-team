@@ -32,7 +32,29 @@ const git = (dir, ...args) =>
 // instead of reimplementing pattern matching.
 const EXCLUDE_SOURCE = '.git/info/exclude';
 
-function deniedFiles(dir, denyPaths) {
+// core.ignorecase is auto-detected per-filesystem at `git init`/`git clone` time, and
+// nothing keeps the scratch dir (under os.tmpdir()) on the same filesystem as the
+// workspace clone (under the workspace root, which can be repointed anywhere). When the
+// two disagree, a deny pattern that would match against the clone's files does not match
+// in the scratch dir that arbitrates for it, the hit is silently dropped, and the file
+// ships — the same shadow-drop failure the scratch-dir isolation above exists to prevent,
+// reopened through a different mechanism. The deletion happens on the CLONE's filesystem,
+// so the clone's setting is the one that must govern arbitration; git sets it explicitly
+// at clone time, so reading it back here is exact, not a heuristic.
+function cloneIgnoreCase(dir) {
+  const result = spawnSync('git', ['-C', dir, 'config', '--type=bool', '--get', 'core.ignorecase']);
+  const value = result.status === 0 ? result.stdout.toString().trim() : '';
+  // Unset or unparseable defaults to 'true': over-deletion (treating more names as the
+  // same name) is the safe direction here — never default to 'false'.
+  return value === 'false' ? 'false' : 'true';
+}
+
+// Exported and unit-tested white-box, same reasoning as cloneArgs below: the
+// core.ignorecase divergence this function guards against cannot be forced on this
+// machine without a second, deliberately-differently-cased filesystem (see the test).
+// Calling this directly on a fabricated clone dir instead lets the test force the clone's
+// core.ignorecase to each value and assert that value — not tmpdir's — governs.
+export function deniedFiles(dir, denyPaths) {
   const tracked = execFileSync('git', ['-C', dir, 'ls-files', '-z']);
   const trackedCount = tracked.length === 0
     ? 0
@@ -50,8 +72,14 @@ function deniedFiles(dir, denyPaths) {
     // global excludes file (set via $HOME/.config/git/ignore or GIT_CONFIG_GLOBAL) is
     // still consulted by check-ignore in the scratch dir and can report matches sourced
     // from it — deleting files deny_paths never named.
+    //
+    // core.ignorecase=<clone's value> is equally load-bearing: without it the scratch dir
+    // auto-detects case sensitivity from whatever filesystem os.tmpdir() lands on, which
+    // has no relationship to the clone's filesystem — see cloneIgnoreCase above.
     const matched = spawnSync(
-      'git', ['-C', scratch, '-c', 'core.excludesFile=/dev/null',
+      'git', ['-C', scratch,
+        '-c', 'core.excludesFile=/dev/null',
+        '-c', `core.ignorecase=${cloneIgnoreCase(dir)}`,
         'check-ignore', '--no-index', '-v', '-z', '--stdin'],
       { input: tracked }
     );

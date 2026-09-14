@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from '
 import { createHash } from 'node:crypto';
 import { tmpdir, platform } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
-import { createWorkspace, pruneWorkspace, cloneArgs } from '../src/workspace.js';
+import { createWorkspace, pruneWorkspace, cloneArgs, deniedFiles } from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
 
@@ -457,3 +457,44 @@ test(
     }
   }
 );
+
+// --- R11-1: arbitration must key off the clone's core.ignorecase, not tmpdir's ---
+//
+// On this machine both the workspace root and os.tmpdir() land on the same
+// case-insensitive APFS volume, so they can never be forced to disagree without a second,
+// deliberately-differently-cased volume (hdiutil). Driving deniedFiles directly on a
+// fabricated clone dir sidesteps that: forcing the CLONE's core.ignorecase to each value in
+// turn and asserting the outcome tracks it, regardless of what tmpdir's scratch dir would
+// auto-detect on its own, is what actually exercises the fix (the scratch dir's own
+// auto-detected setting is left alone — the fix is that it gets overridden by -c).
+
+function repoWithCasedTrackedFile() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-case-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  writeFileSync(join(root, 'credentials', 'secret.txt'), 'PRIVATE KEY\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return root;
+}
+
+test('deniedFiles arbitrates using the clone\'s core.ignorecase, not tmpdir\'s auto-detected value', () => {
+  const dir = repoWithCasedTrackedFile();
+  const setClone = (v) => execFileSync('git', ['-C', dir, 'config', 'core.ignorecase', v], { stdio: 'pipe' });
+
+  // deny pattern 'Credentials/' only matches the tracked 'credentials/secret.txt' when
+  // arbitration is case-insensitive.
+  setClone('true');
+  const insensitive = deniedFiles(dir, ['Credentials/']);
+  assert.deepEqual(insensitive.denied, ['credentials/secret.txt']);
+  assert.ok(insensitive.matchedDenyPaths.has('Credentials/'));
+
+  setClone('false');
+  const sensitive = deniedFiles(dir, ['Credentials/']);
+  assert.deepEqual(sensitive.denied, []);
+  assert.ok(!sensitive.matchedDenyPaths.has('Credentials/'));
+});
