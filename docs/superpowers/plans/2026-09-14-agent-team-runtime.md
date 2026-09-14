@@ -74,7 +74,7 @@ test('package exposes a version string', () => {
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `node --test test/`
+Run: `npm test`
 Expected: FAIL — `Cannot find module '.../src/version.js'`
 
 - [ ] **Step 3: Write the minimal implementation**
@@ -88,7 +88,7 @@ Expected: FAIL — `Cannot find module '.../src/version.js'`
   "type": "module",
   "private": true,
   "engines": { "node": ">=22" },
-  "scripts": { "test": "node --test test/" }
+  "scripts": { "test": "node --test 'test/**/*.test.js'" }
 }
 ```
 
