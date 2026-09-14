@@ -193,6 +193,13 @@ export function parseCheckIgnoreOutput(raw) {
   }
 
   const denied = [];
+  // Despite the name, this is not "patterns that matched something" — check-ignore -v
+  // reports only the WINNING pattern per path, so a correct, matching deny_paths entry
+  // that a later, more specific entry out-arbitrates for every actual file (e.g.
+  // `credentials/**` losing every case to `*.pem`) never appears here at all, and ends up
+  // in unmatchedDenyPaths alongside entries that truly matched nothing. This set holds
+  // "patterns that won an arbitration" — callers that turn its complement into an operator
+  // warning (src/dispatch.js) have to phrase it accordingly, not as "matched nothing".
   const matchedDenyPaths = new Set();
   for (let i = 0; i < parts.length; i += 4) {
     const source = parts[i].toString('utf8');

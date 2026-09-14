@@ -69,8 +69,14 @@ async function runMember(ctx) {
   // loudly rather than leaving it reachable only via workspace.unmatchedDenyPaths.
   const unmatchedDenyPaths = workspace.unmatchedDenyPaths ?? [];
   if (unmatchedDenyPaths.length > 0) {
+    // Not necessarily "matched nothing": check-ignore -v reports only the winning pattern
+    // per path, so an entry lands here either because it truly matched no tracked file, or
+    // because a more specific overlapping entry won arbitration for every file it would
+    // otherwise have caught (e.g. `credentials/**` losing every case to `*.pem` — see
+    // matchedDenyPaths in workspace.js). The wording below has to stay true for both.
     console.warn(
-      `agent-team: member "${member}": deny_paths entries matched nothing in this repo — ` +
+      `agent-team: member "${member}": deny_paths entries did not win arbitration for any file ` +
+      `in this repo (either none matched, or a more specific overlapping entry won instead) — ` +
       `check whether you meant these to match: ${unmatchedDenyPaths.join(', ')}`
     );
   }
@@ -99,8 +105,9 @@ async function runMember(ctx) {
     const matchingEntry = unmatchedDenyPaths.find((entry) => stripTrailingSlashes(entry) === linkName);
     if (matchingEntry) {
       console.warn(
-        `agent-team: member "${member}": deny_paths entry "${matchingEntry}" matched nothing, but a ` +
-        `tracked symlink named "${linkName}" was dropped — the entry probably did not cover what you intended`
+        `agent-team: member "${member}": deny_paths entry "${matchingEntry}" did not win arbitration ` +
+        `for any file, but a tracked symlink named "${linkName}" was dropped — the entry probably did ` +
+        `not cover what you intended`
       );
     }
   }

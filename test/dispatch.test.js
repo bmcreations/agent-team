@@ -318,6 +318,31 @@ test('a deny_paths entry matching nothing is warned about and returned in the re
   }
 });
 
+test('the unmatched deny_paths warning does not assert the entry matched nothing', async () => {
+  const { root, script } = project(
+    { status: 'ok', summary: 'clean' },
+    { denyPaths: ['credentials/**', 'nope/never/matches/**'] }
+  );
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    const r = await run(root, script, 'implementer');
+    assert.equal(r.status, 'ok');
+    const warning = warnings.find((w) => w.includes('nope/never/matches/**'));
+    assert.ok(warning, `expected a console.warn naming the unmatched entry, got: ${JSON.stringify(warnings)}`);
+    // An entry can land in unmatchedDenyPaths for two different reasons: it matched no
+    // tracked file, or it matched some but a more specific overlapping entry won
+    // arbitration for every one of them (check-ignore -v reports only the winning
+    // pattern per path — see finding 4's comment in src/workspace.js). The second case
+    // did match something, so a warning claiming it "matched nothing" would be false for
+    // exactly the entries most likely to trigger it in a real config.
+    assert.doesNotMatch(warning, /matched nothing/);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test('an isolation-none run reports no unmatched deny_paths rather than throwing', async () => {
   const { root, script } = project(
     { status: 'ok', summary: 'copy written' },

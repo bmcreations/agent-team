@@ -29,8 +29,9 @@ The command returns one JSON object. Report to the user:
 - `warning` if the member fell back to another agent, stated plainly
 - `agent`, so the user knows who did the work
 - `artifacts.branch` — the work is on a branch and is **not merged**
-- `unmatchedDenyPaths`, if present and non-empty — these deny_paths entries matched nothing in
-  this repo — confirm you meant them. Expected when a config is reused across projects.
+- `unmatchedDenyPaths`, if present and non-empty — these deny_paths entries did not win
+  arbitration for any file in this repo (either matched nothing, or lost to a more specific
+  overlapping entry) — confirm you meant them. Expected when a config is reused across projects.
 - `droppedSymlinks`, if present and non-empty — these tracked symlinks were removed from the
   workspace; if the member's task needed one, that is why it failed.
 
