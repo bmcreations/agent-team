@@ -4,8 +4,20 @@ import { buildBrief } from '../src/brief.js';
 
 const REQUIRED_CAPS = ['write', 'workspace', 'structured_output', 'tool_dialect'];
 
+// null means "could not read git status here" — either cwd is not a git repository, or git
+// itself failed. Both are treated the same way by the caller: skip the read-only check
+// rather than guess, and say so, so a skipped check is never mistaken for a passed one.
+function gitPorcelainStatus(cwd) {
+  try {
+    return execFileSync('git', ['status', '--porcelain'], { cwd, stdio: 'pipe' }).toString();
+  } catch {
+    return null;
+  }
+}
+
 export async function conformanceReport(execPath, { env = {}, cwd = undefined, reports = [] } = {}) {
   const failures = [];
+  const notes = [];
 
   // probe's contract (src/dispatch.js's makeProbe) is exit-code only: a cheap
   // availability check, not a JSON envelope. capabilities and run are the two
@@ -51,7 +63,31 @@ export async function conformanceReport(execPath, { env = {}, cwd = undefined, r
     timeoutSec: 120
   });
 
+  // Captured around the run itself — probe/capabilities are not expected to touch brief.cwd,
+  // and this is the one code path a real vendor CLI actually runs through (conformanceReport,
+  // not the mock-only inline assertion this replaces), so it is the only path worth guarding.
+  const statusBeforeRun = brief.read_only ? gitPorcelainStatus(brief.cwd) : null;
+
   const run = await runAdapter(execPath, 'run', { env, cwd, timeoutMs: 120_000, brief });
+
+  if (brief.read_only) {
+    if (statusBeforeRun === null) {
+      notes.push({
+        step: 'read-only-git-status',
+        detail: `skipped — ${brief.cwd} is not a git repository (or "git status" failed)`
+      });
+    } else {
+      const statusAfterRun = gitPorcelainStatus(brief.cwd);
+      if (statusAfterRun !== statusBeforeRun) {
+        failures.push({
+          step: 'read-only-git-status',
+          detail: statusAfterRun === null
+            ? 'read-only run left the working tree unreadable by "git status" (it was readable before the run)'
+            : `read-only run dirtied the working tree: ${statusAfterRun.trim()}`
+        });
+      }
+    }
+  }
 
   if (!['ok', 'failed', 'timeout', 'delegating'].includes(run.status)) {
     failures.push({ step: 'run', detail: `status must be ok|failed|timeout|delegating, got ${run.status}` });
@@ -69,5 +105,5 @@ export async function conformanceReport(execPath, { env = {}, cwd = undefined, r
     });
   }
 
-  return { conformant: failures.length === 0, failures, brief };
+  return { conformant: failures.length === 0, failures, notes, brief };
 }

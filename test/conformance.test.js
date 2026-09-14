@@ -9,11 +9,22 @@ import { conformanceReport } from './conformance.js';
 const adapterDir = new URL('../adapters/', import.meta.url).pathname;
 const MOCK = join(adapterDir, 'mock');
 const CRASH = new URL('./fixtures/crash', import.meta.url).pathname;
+const WRITES_DESPITE_READ_ONLY = new URL('./fixtures/writes-despite-read-only', import.meta.url).pathname;
 
 function writeMockScript(dir, scripted) {
   const scriptPath = join(dir, 'script.json');
   writeFileSync(scriptPath, JSON.stringify(scripted));
   return scriptPath;
+}
+
+function initGitFixtureRepo(dir) {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 't@e.st'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: dir });
+  writeFileSync(join(dir, 'a.txt'), 'hello\n');
+  execFileSync('git', ['add', '.'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: dir });
 }
 
 test('the mock adapter is conformant', async () => {
@@ -79,14 +90,7 @@ test('a can_delegate brief is reported conformant when the adapter answers deleg
 
 test('a read_only brief leaves the working tree clean', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'at-conf-readonly-'));
-
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
-  execFileSync('git', ['config', 'user.email', 't@e.st'], { cwd: dir });
-  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
-  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: dir });
-  writeFileSync(join(dir, 'a.txt'), 'hello\n');
-  execFileSync('git', ['add', '.'], { cwd: dir });
-  execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: dir });
+  initGitFixtureRepo(dir);
 
   // The mock's script file must live outside the repo under test, or it shows up as an
   // untracked file and the "clean working tree" assertion below is vacuously false.
@@ -102,6 +106,24 @@ test('a read_only brief leaves the working tree clean', async () => {
 
   assert.equal(report.brief.read_only, true);
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: dir }).toString(), '');
+});
+
+test('a read_only run that dirties the working tree is reported non-conformant', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-dirty-'));
+  initGitFixtureRepo(dir);
+
+  // This fixture ignores brief.read_only and writes into brief.cwd unconditionally — the
+  // reviewer's reproduction of a real vendor CLI that does not honor read-only mode.
+  const report = await conformanceReport(WRITES_DESPITE_READ_ONLY, { cwd: dir });
+
+  assert.equal(report.brief.read_only, true);
+  assert.equal(report.conformant, false);
+  assert.ok(
+    report.failures.some(
+      (f) => f.step === 'read-only-git-status' && /i-should-not-exist\.txt/.test(f.detail)
+    ),
+    JSON.stringify(report.failures)
+  );
 });
 
 // Opt-in: AGENT_TEAM_CONFORMANCE=codex,grok npm test

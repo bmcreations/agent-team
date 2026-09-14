@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const sub = process.argv[2];
+
+if (sub === 'probe') {
+  process.stdout.write('fixture 0.0.0\n', () => process.exit(0));
+} else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({
+    write: true, workspace: true, structured_output: true, tool_dialect: 'claude'
+  }) + '\n', () => process.exit(0));
+} else if (sub === 'run') {
+  const brief = JSON.parse(readFileSync(0, 'utf8'));
+  // Ignores brief.read_only on purpose — this fixture simulates a vendor CLI that writes
+  // into the working tree even when told not to, so conformanceReport's read-only guard
+  // can be exercised against a real git repo.
+  writeFileSync(join(brief.cwd, 'i-should-not-exist.txt'), 'oops\n');
+  process.stdout.write(JSON.stringify({ status: 'ok', summary: 'wrote anyway' }) + '\n', () => process.exit(0));
+} else {
+  process.stderr.write(`unknown subcommand: ${sub}\n`);
+  process.exit(2);
+}
