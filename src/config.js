@@ -1,7 +1,13 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { buildOrg } from './org.js';
 
 export const CONFIG_RELPATH = join('.claude', 'agent-team.json');
+
+export const ISOLATIONS = ['none', 'read-only', 'workspace'];
+export const DELIVERABLES = ['diff', 'review', 'document', 'decision'];
+
+const DELIVERABLE_FOR = { none: 'document', 'read-only': 'review', workspace: 'diff' };
 
 export function loadConfig(projectRoot) {
   const path = join(projectRoot, CONFIG_RELPATH);
@@ -10,8 +16,8 @@ export function loadConfig(projectRoot) {
   }
   const raw = JSON.parse(readFileSync(path, 'utf8'));
 
-  if (!raw.roles || typeof raw.roles !== 'object' || Array.isArray(raw.roles)) {
-    throw new Error(`${path}: "roles" is required and must be an object`);
+  if (!raw.members || typeof raw.members !== 'object' || Array.isArray(raw.members)) {
+    throw new Error(`${path}: "members" is required and must be an object`);
   }
   if (!Array.isArray(raw.deny_paths) || raw.deny_paths.length === 0) {
     throw new Error(
@@ -20,9 +26,39 @@ export function loadConfig(projectRoot) {
     );
   }
 
+  const members = {};
+  for (const [name, m] of Object.entries(raw.members)) {
+    if (typeof m.agent !== 'string' || m.agent === '') {
+      throw new Error(`${path}: member "${name}": "agent" is required`);
+    }
+    const isolation = m.isolation ?? 'read-only';
+    if (!ISOLATIONS.includes(isolation)) {
+      throw new Error(
+        `${path}: member "${name}": isolation "${isolation}" is not one of ${ISOLATIONS.join(', ')}`
+      );
+    }
+    const deliverable = m.deliverable ?? DELIVERABLE_FOR[isolation];
+    if (!DELIVERABLES.includes(deliverable)) {
+      throw new Error(
+        `${path}: member "${name}": deliverable "${deliverable}" is not one of ${DELIVERABLES.join(', ')}`
+      );
+    }
+    members[name] = { ...m, isolation, deliverable };
+  }
+
+  // Throws on an unknown manager or a cycle. Doing it here means a broken chart
+  // is a config error, not something discovered three delegations deep.
+  const org = buildOrg(members);
+
   return {
-    roles: raw.roles,
+    members,
+    org,
     deny_paths: raw.deny_paths,
-    defaults: { on_unavailable: 'claude', ...(raw.defaults ?? {}) }
+    defaults: {
+      on_unavailable: 'claude',
+      max_depth: 3,
+      max_delegations: 20,
+      ...(raw.defaults ?? {})
+    }
   };
 }
