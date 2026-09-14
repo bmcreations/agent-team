@@ -4,9 +4,14 @@
 
 **Goal:** Build the role resolver, adapter protocol, worktree isolation, and plugin packaging so a skill can delegate a task to Codex, Grok, or Claude by naming a role rather than a vendor.
 
-**Architecture:** A Node dispatcher resolves a role to an agent using a per-project JSON config, builds a git worktree with denied paths excluded by sparse-checkout, assembles a brief (tool-dialect table + skill markdown + task), and runs a per-vendor adapter executable that takes the brief on stdin and returns one JSON result on stdout. A `mock` adapter makes every piece of that testable offline.
+**Architecture:** A Node dispatcher resolves a team member to an agent using a per-project JSON config, builds an isolated workspace with denied paths excluded from the object store, assembles a brief (tool-dialect table + skill markdown + task), and runs a per-vendor adapter executable that takes the brief on stdin and returns one JSON result on stdout. A `mock` adapter makes every piece of that testable offline.
 
-**Tech Stack:** Node 26 (zero runtime dependencies: `node:test`, `node:assert`, `node:util.parseArgs`, `node:child_process`), git 2.46 sparse-checkout, POSIX-executable adapters.
+**Tech Stack:** Node 26 (zero runtime dependencies: `node:test`, `node:assert`, `node:util.parseArgs`, `node:child_process`), git 2.46 filtered clones, POSIX-executable adapters.
+
+> **Read [Revision 2](#revision-2--team-members-hierarchy-and-real-isolation) at the end of this
+> document before implementing anything.** It replaces Tasks 2, 3, 4, 7 and 8 with Tasks R1-R6:
+> roles become definable team members in a reporting tree, and worktree isolation is replaced by
+> filtered clones after review showed the original exclusion was bypassable.
 
 ---
 
@@ -113,6 +118,9 @@ git commit -m "chore: scaffold zero-dependency node package with built-in test r
 ---
 
 ### Task 2: Config loader that refuses a config with no denylist
+
+> **SUPERSEDED by Task R2.** The denylist rule survives there unchanged.
+
 
 The spec requires that `init` refuse to write a config without a denylist. The loader enforces the same rule, so a hand-edited config cannot quietly drop it.
 
@@ -239,6 +247,9 @@ git commit -m "feat(config): load agent-team.json and refuse a config with no de
 ---
 
 ### Task 3: Role resolution, fallback, and the distinct_from hard stop
+
+> **SUPERSEDED by Task R3.** The fallback and `distinct_from` ordering survive there unchanged.
+
 
 The ordering here is the whole point: `distinct_from` is checked **after** fallback, so a fallback cannot smuggle in the self-review the constraint exists to prevent. An unsatisfiable constraint throws; it never degrades.
 
@@ -402,6 +413,11 @@ git commit -m "feat(resolve): map roles to agents with fallback and a distinct_f
 ---
 
 ### Task 4: Worktree creation with denied paths excluded by construction
+
+> **SUPERSEDED by Task R4.** The premise of this task was disproved by its own review:
+> sparse-checkout hides denied files from the working tree but leaves them readable via
+> `git show`, `git cat-file`, and `git archive`. Do not implement this task.
+
 
 This is the security boundary. The test asserts a **fact about the filesystem** — the denied file is not there — rather than trusting any vendor's sandbox flag.
 
@@ -855,6 +871,10 @@ git commit -m "feat(adapter): run adapters with process-group timeouts and toler
 
 ### Task 7: Brief assembly with tool-dialect translation
 
+> **SUPERSEDED by Task R5.** The dialect loader and section ordering survive there unchanged;
+> the brief gains charter, persona, deliverable, and the delegation protocol.
+
+
 A skill written for Claude says `TodoWrite` and `Read`. Superpowers already ships dialect tables for Codex, Gemini, and Copilot; Grok has none, so this task writes one.
 
 **Files:**
@@ -1011,6 +1031,9 @@ git commit -m "feat(brief): assemble briefs with tool-dialect translation for no
 ---
 
 ### Task 8: The dispatcher
+
+> **SUPERSEDED by Task R6.** Kept as the record of the flat, non-recursive dispatcher.
+
 
 Ties the pieces together and owns the prune-vs-keep decision: keep the worktree on any failure so it can be inspected, prune it on success.
 
@@ -1829,3 +1852,1536 @@ These come from the spec and are **not** resolved by this plan:
 - **Per-role model pinning is unspecified** for every vendor. The config accepts `model` and every adapter forwards it; which model each role should use is undecided.
 - **Grok Build's own worktree integration** may conflict with dispatcher-created worktrees. Task 12 Step 1 is where that gets settled.
 - **Phase 0 (ACP) has not run.** If it succeeds, Tasks 11 and 12 are rewritten against the protocol rather than the CLIs.
+
+---
+
+# Revision 2 — team members, hierarchy, and real isolation
+
+Two changes land together, both from decisions taken after Task 6.
+
+**1. A role becomes a team member.** The flat `roles` table only answered "which vendor runs
+this". It could not express a designer, a marketer, or a COO, because those are defined by what
+they own and what they hand back, not by which CLI executes them. `roles` becomes `members`, and a
+member carries a charter, a persona, a deliverable kind, and a place in a reporting tree.
+
+**2. Isolation moves from sparse-checkout to a filtered clone.** The Task 4 review disproved the
+premise the module was built on. `git sparse-checkout` sets the `skip-worktree` bit; it does not
+remove objects. From inside a worktree built by `createWorktree`, every denied file was still
+enumerable by name (`git ls-files -v` marks them `S`) and readable verbatim:
+
+```
+$ git show HEAD:credentials/signing.p8      → PRIVATE KEY   (exit 0)
+$ git cat-file -p :credentials/signing.p8   → PRIVATE KEY   (exit 0)
+$ git archive HEAD | tar -tvf -             → lists every denied path
+```
+
+A delegated CLI has `git` on its PATH by construction, so `git log -p` or `git archive` would
+surface those secrets without anyone attacking anything. The five original tests passed because
+they asserted `existsSync === false`, which is true and insufficient.
+
+**Superseded tasks.** Tasks 2, 3, 4, 7 and 8 are replaced by R2, R3, R4, R5 and R6 below. Their
+original text stays in this document as the record of what was built and why it changed. Commits
+`22c49b9`, `f9e0f85`, `4eb5863` and `8741071` are superseded in place — the R-tasks rewrite those
+files rather than reverting them. Tasks 1, 5, 6, 9–14 stand; the deltas they need are listed at
+the end of this revision.
+
+## Revised architecture
+
+A member is resolved from `.claude/agent-team.json`, given a workspace sized to its `isolation`,
+handed a brief carrying its charter and its direct reports, and run through its vendor adapter. A
+member with reports may answer `status: "delegating"` instead of a deliverable; the dispatcher
+runs those sub-briefs against its direct reports only, then calls the manager again with the
+results so it can synthesise. Depth and total adapter runs are both capped.
+
+## Revised config shape
+
+```json
+{
+  "members": {
+    "coo": {
+      "title": "COO",
+      "agent": "claude",
+      "charter": "Decompose an objective into work for the team. Does not implement.",
+      "isolation": "none",
+      "deliverable": "decision"
+    },
+    "eng-lead":    { "agent": "claude", "reports_to": "coo", "isolation": "read-only" },
+    "implementer": { "agent": "codex",  "reports_to": "eng-lead", "isolation": "workspace" },
+    "reviewer":    { "agent": "grok",   "reports_to": "eng-lead", "isolation": "read-only",
+                     "distinct_from": ["implementer"] },
+    "qa":          { "agent": "claude", "reports_to": "eng-lead", "isolation": "workspace" },
+    "designer":    { "agent": "claude", "reports_to": "coo", "isolation": "none",
+                     "deliverable": "document", "output_path": "docs/design" },
+    "marketer":    { "agent": "claude", "reports_to": "coo", "isolation": "none",
+                     "deliverable": "document", "output_path": "docs/marketing" }
+  },
+  "deny_paths": ["credentials/**", "**/.env*"],
+  "defaults": { "on_unavailable": "claude", "max_depth": 3, "max_delegations": 20 }
+}
+```
+
+`isolation` is one of `none` (no repo at all — a scratch directory), `read-only` (a filtered clone
+the result is read from, not written back), `workspace` (a filtered clone on its own branch).
+`deliverable` is one of `diff`, `review`, `document`, `decision`, and defaults from `isolation`:
+`none` → `document`, `read-only` → `review`, `workspace` → `diff`.
+
+`reports_to` is the only hierarchy field stored. The inverse (`reports`) is derived, so the two
+cannot drift apart. A member with no `reports_to` is a root; multiple roots are allowed.
+
+## Revised file structure
+
+| File | Responsibility |
+|---|---|
+| `src/org.js` | build the reporting tree from `reports_to`; reject cycles; render it |
+| `src/config.js` | load and validate `.claude/agent-team.json`; reject a config with no denylist |
+| `src/resolve.js` | member to agent, `on_unavailable` fallback, `distinct_from` hard stop |
+| `src/workspace.js` | filtered clone per isolation level; **replaces `src/worktree.js`** |
+| `src/brief.js` | dialect + charter + persona + skill + delegation protocol + task |
+| `src/dispatch.js` | orchestrate; recursive delegation under depth and budget caps |
+
+---
+
+### Task R1: The org chart
+
+`reports_to` is a string on each member. Everything hierarchical — who may delegate to whom, how
+deep a delegation has gone, where a blocked member escalates — is derived from it here, so no
+other module walks the tree by hand.
+
+**Files:**
+- Create: `src/org.js`
+- Create: `test/org.test.js`
+
+- [ ] **Step 1: Write the failing tests**
+
+`test/org.test.js`:
+
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { buildOrg, depthOf, directReports, canDelegate, renderOrg } from '../src/org.js';
+
+const MEMBERS = {
+  coo: { agent: 'claude' },
+  'eng-lead': { agent: 'claude', reports_to: 'coo' },
+  implementer: { agent: 'codex', reports_to: 'eng-lead' },
+  reviewer: { agent: 'grok', reports_to: 'eng-lead' },
+  designer: { agent: 'claude', reports_to: 'coo' }
+};
+
+test('reports are derived from reports_to, sorted, and roots have no parent', () => {
+  const org = buildOrg(MEMBERS);
+  assert.deepEqual(org.roots, ['coo']);
+  assert.equal(org.parentOf.coo, null);
+  assert.deepEqual(org.reportsOf['eng-lead'], ['implementer', 'reviewer']);
+  assert.deepEqual(org.reportsOf.coo, ['designer', 'eng-lead']);
+  assert.deepEqual(org.reportsOf.implementer, []);
+});
+
+test('more than one root is allowed', () => {
+  const org = buildOrg({ coo: { agent: 'a' }, advisor: { agent: 'b' } });
+  assert.deepEqual(org.roots, ['advisor', 'coo']);
+});
+
+test('an unknown manager is a config error', () => {
+  assert.throws(
+    () => buildOrg({ a: { agent: 'x', reports_to: 'ghost' } }),
+    /reports_to "ghost" is not a configured member/
+  );
+});
+
+test('reporting to yourself is a config error', () => {
+  assert.throws(() => buildOrg({ a: { agent: 'x', reports_to: 'a' } }), /reports_to itself/);
+});
+
+test('a reporting cycle is a config error', () => {
+  assert.throws(
+    () => buildOrg({
+      a: { agent: 'x', reports_to: 'b' },
+      b: { agent: 'x', reports_to: 'c' },
+      c: { agent: 'x', reports_to: 'a' }
+    }),
+    /reporting cycle/
+  );
+});
+
+test('depthOf counts ancestors', () => {
+  const org = buildOrg(MEMBERS);
+  assert.equal(depthOf(org, 'coo'), 0);
+  assert.equal(depthOf(org, 'eng-lead'), 1);
+  assert.equal(depthOf(org, 'implementer'), 2);
+});
+
+test('only a member with reports can delegate', () => {
+  const org = buildOrg(MEMBERS);
+  assert.equal(canDelegate(org, 'eng-lead'), true);
+  assert.equal(canDelegate(org, 'reviewer'), false);
+  assert.deepEqual(directReports(org, 'reviewer'), []);
+});
+
+test('renderOrg indents each level under its manager', () => {
+  const out = renderOrg(buildOrg(MEMBERS));
+  assert.match(out, /^coo$/m);
+  assert.match(out, /^ {2}eng-lead$/m);
+  assert.match(out, /^ {4}implementer$/m);
+});
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npm test`
+Expected: FAIL — `Cannot find module '.../src/org.js'`
+
+- [ ] **Step 3: Write the minimal implementation**
+
+`src/org.js`:
+
+```js
+export function buildOrg(members) {
+  const names = Object.keys(members).sort();
+  const parentOf = {};
+
+  for (const name of names) {
+    const parent = members[name].reports_to ?? null;
+    if (parent === name) {
+      throw new Error(`member "${name}": reports_to itself`);
+    }
+    if (parent !== null && !members[parent]) {
+      throw new Error(`member "${name}": reports_to "${parent}" is not a configured member`);
+    }
+    parentOf[name] = parent;
+  }
+
+  for (const name of names) {
+    const seen = [name];
+    let cur = parentOf[name];
+    while (cur) {
+      if (seen.includes(cur)) {
+        throw new Error(`reporting cycle: ${seen.join(' -> ')} -> ${cur}`);
+      }
+      seen.push(cur);
+      cur = parentOf[cur];
+    }
+  }
+
+  const reportsOf = Object.fromEntries(names.map((n) => [n, []]));
+  for (const name of names) {
+    if (parentOf[name]) reportsOf[parentOf[name]].push(name);
+  }
+
+  return {
+    names,
+    roots: names.filter((n) => parentOf[n] === null),
+    parentOf,
+    reportsOf
+  };
+}
+
+export function directReports(org, name) {
+  return org.reportsOf[name] ?? [];
+}
+
+export function canDelegate(org, name) {
+  return directReports(org, name).length > 0;
+}
+
+export function depthOf(org, name) {
+  let depth = 0;
+  let cur = org.parentOf[name];
+  while (cur) {
+    depth += 1;
+    cur = org.parentOf[cur];
+  }
+  return depth;
+}
+
+export function renderOrg(org) {
+  const lines = [];
+  const walk = (name, indent) => {
+    lines.push(`${' '.repeat(indent)}${name}`);
+    for (const child of directReports(org, name)) walk(child, indent + 2);
+  };
+  for (const root of org.roots) walk(root, 0);
+  return lines.join('\n');
+}
+```
+
+`names` is sorted once at the top, so `roots` and every `reportsOf` list inherit that order and
+the rendered chart is stable between runs.
+
+- [ ] **Step 4: Run the tests and watch them pass**
+
+Run: `npm test`
+Expected: PASS, 8 new tests
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/org.js test/org.test.js
+git commit -m "feat(org): derive the reporting tree from reports_to and reject cycles"
+```
+
+---
+
+### Task R2: Config loader for members — replaces Task 2
+
+Rewrites `src/config.js` and `test/config.test.js` in place. The denylist rule survives unchanged;
+everything about `roles` becomes `members`, and the config now validates the reporting tree at
+load time so a cycle cannot surface halfway through a delegation.
+
+**Files:**
+- Modify: `src/config.js` (full rewrite)
+- Modify: `test/config.test.js` (full rewrite)
+
+- [ ] **Step 1: Write the failing tests**
+
+`test/config.test.js` — replace the whole file:
+
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadConfig, CONFIG_RELPATH } from '../src/config.js';
+
+function project(config) {
+  const root = mkdtempSync(join(tmpdir(), 'at-cfg-'));
+  mkdirSync(join(root, '.claude'), { recursive: true });
+  writeFileSync(join(root, CONFIG_RELPATH), JSON.stringify(config));
+  return root;
+}
+
+const OK = {
+  members: {
+    coo: { agent: 'claude', isolation: 'none' },
+    'eng-lead': { agent: 'claude', reports_to: 'coo' },
+    implementer: { agent: 'codex', reports_to: 'eng-lead', isolation: 'workspace' }
+  },
+  deny_paths: ['credentials/**']
+};
+
+test('a missing config names the init skill', () => {
+  const root = mkdtempSync(join(tmpdir(), 'at-cfg-'));
+  assert.throws(() => loadConfig(root), /agent-team-init/);
+});
+
+test('members is required', () => {
+  const root = project({ deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), /"members" is required/);
+});
+
+test('a config with no denylist is refused, and the message says why', () => {
+  const root = project({ members: OK.members });
+  assert.throws(() => loadConfig(root), /third party/);
+});
+
+test('an empty denylist is refused too', () => {
+  const root = project({ members: OK.members, deny_paths: [] });
+  assert.throws(() => loadConfig(root), /"deny_paths" is required/);
+});
+
+test('every member must name an agent', () => {
+  const root = project({ members: { designer: { title: 'Designer' } }, deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), /member "designer": "agent" is required/);
+});
+
+test('an unknown isolation level is refused', () => {
+  const root = project({ members: { a: { agent: 'x', isolation: 'sandbox' } }, deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), /isolation "sandbox" is not one of/);
+});
+
+test('an unknown deliverable is refused', () => {
+  const root = project({ members: { a: { agent: 'x', deliverable: 'vibes' } }, deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), /deliverable "vibes" is not one of/);
+});
+
+test('a reporting cycle is refused at load time', () => {
+  const root = project({
+    members: { a: { agent: 'x', reports_to: 'b' }, b: { agent: 'x', reports_to: 'a' } },
+    deny_paths: ['x']
+  });
+  assert.throws(() => loadConfig(root), /reporting cycle/);
+});
+
+test('isolation defaults to read-only and deliverable follows isolation', () => {
+  const cfg = loadConfig(project(OK));
+  assert.equal(cfg.members['eng-lead'].isolation, 'read-only');
+  assert.equal(cfg.members['eng-lead'].deliverable, 'review');
+  assert.equal(cfg.members.coo.deliverable, 'document');
+  assert.equal(cfg.members.implementer.deliverable, 'diff');
+});
+
+test('an explicit deliverable overrides the one isolation would imply', () => {
+  const cfg = loadConfig(project({
+    members: { coo: { agent: 'claude', isolation: 'none', deliverable: 'decision' } },
+    deny_paths: ['x']
+  }));
+  assert.equal(cfg.members.coo.deliverable, 'decision');
+});
+
+test('the org chart is built and returned alongside the members', () => {
+  const cfg = loadConfig(project(OK));
+  assert.deepEqual(cfg.org.roots, ['coo']);
+  assert.deepEqual(cfg.org.reportsOf['eng-lead'], ['implementer']);
+});
+
+test('delegation caps have defaults a config can override', () => {
+  const bare = loadConfig(project(OK));
+  assert.equal(bare.defaults.on_unavailable, 'claude');
+  assert.equal(bare.defaults.max_depth, 3);
+  assert.equal(bare.defaults.max_delegations, 20);
+
+  const tuned = loadConfig(project({ ...OK, defaults: { max_depth: 1 } }));
+  assert.equal(tuned.defaults.max_depth, 1);
+  assert.equal(tuned.defaults.on_unavailable, 'claude');
+});
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npm test`
+Expected: FAIL — the old loader still returns `roles`, so the member-shaped assertions fail.
+
+- [ ] **Step 3: Write the minimal implementation**
+
+`src/config.js` — replace the whole file:
+
+```js
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { buildOrg } from './org.js';
+
+export const CONFIG_RELPATH = join('.claude', 'agent-team.json');
+
+export const ISOLATIONS = ['none', 'read-only', 'workspace'];
+export const DELIVERABLES = ['diff', 'review', 'document', 'decision'];
+
+const DELIVERABLE_FOR = { none: 'document', 'read-only': 'review', workspace: 'diff' };
+
+export function loadConfig(projectRoot) {
+  const path = join(projectRoot, CONFIG_RELPATH);
+  if (!existsSync(path)) {
+    throw new Error(`no agent-team config at ${path} — run /agent-team-init`);
+  }
+  const raw = JSON.parse(readFileSync(path, 'utf8'));
+
+  if (!raw.members || typeof raw.members !== 'object' || Array.isArray(raw.members)) {
+    throw new Error(`${path}: "members" is required and must be an object`);
+  }
+  if (!Array.isArray(raw.deny_paths) || raw.deny_paths.length === 0) {
+    throw new Error(
+      `${path}: "deny_paths" is required and must be a non-empty array — ` +
+      `a rival CLI runs in this tree and ships context to a third party`
+    );
+  }
+
+  const members = {};
+  for (const [name, m] of Object.entries(raw.members)) {
+    if (typeof m.agent !== 'string' || m.agent === '') {
+      throw new Error(`${path}: member "${name}": "agent" is required`);
+    }
+    const isolation = m.isolation ?? 'read-only';
+    if (!ISOLATIONS.includes(isolation)) {
+      throw new Error(
+        `${path}: member "${name}": isolation "${isolation}" is not one of ${ISOLATIONS.join(', ')}`
+      );
+    }
+    const deliverable = m.deliverable ?? DELIVERABLE_FOR[isolation];
+    if (!DELIVERABLES.includes(deliverable)) {
+      throw new Error(
+        `${path}: member "${name}": deliverable "${deliverable}" is not one of ${DELIVERABLES.join(', ')}`
+      );
+    }
+    members[name] = { ...m, isolation, deliverable };
+  }
+
+  // Throws on an unknown manager or a cycle. Doing it here means a broken chart
+  // is a config error, not something discovered three delegations deep.
+  const org = buildOrg(members);
+
+  return {
+    members,
+    org,
+    deny_paths: raw.deny_paths,
+    defaults: {
+      on_unavailable: 'claude',
+      max_depth: 3,
+      max_delegations: 20,
+      ...(raw.defaults ?? {})
+    }
+  };
+}
+```
+
+- [ ] **Step 4: Run the tests and watch them pass**
+
+Run: `npm test`
+Expected: PASS for `test/config.test.js` (12 tests). `test/resolve.test.js` and
+`test/worktree.test.js` still fail — R3 and R4 fix those. Do not patch them here.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/config.js test/config.test.js
+git commit -m "feat(config): define team members with a charter, a deliverable, and a manager"
+```
+
+---
+
+### Task R3: Member resolution — replaces Task 3
+
+Same fallback and the same `distinct_from` hard stop in the same order. What changes is the
+vocabulary and the shape of what comes back: a resolved member carries the identity fields the
+brief needs and its direct reports.
+
+**Files:**
+- Modify: `src/resolve.js` (full rewrite)
+- Modify: `test/resolve.test.js` (full rewrite)
+
+- [ ] **Step 1: Write the failing tests**
+
+`test/resolve.test.js` — replace the whole file:
+
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { buildOrg } from '../src/org.js';
+import { resolveMember } from '../src/resolve.js';
+
+function config(members, defaults = { on_unavailable: 'claude' }) {
+  const withDefaults = Object.fromEntries(Object.entries(members).map(([k, m]) => [
+    k, { isolation: 'read-only', deliverable: 'review', ...m }
+  ]));
+  return { members: withDefaults, org: buildOrg(withDefaults), deny_paths: ['x'], defaults };
+}
+
+const CONFIG = config({
+  'eng-lead': { agent: 'claude' },
+  implementer: { agent: 'codex', reports_to: 'eng-lead', isolation: 'workspace', deliverable: 'diff' },
+  reviewer: { agent: 'grok', reports_to: 'eng-lead', distinct_from: ['implementer'] }
+});
+
+const all = () => true;
+const none = () => false;
+const only = (...ok) => (a) => ok.includes(a);
+
+test('an unknown member names what is configured', () => {
+  assert.throws(() => resolveMember(CONFIG, 'ghost', { probe: all }), /unknown member: ghost/);
+  assert.throws(() => resolveMember(CONFIG, 'ghost', { probe: all }), /implementer/);
+});
+
+test('an available agent is used as written, with no warning', () => {
+  const r = resolveMember(CONFIG, 'implementer', { probe: all });
+  assert.equal(r.agent, 'codex');
+  assert.equal(r.warning, null);
+});
+
+test('an unavailable agent falls back to on_unavailable, with a warning', () => {
+  const r = resolveMember(CONFIG, 'implementer', { probe: only('claude') });
+  assert.equal(r.agent, 'claude');
+  assert.match(r.warning, /codex/);
+  assert.match(r.warning, /claude/);
+});
+
+test('no usable fallback is an error, not a silent skip', () => {
+  assert.throws(() => resolveMember(CONFIG, 'implementer', { probe: none }), /no usable fallback/);
+});
+
+test('distinct_from is checked AFTER fallback, so a fallback cannot smuggle in self-review', () => {
+  assert.throws(
+    () => resolveMember(CONFIG, 'reviewer', {
+      probe: only('claude'),
+      assignments: { implementer: 'claude' }
+    }),
+    /refusing to let an agent review its own work/
+  );
+});
+
+test('the distinct_from error says the conflict was reached through a fallback', () => {
+  assert.throws(
+    () => resolveMember(CONFIG, 'reviewer', {
+      probe: only('claude'),
+      assignments: { implementer: 'claude' }
+    }),
+    /reached via fallback/
+  );
+});
+
+test('distinct_from does not fire when the agents genuinely differ', () => {
+  const r = resolveMember(CONFIG, 'reviewer', { probe: all, assignments: { implementer: 'codex' } });
+  assert.equal(r.agent, 'grok');
+});
+
+test('the resolved member carries its identity fields', () => {
+  const cfg = config({
+    designer: {
+      agent: 'claude', title: 'Designer', charter: 'Own the visual system.',
+      persona: 'Work from the design tokens.', isolation: 'none',
+      deliverable: 'document', output_path: 'docs/design'
+    }
+  });
+  const r = resolveMember(cfg, 'designer', { probe: all });
+  assert.equal(r.title, 'Designer');
+  assert.equal(r.charter, 'Own the visual system.');
+  assert.equal(r.persona, 'Work from the design tokens.');
+  assert.equal(r.isolation, 'none');
+  assert.equal(r.deliverable, 'document');
+  assert.equal(r.output_path, 'docs/design');
+});
+
+test('identity fields the member omits come back null, and title falls back to the name', () => {
+  const r = resolveMember(CONFIG, 'eng-lead', { probe: all });
+  assert.equal(r.title, 'eng-lead');
+  assert.equal(r.charter, null);
+  assert.equal(r.persona, null);
+  assert.equal(r.model, null);
+  assert.equal(r.skill, null);
+  assert.equal(r.output_path, null);
+});
+
+test('the resolved member carries its direct reports and its manager', () => {
+  const lead = resolveMember(CONFIG, 'eng-lead', { probe: all });
+  assert.deepEqual(lead.reports, ['implementer', 'reviewer']);
+  assert.equal(lead.reports_to, null);
+
+  const impl = resolveMember(CONFIG, 'implementer', { probe: all });
+  assert.deepEqual(impl.reports, []);
+  assert.equal(impl.reports_to, 'eng-lead');
+});
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npm test`
+Expected: FAIL — `resolve.js` exports `resolveRole`, not `resolveMember`.
+
+- [ ] **Step 3: Write the minimal implementation**
+
+`src/resolve.js` — replace the whole file:
+
+```js
+import { directReports } from './org.js';
+
+export function resolveMember(config, name, { probe, assignments = {} } = {}) {
+  const member = config.members[name];
+  if (!member) {
+    throw new Error(
+      `unknown member: ${name} (configured: ${Object.keys(config.members).join(', ')})`
+    );
+  }
+
+  let agent = member.agent;
+  let warning = null;
+
+  if (!probe(agent)) {
+    const fallback = config.defaults?.on_unavailable;
+    if (!fallback || !probe(fallback)) {
+      throw new Error(
+        `member "${name}": agent "${agent}" is unavailable and no usable fallback ` +
+        `(on_unavailable: ${fallback ?? 'unset'})`
+      );
+    }
+    warning = `agent "${agent}" unavailable; fell back to "${fallback}"`;
+    agent = fallback;
+  }
+
+  // Checked AFTER fallback: a fallback must not create the self-review
+  // that distinct_from exists to prevent.
+  const conflicts = (member.distinct_from ?? []).filter((other) => assignments[other] === agent);
+  if (conflicts.length > 0) {
+    throw new Error(
+      `member "${name}": distinct_from forbids "${agent}", already assigned to ` +
+      `${conflicts.join(', ')} — refusing to let an agent review its own work` +
+      (warning ? ` (reached via fallback: ${warning})` : '')
+    );
+  }
+
+  return {
+    member: name,
+    title: member.title ?? name,
+    agent,
+    model: member.model ?? null,
+    skill: member.skill ?? null,
+    charter: member.charter ?? null,
+    persona: member.persona ?? null,
+    isolation: member.isolation,
+    deliverable: member.deliverable,
+    output_path: member.output_path ?? null,
+    reports_to: member.reports_to ?? null,
+    reports: directReports(config.org, name),
+    warning
+  };
+}
+```
+
+`isolation` and `deliverable` are read straight off the member because `loadConfig` already
+defaulted and validated them. Resolving must not be a second place those defaults live.
+
+- [ ] **Step 4: Run the tests and watch them pass**
+
+Run: `npm test`
+Expected: PASS for `test/resolve.test.js` (11 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/resolve.js test/resolve.test.js
+git commit -m "feat(resolve): resolve a member with its charter, deliverable, and direct reports"
+```
+
+---
+
+### Task R4: Workspaces by filtered clone — replaces Task 4
+
+This is the task the Task 4 review sent back. Read the finding at the top of Revision 2 before
+starting: the mechanism being replaced passed its tests and did not do its job.
+
+**Why a clone and not a worktree.** A linked worktree shares the parent repository's object
+database. That is the whole point of a worktree and it is exactly what makes it unusable here —
+nothing is ever absent, only unmaterialised. A `--depth 1` clone over `file://` starts a fresh
+object database containing one commit. Deleting the denied files and re-committing is not enough
+on its own, because the original commit is still reachable and `git show HEAD~1:<path>` would
+work. Committing on an **orphan** branch and deleting every other ref makes the original commit
+unreachable, and `gc --prune=now` then removes its blobs for real.
+
+`git remote remove origin` matters as much as the gc: a clone that keeps its origin can simply
+`git fetch` the secrets back.
+
+**Files:**
+- Create: `src/workspace.js`
+- Create: `test/workspace.test.js`
+- Delete: `src/worktree.js`, `test/worktree.test.js`
+
+- [ ] **Step 1: Write the failing tests**
+
+`test/workspace.test.js`:
+
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createWorkspace, pruneWorkspace } from '../src/workspace.js';
+
+const DENY = ['credentials/**', '**/.env*'];
+
+function repoWithSecrets() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');   // global commit.gpgsign=true would break the fixture
+  mkdirSync(join(root, 'src'), { recursive: true });
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  mkdirSync(join(root, 'a', 'b'), { recursive: true });
+  writeFileSync(join(root, 'src', 'app.js'), 'ok\n');
+  writeFileSync(join(root, 'credentials', 'signing.p8'), 'PRIVATE KEY\n');
+  writeFileSync(join(root, '.env.production'), 'TOKEN=hunter2\n');
+  writeFileSync(join(root, 'a', 'b', '.env'), 'NESTED=1\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return root;
+}
+
+// Run a git command in the workspace and report exit status rather than throwing.
+const tryGit = (dir, ...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+
+test('ordinary source is present in the workspace', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'src', 'app.js')), true);
+});
+
+test('denied paths are absent from the working tree, at every depth', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'signing.p8')), false);
+  assert.equal(existsSync(join(ws.dir, '.env.production')), false);
+  assert.equal(existsSync(join(ws.dir, 'a', 'b', '.env')), false);
+});
+
+test('denied paths are not even enumerable — git ls-files does not list them', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  const listed = tryGit(ws.dir, 'ls-files').stdout;
+  assert.match(listed, /src\/app\.js/);
+  assert.doesNotMatch(listed, /credentials/);
+  assert.doesNotMatch(listed, /\.env/);
+});
+
+test('git show cannot recover a denied file — the regression Task 4 shipped', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  const shown = tryGit(ws.dir, 'show', 'HEAD:credentials/signing.p8');
+  assert.notEqual(shown.status, 0, 'git show must fail, not print the key');
+  assert.doesNotMatch(shown.stdout, /PRIVATE KEY/);
+});
+
+test('git archive does not carry a denied file out of the workspace', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  const archived = spawnSync('git', ['-C', ws.dir, 'archive', 'HEAD'], { encoding: 'buffer' });
+  assert.equal(archived.status, 0);
+  assert.doesNotMatch(archived.stdout.toString('latin1'), /signing\.p8/);
+});
+
+test('the denied blob is gone from the object database, not merely unreferenced', () => {
+  const root = repoWithSecrets();
+  const blob = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD:credentials/signing.p8'],
+    { encoding: 'utf8' }).trim();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  const read = tryGit(ws.dir, 'cat-file', '-p', blob);
+  assert.notEqual(read.status, 0, `blob ${blob} is still readable in the workspace`);
+});
+
+test('no remote survives, so the secrets cannot be fetched back', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.equal(tryGit(ws.dir, 'remote').stdout.trim(), '');
+});
+
+test('the workspace is on its own branch and two for one member do not collide', () => {
+  const root = repoWithSecrets();
+  const a = createWorkspace(root, 'qa', DENY, 'workspace');
+  const b = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.match(a.branch, /^agent-team\/qa-[0-9a-f]{6}$/);
+  assert.notEqual(a.dir, b.dir);
+  assert.notEqual(a.branch, b.branch);
+});
+
+test('isolation none gives a scratch directory with no repository at all', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'marketer', DENY, 'none');
+  assert.equal(existsSync(ws.dir), true);
+  assert.equal(existsSync(join(ws.dir, '.git')), false);
+  assert.equal(ws.branch, null);
+  assert.equal(ws.kind, 'none');
+});
+
+test('pruning removes the workspace directory', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  pruneWorkspace(ws);
+  assert.equal(existsSync(ws.dir), false);
+});
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npm test`
+Expected: FAIL — `Cannot find module '.../src/workspace.js'`
+
+- [ ] **Step 3: Write the minimal implementation**
+
+`src/workspace.js`:
+
+```js
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+
+const git = (dir, ...args) =>
+  execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' }).toString();
+
+// Let git's own ignore engine decide what matches, so deny_paths keep gitignore
+// semantics (a bare `credentials` matches the directory at any depth). --no-index
+// is required: without it, check-ignore reports tracked files as not ignored.
+function deniedFiles(dir, denyPaths) {
+  writeFileSync(join(dir, '.git', 'info', 'exclude'), `${denyPaths.join('\n')}\n`);
+  const tracked = execFileSync('git', ['-C', dir, 'ls-files', '-z']);
+  if (tracked.length === 0) return [];
+  const matched = spawnSync(
+    'git', ['-C', dir, 'check-ignore', '--no-index', '--stdin', '-z'],
+    { input: tracked }
+  );
+  // exit 1 means nothing matched, which is not an error
+  return matched.stdout.toString().split('\0').filter(Boolean);
+}
+
+function otherBranches(dir, keep) {
+  return git(dir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((b) => b && b !== keep);
+}
+
+export function createWorkspace(repoRoot, member, denyPaths, isolation) {
+  const id = randomBytes(3).toString('hex');
+
+  if (isolation === 'none') {
+    return {
+      dir: mkdtempSync(join(tmpdir(), `agent-team-${member}-`)),
+      branch: null, id, kind: 'none'
+    };
+  }
+
+  const dir = join(repoRoot, '.claude', 'workspaces', `${member}-${id}`);
+  const branch = `agent-team/${member}-${id}`;
+  mkdirSync(dirname(dir), { recursive: true });
+
+  // file:// forces the transport path: no hardlinked objects and no
+  // objects/info/alternates pointing back at the parent repository.
+  execFileSync('git', [
+    'clone', '-q', '--depth', '1', '--single-branch', '--no-hardlinks',
+    `file://${repoRoot}`, dir
+  ], { stdio: 'pipe' });
+
+  git(dir, 'config', 'user.email', 'agent-team@localhost');
+  git(dir, 'config', 'user.name', 'agent-team');
+  git(dir, 'config', 'commit.gpgsign', 'false');
+
+  for (const rel of deniedFiles(dir, denyPaths)) {
+    rmSync(join(dir, rel), { force: true });
+  }
+
+  // The orphan commit is what does the work. A plain `git rm` commit leaves the
+  // secret readable at HEAD~1; an orphan root commit makes the cloned commit
+  // unreachable so gc can prune its blobs.
+  git(dir, 'checkout', '-q', '--orphan', branch);
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', `workspace: ${member}`);
+  for (const stale of otherBranches(dir, branch)) git(dir, 'branch', '-q', '-D', stale);
+  git(dir, 'remote', 'remove', 'origin');
+  git(dir, 'reflog', 'expire', '--expire=now', '--all');
+  git(dir, 'gc', '-q', '--prune=now');
+
+  return { dir, branch, id, kind: isolation };
+}
+
+export function pruneWorkspace(workspace) {
+  rmSync(workspace.dir, { recursive: true, force: true });
+}
+```
+
+`pruneWorkspace` takes the workspace object rather than a repo root and a path: a clone is not
+registered with the parent repository, so there is no `git worktree remove` to run and no reason
+for the caller to hold the root.
+
+- [ ] **Step 4: Run the tests and watch them pass**
+
+Run: `npm test`
+Expected: PASS, 10 tests in `test/workspace.test.js`.
+
+If the blob test fails, `gc --prune=now` did not reach the object — check that every other branch
+and the origin remote are gone before the gc runs, and that the clone did not bring an
+`objects/info/alternates` file (`cat .git/objects/info/alternates` should not exist).
+
+- [ ] **Step 5: Delete the superseded module**
+
+```bash
+git rm -q src/worktree.js test/worktree.test.js
+npm test
+```
+
+Expected: PASS. Nothing imports `worktree.js` yet — `src/dispatch.js` does not exist until R6.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/workspace.js test/workspace.test.js
+git commit -m "fix(workspace): exclude denied paths from the object store, not just the working tree"
+```
+
+---
+
+### Task R5: Brief assembly with identity and the delegation protocol — replaces Task 7
+
+The brief gains two jobs. It tells a member who they are (charter, persona, deliverable), and for
+a member with reports it carries the protocol by which they delegate. Keep the dialect loader and
+the section-ordering guarantee from Task 7 unchanged.
+
+**Files:**
+- Modify: `src/brief.js` (full rewrite)
+- Modify: `test/brief.test.js` (full rewrite)
+- Create: `references/grok-tools.md`, `references/codex-tools.md` (unchanged from Task 7 — copy
+  the content from that task verbatim; it is not reproduced here because it did not change)
+
+- [ ] **Step 1: Write the failing tests**
+
+`test/brief.test.js` — replace the whole file:
+
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { buildBrief, loadDialect } from '../src/brief.js';
+
+const IMPL = {
+  member: 'implementer', title: 'Implementer', agent: 'codex', model: null, skill: null,
+  charter: null, persona: null, isolation: 'workspace', deliverable: 'diff',
+  output_path: null, reports_to: 'eng-lead', reports: [], warning: null
+};
+
+const LEAD = {
+  ...IMPL, member: 'eng-lead', title: 'Engineering lead', agent: 'claude',
+  isolation: 'read-only', deliverable: 'decision', reports_to: null,
+  reports: ['implementer', 'reviewer']
+};
+
+const base = { task: 't', cwd: '/tmp/ws', denyPaths: ['**/.env*'] };
+
+test('the brief carries member, cwd, and deny_paths', () => {
+  const b = buildBrief({ resolved: IMPL, ...base });
+  assert.equal(b.member, 'implementer');
+  assert.equal(b.title, 'Implementer');
+  assert.equal(b.cwd, '/tmp/ws');
+  assert.deepEqual(b.deny_paths, ['**/.env*']);
+});
+
+test('read_only is derived from isolation', () => {
+  assert.equal(buildBrief({ resolved: IMPL, ...base }).read_only, false);
+  assert.equal(buildBrief({ resolved: LEAD, ...base }).read_only, true);
+  assert.equal(
+    buildBrief({ resolved: { ...IMPL, isolation: 'none' }, ...base }).read_only, true
+  );
+});
+
+test('the deliverable and its destination reach the adapter as fields', () => {
+  const b = buildBrief({
+    resolved: { ...IMPL, deliverable: 'document', output_path: 'docs/design' }, ...base
+  });
+  assert.equal(b.deliverable, 'document');
+  assert.equal(b.output_path, 'docs/design');
+});
+
+test('sections run dialect, charter, persona, skill, then the task', () => {
+  const b = buildBrief({
+    resolved: { ...IMPL, charter: 'THE-CHARTER', persona: 'THE-PERSONA', skill: 'x' },
+    ...base, task: 'THE-TASK', skillText: 'THE-SKILL', dialectText: 'THE-DIALECT'
+  });
+  const at = (s) => b.task.indexOf(s);
+  assert.ok(at('THE-DIALECT') >= 0);
+  assert.ok(at('THE-CHARTER') > at('THE-DIALECT'), 'charter after dialect');
+  assert.ok(at('THE-PERSONA') > at('THE-CHARTER'), 'persona after charter');
+  assert.ok(at('THE-SKILL') > at('THE-PERSONA'), 'skill after persona');
+  assert.ok(at('THE-TASK') > at('THE-SKILL'), 'task last');
+});
+
+test('a member with no charter, persona, or skill gets just the task', () => {
+  const b = buildBrief({ resolved: IMPL, ...base, task: 'ONLY' });
+  assert.match(b.task, /ONLY/);
+  assert.doesNotMatch(b.task, /Your charter/);
+  assert.doesNotMatch(b.task, /How you work/);
+});
+
+test('a member with no reports is told nothing about delegating', () => {
+  const b = buildBrief({ resolved: IMPL, ...base });
+  assert.equal(b.can_delegate, false);
+  assert.deepEqual(b.reports, []);
+  assert.doesNotMatch(b.task, /delegating/i);
+});
+
+test('a manager is given the protocol, named reports, and its depth budget', () => {
+  const b = buildBrief({ resolved: LEAD, ...base, depth: 1, maxDepth: 3 });
+  assert.equal(b.can_delegate, true);
+  assert.deepEqual(b.reports, ['implementer', 'reviewer']);
+  assert.equal(b.depth, 1);
+  assert.equal(b.max_depth, 3);
+  assert.match(b.task, /"status":"delegating"/);
+  assert.match(b.task, /implementer, reviewer/);
+  assert.match(b.task, /depth 1 of a maximum of 3/);
+});
+
+test('a manager at the depth limit is told not to delegate', () => {
+  const b = buildBrief({ resolved: LEAD, ...base, depth: 3, maxDepth: 3 });
+  assert.equal(b.can_delegate, false);
+  assert.match(b.task, /cannot delegate any further/);
+});
+
+test('results from reports appear before the task, on a synthesis round', () => {
+  const b = buildBrief({
+    resolved: LEAD, ...base, task: 'SYNTHESISE',
+    priorResults: [{ member: 'implementer', status: 'ok', summary: 'SUB-RESULT' }]
+  });
+  assert.ok(b.task.indexOf('SUB-RESULT') < b.task.indexOf('SYNTHESISE'));
+  assert.match(b.task, /Results from your reports/);
+});
+
+test('the claude dialect is empty, because no translation is needed', () => {
+  assert.equal(loadDialect('claude'), null);
+});
+
+test('the grok dialect exists and mentions skills', () => {
+  assert.match(loadDialect('grok'), /skill/i);
+});
+
+test('an unknown dialect is null rather than an error', () => {
+  assert.equal(loadDialect('nonesuch'), null);
+});
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npm test`
+Expected: FAIL — `Cannot find module '.../src/brief.js'`
+
+- [ ] **Step 3: Write the minimal implementation**
+
+`src/brief.js`:
+
+```js
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const REFS = join(dirname(fileURLToPath(import.meta.url)), '..', 'references');
+
+export function loadDialect(dialect) {
+  if (!dialect || dialect === 'claude') return null;   // native vocabulary, nothing to translate
+  const path = join(REFS, `${dialect}-tools.md`);
+  return existsSync(path) ? readFileSync(path, 'utf8') : null;
+}
+
+function delegationSection(reports, depth, maxDepth) {
+  return [
+    '# Delegating',
+    '',
+    `Your direct reports are: ${reports.join(', ')}.`,
+    `You are at depth ${depth} of a maximum of ${maxDepth}.`,
+    '',
+    'If this work belongs to your reports, answer with delegations instead of a deliverable:',
+    '',
+    '    {"status":"delegating","delegations":[{"to":"<report>","task":"<their whole brief>"}]}',
+    '',
+    `You may only delegate to the reports named above. Each task you write is the entire`,
+    'brief that report receives — they cannot see this one, so it must stand alone.',
+    '',
+    'You will then be called again with their results, and must produce your own',
+    'deliverable from them.'
+  ].join('\n');
+}
+
+function depthLimitSection(maxDepth) {
+  return [
+    '# Delegating',
+    '',
+    `You cannot delegate any further: depth ${maxDepth} is the configured maximum.`,
+    'Produce your deliverable yourself.'
+  ].join('\n');
+}
+
+export function buildBrief({
+  resolved, task, cwd, denyPaths, skillText = null, dialectText = null,
+  timeoutSec = 900, depth = 0, maxDepth = 3, priorResults = null
+}) {
+  const hasReports = resolved.reports.length > 0;
+  const canDelegate = hasReports && depth < maxDepth;
+
+  const sections = [];
+  if (dialectText) sections.push(dialectText);
+  if (resolved.charter) sections.push(`# Your charter\n\n${resolved.charter}`);
+  if (resolved.persona) sections.push(`# How you work\n\n${resolved.persona}`);
+  if (skillText) sections.push(skillText);
+  if (canDelegate) sections.push(delegationSection(resolved.reports, depth, maxDepth));
+  else if (hasReports) sections.push(depthLimitSection(maxDepth));
+  if (priorResults) {
+    sections.push(
+      `# Results from your reports\n\n\`\`\`json\n${JSON.stringify(priorResults, null, 2)}\n\`\`\``
+    );
+  }
+  sections.push(`# Task\n\n${task}`);
+
+  return {
+    member: resolved.member,
+    title: resolved.title,
+    task: sections.join('\n\n---\n\n'),
+    cwd,
+    read_only: resolved.isolation !== 'workspace',
+    deliverable: resolved.deliverable,
+    output_path: resolved.output_path,
+    model: resolved.model,
+    timeout_s: timeoutSec,
+    deny_paths: denyPaths,
+    reports: resolved.reports,
+    can_delegate: canDelegate,
+    depth,
+    max_depth: maxDepth
+  };
+}
+```
+
+`read_only` is `isolation !== 'workspace'` rather than `=== 'read-only'`, so `none` is read-only
+too. A scratch directory with no repository is not somewhere a member should be told to write
+code.
+
+- [ ] **Step 4: Run the tests and watch them pass**
+
+Run: `npm test`
+Expected: PASS, 12 tests in `test/brief.test.js`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/brief.js test/brief.test.js references/
+git commit -m "feat(brief): carry a member's charter, deliverable, and delegation protocol"
+```
+
+---
+
+### Task R6: The recursive dispatcher — replaces Task 8
+
+Owns four decisions: resolve before any side effect, keep a workspace on failure and prune it on
+success, refuse a delegation that crosses the reporting line, and stop when either cap is hit.
+
+**Two caps, each stopping a different runaway.** `max_depth` bounds how far down the tree one
+objective can reach. `max_delegations` bounds the total number of adapter runs in a single
+dispatch, which is what stops a manager that keeps delegating sideways forever. The budget is one
+shared counter for the whole dispatch, not per branch — a fan-out of five is five runs against the
+same budget.
+
+**Files:**
+- Create: `src/dispatch.js`
+- Create: `test/dispatch.test.js`
+- Modify: `adapters/mock` (per-member scripting — see Step 0)
+
+- [ ] **Step 0: Teach the mock to answer differently per member**
+
+Recursive tests need one member to delegate and another to do the work. Extend the mock's `run`
+branch so a script containing `by_member` selects on the brief's `member`, falling back to the
+top-level object when there is no entry:
+
+```sh
+# inside adapters/mock, in the `run` branch, after the brief is read into $BRIEF
+# and the script into $SCRIPT — replace the single-response lookup with:
+node -e '
+  const brief = JSON.parse(process.argv[1]);
+  const script = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
+  const picked = (script.by_member && script.by_member[brief.member]) || script;
+  if (picked.hang) { setInterval(() => {}, 1000); }
+  else { process.stdout.write(JSON.stringify({ ...picked, received: brief })); }
+' "$BRIEF" "$SCRIPT"
+```
+
+Keep the existing behaviour for a script with no `by_member` key — every Task 6 test depends on it.
+
+- [ ] **Step 1: Write the failing tests**
+
+`test/dispatch.test.js`:
+
+```js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { dispatch } from '../src/dispatch.js';
+
+const TEAM = {
+  'eng-lead': { agent: 'mock', isolation: 'read-only', deliverable: 'decision' },
+  implementer: { agent: 'mock', reports_to: 'eng-lead', isolation: 'workspace' },
+  reviewer: { agent: 'mock', reports_to: 'eng-lead', isolation: 'read-only' },
+  marketer: { agent: 'mock', isolation: 'none' }
+};
+
+function project(scripted, { members = TEAM, defaults = {} } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'at-dsp-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');   // global commit.gpgsign=true would break the fixture
+  mkdirSync(join(root, '.claude'), { recursive: true });
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  writeFileSync(join(root, 'app.js'), 'ok\n');
+  writeFileSync(join(root, 'credentials', 'key.p8'), 'SECRET\n');
+  writeFileSync(join(root, '.claude', 'agent-team.json'), JSON.stringify({
+    members,
+    deny_paths: ['credentials/**'],
+    defaults: { on_unavailable: 'mock', ...defaults }
+  }));
+  const script = join(root, 'script.json');
+  writeFileSync(script, JSON.stringify(scripted));
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return { root, script };
+}
+
+const adapterDir = new URL('../adapters/', import.meta.url).pathname;
+const run = (root, script, member, extra = {}) => dispatch({
+  projectRoot: root, member, task: 'go', adapterDir,
+  env: { AGENT_TEAM_MOCK_SCRIPT: script }, ...extra
+});
+
+test('a successful run returns the result and prunes the workspace', async () => {
+  const { root, script } = project({ status: 'ok', summary: 'clean' });
+  const r = await run(root, script, 'implementer');
+  assert.equal(r.status, 'ok');
+  assert.equal(existsSync(r.workspace.dir), false, 'workspace should be pruned on success');
+});
+
+test('a failed run KEEPS the workspace for inspection', async () => {
+  const { root, script } = project({ status: 'failed', summary: 'exploded' });
+  const r = await run(root, script, 'implementer');
+  assert.equal(r.status, 'failed');
+  assert.equal(existsSync(r.workspace.dir), true, 'workspace should survive a failure');
+});
+
+test('a timed-out run also keeps the workspace', async () => {
+  const { root, script } = project({ hang: true });
+  const r = await run(root, script, 'implementer', { timeoutMs: 1500 });
+  assert.equal(r.status, 'timeout');
+  assert.equal(existsSync(r.workspace.dir), true, 'a timeout is a failure; keep the evidence');
+});
+
+test('the adapter is handed a workspace it cannot read the secret from', async () => {
+  const { root, script } = project({ status: 'ok', summary: 's' });
+  const r = await run(root, script, 'implementer');
+  assert.ok(r.received.cwd.includes('workspaces'));
+  assert.equal(existsSync(join(r.received.cwd, 'credentials', 'key.p8')), false);
+});
+
+test('an unknown member fails before any workspace is created', async () => {
+  const { root, script } = project({ status: 'ok', summary: 's' });
+  await assert.rejects(() => run(root, script, 'nope'), /unknown member/);
+});
+
+test('an isolation-none member runs without a repository', async () => {
+  const { root, script } = project({ status: 'ok', summary: 'copy written' });
+  const r = await run(root, script, 'marketer');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.received.read_only, true);
+  assert.equal(existsSync(join(r.received.cwd, '.git')), false);
+});
+
+test('a manager delegates, its report runs, and the manager synthesises', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': { status: 'delegating', delegations: [{ to: 'implementer', task: 'build it' }] },
+      implementer: { status: 'ok', summary: 'built' }
+    }
+  });
+  const r = await run(root, script, 'eng-lead');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.delegated.length, 1);
+  assert.equal(r.delegated[0].member, 'implementer');
+  assert.equal(r.delegated[0].status, 'ok');
+  // the second call to the manager carried the report's result
+  assert.match(r.received.task, /Results from your reports/);
+  assert.match(r.received.task, /built/);
+});
+
+test('delegating outside your direct reports is refused', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': { status: 'delegating', delegations: [{ to: 'marketer', task: 'x' }] }
+    }
+  });
+  await assert.rejects(() => run(root, script, 'eng-lead'), /not a direct report/);
+});
+
+test('delegating with an empty list is a protocol error, not an infinite loop', async () => {
+  const { root, script } = project({
+    by_member: { 'eng-lead': { status: 'delegating', delegations: [] } }
+  });
+  const r = await run(root, script, 'eng-lead');
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /no delegations/);
+});
+
+test('max_depth stops a manager from delegating past the limit', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': { status: 'delegating', delegations: [{ to: 'implementer', task: 'x' }] },
+      implementer: { status: 'ok', summary: 'built' }
+    }
+  }, { defaults: { max_depth: 0 } });
+  const r = await run(root, script, 'eng-lead');
+  // at depth 0 of max 0 the brief forbids delegating, and the dispatcher enforces it too
+  assert.equal(r.received.can_delegate, false);
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /max_depth/);
+});
+
+test('max_delegations bounds the total number of adapter runs', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': { status: 'delegating', delegations: [{ to: 'implementer', task: 'x' }] },
+      implementer: { status: 'ok', summary: 'built' }
+    }
+  }, { defaults: { max_delegations: 2 } });
+  const r = await run(root, script, 'eng-lead');
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /budget/);
+});
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npm test`
+Expected: FAIL — `Cannot find module '.../src/dispatch.js'`
+
+- [ ] **Step 3: Write the minimal implementation**
+
+`src/dispatch.js`:
+
+```js
+import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
+import { loadConfig } from './config.js';
+import { resolveMember } from './resolve.js';
+import { createWorkspace, pruneWorkspace } from './workspace.js';
+import { buildBrief, loadDialect } from './brief.js';
+import { runAdapter, DEFAULT_TIMEOUT_MS } from './adapter.js';
+
+const adapterPath = (dir, agent) => join(dir, agent);
+
+function makeProbe(adapterDir, env) {
+  return (agent) => {
+    const p = adapterPath(adapterDir, agent);
+    if (!existsSync(p)) return false;
+    try {
+      // probe must be cheap; a non-zero exit means the agent is unusable, not an error
+      execFileSync(p, ['probe'], { stdio: 'pipe', env: { ...process.env, ...env }, timeout: 30_000 });
+      return true;
+    } catch { return false; }
+  };
+}
+
+async function readCapabilities(adapterDir, agent, env) {
+  const res = await runAdapter(adapterPath(adapterDir, agent), 'capabilities', { env });
+  return res.status === 'failed' ? {} : res;
+}
+
+export async function dispatch({
+  projectRoot, member, task, adapterDir, assignments = {},
+  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS
+}) {
+  const config = loadConfig(projectRoot);
+  const budget = { runs: config.defaults.max_delegations };
+  return runMember({
+    config, projectRoot, member, task, adapterDir,
+    assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0
+  });
+}
+
+async function runMember(ctx) {
+  const { config, projectRoot, member, task, adapterDir, assignments,
+          skillsDir, env, timeoutMs, budget, depth } = ctx;
+
+  const probe = makeProbe(adapterDir, env);
+  const resolved = resolveMember(config, member, { probe, assignments });  // throws before side effects
+  assignments[member] = resolved.agent;
+
+  const caps = await readCapabilities(adapterDir, resolved.agent, env);
+  const dialectText = loadDialect(caps.tool_dialect ?? resolved.agent);
+
+  let skillText = null;
+  if (resolved.skill && skillsDir) {
+    const p = join(skillsDir, resolved.skill, 'SKILL.md');
+    if (!existsSync(p)) {
+      throw new Error(`member "${member}" binds skill "${resolved.skill}" but ${p} is missing`);
+    }
+    skillText = readFileSync(p, 'utf8');
+  }
+
+  const workspace = createWorkspace(projectRoot, member, config.deny_paths, resolved.isolation);
+  const maxDepth = config.defaults.max_depth;
+  const delegated = [];
+  let priorResults = null;
+  let result;
+
+  for (;;) {
+    if (budget.runs <= 0) {
+      result = { status: 'failed', summary: `delegation budget exhausted (max_delegations)` };
+      break;
+    }
+    budget.runs -= 1;
+
+    const brief = buildBrief({
+      resolved, task, cwd: workspace.dir, denyPaths: config.deny_paths,
+      skillText, dialectText, timeoutSec: Math.floor(timeoutMs / 1000),
+      depth, maxDepth, priorResults
+    });
+
+    result = await runAdapter(adapterPath(adapterDir, resolved.agent), 'run', {
+      brief, timeoutMs, env, cwd: workspace.dir
+    });
+
+    if (result.status !== 'delegating') break;
+
+    const requests = result.delegations ?? [];
+    if (requests.length === 0) {
+      result = { ...result, status: 'failed', summary: 'answered "delegating" with no delegations' };
+      break;
+    }
+    if (depth >= maxDepth) {
+      result = { ...result, status: 'failed', summary: `delegation refused: already at max_depth ${maxDepth}` };
+      break;
+    }
+
+    const round = [];
+    for (const req of requests) {
+      // The reporting line is a hard boundary: a manager may reach its own reports and no one else.
+      if (!resolved.reports.includes(req.to)) {
+        throw new Error(
+          `member "${member}" may not delegate to "${req.to}" — not a direct report ` +
+          `(reports: ${resolved.reports.join(', ') || 'none'})`
+        );
+      }
+      const sub = await runMember({
+        ...ctx, member: req.to, task: req.task, depth: depth + 1, priorResults: null
+      });
+      round.push(sub);
+      delegated.push(sub);
+    }
+    priorResults = round.map((r) => ({
+      member: r.member, status: r.status, summary: r.summary ?? null
+    }));
+  }
+
+  if (result.status === 'ok') pruneWorkspace(workspace);
+
+  return {
+    ...result,
+    member, agent: resolved.agent, warning: resolved.warning,
+    workspace, depth, delegated
+  };
+}
+```
+
+`assignments` is one object threaded through the whole tree and mutated as each member resolves,
+so `distinct_from` sees siblings that ran earlier in the same dispatch. That is the only reason
+`dispatch` copies it up front — a caller's object must not be written into.
+
+- [ ] **Step 4: Run the tests and watch them pass**
+
+Run: `npm test`
+Expected: PASS, 11 tests in `test/dispatch.test.js`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/dispatch.js test/dispatch.test.js adapters/mock
+git commit -m "feat(dispatch): delegate down the reporting tree under depth and budget caps"
+```
+
+---
+
+## Deltas to the tasks that still stand
+
+**Task 5 (mock adapter)** — gains the `by_member` lookup, done as Step 0 of R6. No separate task.
+
+**Task 9 (claude adapter)** — the brief now carries `deliverable`, `can_delegate` and `reports`.
+The adapter passes them through; it does not interpret them. One added test: a brief with
+`can_delegate: true` reaches the subagent with the delegation section intact.
+
+**Task 10 (conformance suite)** — add two rows every adapter must satisfy: a `run` whose brief has
+`can_delegate: false` never answers `status: "delegating"`, and a brief with `read_only: true`
+leaves the workspace `git status --porcelain` empty.
+
+**Task 13 (manifests)** — no change.
+
+**Task 14 (skills and CLI)** — three changes:
+- `/delegate` takes a member name, not a role name, and its "Do not" section gains: do not name a
+  member that is not in the config; run `agent-team org` to see who exists.
+- `bin/agent-team.js` gains an `org` subcommand printing `renderOrg(config.org)`, so a member list
+  is discoverable without opening the JSON.
+- `/agent-team-init` scaffolds the worked example from Revision 2's "Revised config shape" —
+  `coo`, `eng-lead`, `implementer`, `reviewer`, `qa`, `designer`, `marketer` — commented so the
+  non-engineering members are obviously meant to be edited or deleted rather than kept by default.
