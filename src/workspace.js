@@ -349,6 +349,62 @@ function otherBranches(dir, keep) {
     .filter((b) => b && b !== keep);
 }
 
+// Exported and unit-tested white-box, same reasoning as parseCheckIgnoreOutput: a tracked
+// path holding bytes that are not valid UTF-8 is ordinary on Linux but cannot be created on
+// this machine, so the parser is driven directly on fabricated Buffers instead.
+//
+// dropSymlinks and dropSubmodules both used to end their `ls-files --stage -z` read in
+// `.toString()` — the same lossy default 'utf8' decode already fixed in deniedFiles, left in
+// place in the two functions that run right after it. A symlink or gitlink whose name decodes
+// to something else is then never actually removed: `rmSync(..., { force: true })` swallows
+// the ENOENT and `git rm --cached --ignore-unmatch` no-ops, so the entry survives into the
+// commit while droppedSymlinks reports the mangled name as dropped — the signal lies.
+//
+// The record format is "<mode> <sha> <stage>\t<path>", not check-ignore's NUL-separated quad,
+// so the tab that ends the header is located by byte index. The header is git-internal and
+// ASCII-safe, so decoding it is fine; the path is the field that isn't guaranteed to be valid
+// UTF-8 and the one that goes on to build a filesystem path, so it stays raw bytes.
+export function parseLsFilesStage(raw) {
+  // Same guarantee as parseCheckIgnoreOutput: every record is NUL-terminated, so a stream not
+  // ending on a NUL was cut short — and a half-read record's real path is unknowable, which
+  // would silently leave a symlink or submodule in place.
+  if (raw.length > 0 && raw[raw.length - 1] !== 0) {
+    throw new Error(
+      'workspace: git ls-files --stage output ends mid-record (no trailing NUL) — the stream ' +
+      'was truncated, so an unknown number of tracked entries is missing from it'
+    );
+  }
+  const entries = [];
+  for (const record of splitNulBuffer(raw)) {
+    if (record.length === 0) continue;
+    const tab = record.indexOf(0x09);
+    if (tab === -1) {
+      throw new Error(
+        'workspace: malformed git ls-files --stage record with no tab separating ' +
+        '"<mode> <sha> <stage>" from the path'
+      );
+    }
+    entries.push({
+      mode: record.subarray(0, tab).toString('utf8').split(' ')[0],
+      path: record.subarray(tab + 1)
+    });
+  }
+  return entries;
+}
+
+// `git rm` takes its pathspec as an argv element, and argv elements are strings — routing a
+// path that is not valid UTF-8 back through argv would undo the byte-exact parse above.
+// --pathspec-from-file=- with --pathspec-file-nul feeds it over stdin as bytes instead
+// (git 2.25+), so the index entry removed is exactly the one ls-files reported.
+function gitRmCached(dir, relPath, { recursive = false } = {}) {
+  const args = ['-C', dir, 'rm', '-q', '-f', '--cached', '--ignore-unmatch'];
+  if (recursive) args.push('-r');
+  args.push('--pathspec-from-file=-', '--pathspec-file-nul');
+  gitCapture('git rm --cached', args, {
+    input: Buffer.concat([Buffer.isBuffer(relPath) ? relPath : Buffer.from(relPath), Buffer.from([0])])
+  });
+}
+
 // Submodules are a hole in deny_paths: deniedFiles only ever inspects the superproject's
 // `git ls-files`, so a denied path living inside a submodule is invisible to it, and
 // .gitmodules survives the clone with real URLs — `git submodule update --init` can
@@ -360,21 +416,18 @@ function dropSubmodules(dir) {
   // first — at roughly 12,900 tracked files at 30-character paths. execFileSync threw there,
   // so it failed closed, but it failed closed on an ordinary app repo and said only ENOBUFS.
   const staged = gitCapture('git ls-files --stage (submodule scan)',
-    ['-C', dir, 'ls-files', '--stage', '-z']).toString();
-  const gitlinks = staged.split('\0').filter(Boolean).flatMap((entry) => {
-    const tab = entry.indexOf('\t');
-    const mode = entry.slice(0, tab).split(' ')[0];
-    const path = entry.slice(tab + 1);
-    return mode === '160000' ? [path] : [];
-  });
+    ['-C', dir, 'ls-files', '--stage', '-z']);
+  const gitlinks = parseLsFilesStage(staged)
+    .filter((entry) => entry.mode === '160000')
+    .map((entry) => entry.path);
   for (const rel of gitlinks) {
-    rmSync(join(dir, rel), { recursive: true, force: true });
-    execFileSync('git', ['-C', dir, 'rm', '-q', '-r', '-f', '--cached', '--ignore-unmatch', rel],
-      { stdio: 'pipe' });
+    // `rel` is a raw Buffer, so the path is built by concatenating Buffers rather than through
+    // the string-only path.join — same reasoning as the denied-file removal in createWorkspace.
+    rmSync(joinBuffer(dir, rel), { recursive: true, force: true });
+    gitRmCached(dir, rel, { recursive: true });
   }
   rmSync(join(dir, '.gitmodules'), { force: true });
-  execFileSync('git', ['-C', dir, 'rm', '-q', '-f', '--cached', '--ignore-unmatch', '.gitmodules'],
-    { stdio: 'pipe' });
+  gitRmCached(dir, '.gitmodules');
 }
 
 // A symlink is a hole in deny_paths for the same reason a submodule is: deniedFiles
@@ -394,22 +447,21 @@ function dropSubmodules(dir) {
 // request, not something granted here.
 function dropSymlinks(dir) {
   const staged = gitCapture('git ls-files --stage (symlink scan)',
-    ['-C', dir, 'ls-files', '--stage', '-z']).toString();
-  const links = staged.split('\0').filter(Boolean).flatMap((entry) => {
-    const tab = entry.indexOf('\t');
-    const mode = entry.slice(0, tab).split(' ')[0];
-    const path = entry.slice(tab + 1);
-    return mode === '120000' ? [path] : [];
-  });
+    ['-C', dir, 'ls-files', '--stage', '-z']);
+  const links = parseLsFilesStage(staged)
+    .filter((entry) => entry.mode === '120000')
+    .map((entry) => entry.path);
   for (const rel of links) {
     // rmSync on a symlink path removes the link itself, never what it points to — even
     // when the link targets a directory (fs never follows the symlink to decide what to
     // remove), so this cannot reach outside the workspace clone.
-    rmSync(join(dir, rel), { force: true });
-    execFileSync('git', ['-C', dir, 'rm', '-q', '-f', '--cached', '--ignore-unmatch', rel],
-      { stdio: 'pipe' });
+    rmSync(joinBuffer(dir, rel), { force: true });
+    gitRmCached(dir, rel);
   }
-  return links;
+  // The deletions above used the raw bytes; this is the operator-facing report, so it decodes.
+  // A name that is not valid UTF-8 renders with U+FFFD here — but the link it names is now
+  // genuinely gone, which is what the report previously got wrong.
+  return links.map((rel) => rel.toString('utf8'));
 }
 
 // Where workspaces live. AGENT_TEAM_WORKSPACE_ROOT overrides for tests and for anyone who

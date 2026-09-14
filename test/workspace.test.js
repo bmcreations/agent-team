@@ -9,7 +9,7 @@ import { tmpdir, platform } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import {
   createWorkspace, pruneWorkspace, cloneArgs, deniedFiles, parseCheckIgnoreOutput, gitFailure,
-  normalisationAliases, resolveDeniedPaths
+  normalisationAliases, resolveDeniedPaths, parseLsFilesStage
 } from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
@@ -995,4 +995,67 @@ test('normalisationAliases offers both spellings to check-ignore and maps matche
   // so this is a no-op everywhere it is not needed.
   const plainOnly = normalisationAliases(Buffer.concat([plain, nul]));
   assert.equal(Buffer.compare(plainOnly.stdin, Buffer.concat([plain, nul])), 0);
+});
+
+// --- A1-4: dropSymlinks and dropSubmodules must not decode paths through a lossy codec ---
+//
+// Both read `ls-files --stage -z` and ended in `.toString()` — the exact bug already fixed in
+// deniedFiles and documented at length above, left in place in the two functions that run
+// immediately after it. A tracked symlink or gitlink whose name holds bytes that are not
+// valid UTF-8 decodes to a different path: rmSync(..., { force: true }) swallows the ENOENT
+// and `git rm --cached --ignore-unmatch` no-ops, so the entry survives into the commit — and
+// droppedSymlinks reports the mangled name as dropped, so the signal actively lies.
+//
+// An end-to-end fixture is not buildable here (APFS rejects such a filename), which is the
+// same reason the parseCheckIgnoreOutput test above goes white-box. The record format differs
+// from check-ignore's — "<mode> <sha> <stage>\t<path>" — so the tab has to be found by byte
+// index, not by String.indexOf on a decoded string.
+
+test('parseLsFilesStage keeps a path that is not valid UTF-8 byte-exact', () => {
+  const nul = Buffer.from([0]);
+  const sha = 'a'.repeat(40);
+  // 0xFF can never appear in valid UTF-8; a lossy decode maps it to U+FFFD (ef bf bd),
+  // changing both the content and the length of the field.
+  const linkPath = Buffer.concat([
+    Buffer.from('creds/', 'utf8'), Buffer.from([0xff]), Buffer.from('link', 'utf8')
+  ]);
+  const record = (mode, path) => Buffer.concat([
+    Buffer.from(`${mode} ${sha} 0\t`, 'utf8'), path, nul
+  ]);
+  const raw = Buffer.concat([
+    record('100644', Buffer.from('app.js', 'utf8')),
+    record('120000', linkPath),
+    record('160000', Buffer.from('vendor/sub', 'utf8'))
+  ]);
+
+  const entries = parseLsFilesStage(raw);
+
+  assert.deepEqual(entries.map((e) => e.mode), ['100644', '120000', '160000']);
+  assert.ok(Buffer.isBuffer(entries[1].path), 'path must stay a raw Buffer, not a decoded string');
+  assert.equal(Buffer.compare(entries[1].path, linkPath), 0,
+    'the invalid-UTF-8 path must survive byte for byte — decoding it would point rmSync at a path that does not exist, and force:true would swallow the miss');
+  assert.equal(entries[2].path.toString('utf8'), 'vendor/sub');
+
+  // A path containing a tab is still split at the FIRST tab, which is the record separator.
+  const tabbed = Buffer.from('dir/we\tird', 'utf8');
+  assert.equal(Buffer.compare(parseLsFilesStage(record('100644', tabbed))[0].path, tabbed), 0);
+});
+
+test('parseLsFilesStage rejects a truncated stream rather than parsing what arrived', () => {
+  const sha = 'a'.repeat(40);
+  const whole = Buffer.concat([
+    Buffer.from(`100644 ${sha} 0\tapp.js`, 'utf8'), Buffer.from([0]),
+    Buffer.from(`120000 ${sha} 0\tcreds/link`, 'utf8'), Buffer.from([0])
+  ]);
+  assert.equal(parseLsFilesStage(whole).length, 2);
+  assert.deepEqual(parseLsFilesStage(Buffer.alloc(0)), []);
+
+  // Cut mid-path: the symlink record is incomplete, so its real name is unknown. Returning
+  // the first record alone would drop a symlink from droppedSymlinks and from the deletion.
+  assert.throws(() => parseLsFilesStage(whole.subarray(0, whole.length - 4)), /truncat/i);
+  // A record with no tab at all is malformed, not a path.
+  assert.throws(
+    () => parseLsFilesStage(Buffer.concat([Buffer.from('100644 nonsense', 'utf8'), Buffer.from([0])])),
+    /tab|malformed/i
+  );
 });
