@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync } from 'node:fs';
+import {
+  mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, chmodSync
+} from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir, platform } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
@@ -671,4 +673,70 @@ test('parseCheckIgnoreOutput keeps a pathname that is not valid UTF-8 byte-exact
   assert.equal(Buffer.compare(denied[0], pathname), 0,
     'the invalid-UTF-8 pathname must survive byte-for-byte — a lossy decode would replace 0xff with U+FFFD (0xef 0xbf 0xbd), changing both content and length');
   assert.ok(matchedDenyPaths.has('credentials/**'));
+});
+
+// --- R11-4: cover the "unexpected check-ignore source" guard end to end ---
+//
+// The scratch dir deniedFiles builds contains nothing but the exclude file it just wrote,
+// so a real check-ignore run there can never legitimately report any source other than
+// EXCLUDE_SOURCE. Reaching the guard's `throw` for real would require check-ignore itself
+// to misbehave, which isn't something a fixture can provoke — so this shadows `git` on
+// PATH with a stub that intercepts only the `check-ignore` invocation and forges a quad
+// with a bogus source, while every other git subcommand createWorkspace needs (clone,
+// config, ls-files, commit, ...) passes straight through to the real binary.
+
+function createUnexpectedSourceGitStub(realGitPath) {
+  const stubDir = mkdtempSync(join(tmpdir(), 'agent-team-git-stub-'));
+  const stubPath = join(stubDir, 'git');
+  writeFileSync(stubPath, [
+    '#!/usr/bin/env node',
+    "const { spawnSync } = require('node:child_process');",
+    `const REAL_GIT = ${JSON.stringify(realGitPath)};`,
+    'const args = process.argv.slice(2);',
+    "if (args.includes('check-ignore')) {",
+    '  // Forge a single -v -z match record whose source is not the scratch dir\'s own',
+    '  // exclude file — exactly what deniedFiles\'s isolation guard exists to catch.',
+    "  const fields = ['credentials/.gitignore', '1', 'credentials/**', 'credentials/secret.txt'];",
+    "  process.stdout.write(Buffer.from(fields.join('\\0') + '\\0', 'utf8'));",
+    '  process.exit(0);',
+    '}',
+    '// Every other invocation (clone, config, ls-files, commit, ...) passes straight',
+    '// through to the real git, inheriting this process\'s own stdio so the caller sees',
+    '// exactly what a direct call to the real binary would have produced.',
+    'const res = spawnSync(REAL_GIT, args, { stdio: "inherit" });',
+    'process.exit(res.status === null ? 1 : res.status);',
+    ''
+  ].join('\n'));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+function repoWithOneTrackedFile() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-stubsrc-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  writeFileSync(join(root, 'credentials', 'secret.txt'), 'PRIVATE KEY\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return root;
+}
+
+test('an unexpected check-ignore source in the scratch dir throws instead of silently dropping the hit', () => {
+  const root = repoWithOneTrackedFile();
+  const realGitPath = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const stubDir = createUnexpectedSourceGitStub(realGitPath);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${stubDir}:${originalPath}`;
+  try {
+    assert.throws(
+      () => createWorkspace(root, 'qa', ['credentials/**'], 'workspace'),
+      /unexpected check-ignore source "credentials\/\.gitignore".*expected only "\.git\/info\/exclude"/
+    );
+  } finally {
+    process.env.PATH = originalPath;
+  }
 });
