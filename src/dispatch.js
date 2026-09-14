@@ -85,6 +85,25 @@ async function runMember(ctx) {
       `a name-based deny_paths boundary cannot see through them: ${droppedSymlinks.join(', ')}`
     );
   }
+  // The two warnings above report true, independent facts, but an operator has to join them
+  // manually to see when they are actually the SAME defeated intent: a deny_paths entry with
+  // a trailing slash (a directory-only pattern) does not match a symlink entry of the same
+  // name, so the symlink survives arbitration unmatched — and is then dropped anyway by
+  // dropSymlinks' unconditional policy, for an unrelated reason. The entry reads "matched
+  // nothing" and the symlink reads "dropped" as two unrelated lines; call out when they are
+  // one story. This does not replace either warning above or either list on the result — it
+  // is strictly additional, and it does not attempt to resolve the symlink's target (see
+  // dropSymlinks in workspace.js for why that was rejected).
+  const stripTrailingSlashes = (p) => p.replace(/\/+$/, '');
+  for (const linkName of droppedSymlinks) {
+    const matchingEntry = unmatchedDenyPaths.find((entry) => stripTrailingSlashes(entry) === linkName);
+    if (matchingEntry) {
+      console.warn(
+        `agent-team: member "${member}": deny_paths entry "${matchingEntry}" matched nothing, but a ` +
+        `tracked symlink named "${linkName}" was dropped — the entry probably did not cover what you intended`
+      );
+    }
+  }
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;

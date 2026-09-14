@@ -326,3 +326,66 @@ test('an isolation-none run reports no dropped symlinks rather than throwing', a
   assert.equal(r.status, 'ok');
   assert.deepEqual(r.droppedSymlinks, []);
 });
+
+// --- R12-5: correlate a dropped symlink with the deny_paths entry it defeated ---
+
+test('a dropped symlink that defeated the deny_paths entry naming it gets one correlated warning', async () => {
+  const { root, script } = project({ status: 'ok', summary: 'clean' }, { denyPaths: ['credentials/'] });
+  // Replace project()'s plain credentials/key.p8 with the r3 shape: `credentials` is now a
+  // tracked symlink to a tracked `realsecrets/` directory. `credentials/` (trailing-slash,
+  // directory-only) does not match a symlink entry, so it goes to unmatchedDenyPaths; the
+  // symlink itself is unconditionally dropped; and realsecrets/key.pem — tracked under its
+  // own, never-denied name — still ships. The operator wrote `credentials/` meaning to deny
+  // the secret, saw a `credentials` entry drop, and (before this fix) had to notice on their
+  // own that the two facts are related.
+  execFileSync('git', ['-C', root, 'rm', '-q', '-r', 'credentials'], { stdio: 'pipe' });
+  mkdirSync(join(root, 'realsecrets'), { recursive: true });
+  writeFileSync(join(root, 'realsecrets', 'key.pem'), 'TOP_SECRET_XYZ\n');
+  symlinkSync('realsecrets', join(root, 'credentials'));
+  execFileSync('git', ['-C', root, 'add', '-A'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'symlink credentials to realsecrets'], { stdio: 'pipe' });
+
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    const r = await run(root, script, 'implementer');
+    assert.equal(r.status, 'ok');
+    // Sanity: both underlying facts must still be present, unchanged — this is an additional
+    // warning, not a replacement for either list.
+    assert.deepEqual(r.droppedSymlinks, ['credentials']);
+    assert.deepEqual(r.unmatchedDenyPaths, ['credentials/']);
+    assert.ok(
+      warnings.some((w) => w.includes('credentials/') && w.includes('credentials') && /probably did not cover/.test(w)),
+      `expected one correlated warning naming both the deny entry and the dropped symlink, got: ${JSON.stringify(warnings)}`
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('a dropped symlink whose name matches no deny_paths entry gets no correlated warning', async () => {
+  const { root, script } = project({ status: 'ok', summary: 'clean' });
+  // r2's shape: a symlink deny_paths never named at all — unmatchedDenyPaths is empty
+  // (the default 'credentials/**' entry matches the plain credentials/key.p8 tracked file),
+  // so there is nothing for 'escape-link' to correlate with.
+  symlinkSync(join(root, 'app.js'), join(root, 'escape-link'));
+  execFileSync('git', ['-C', root, 'add', '-A'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'add escape-link'], { stdio: 'pipe' });
+
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    const r = await run(root, script, 'implementer');
+    assert.equal(r.status, 'ok');
+    assert.deepEqual(r.droppedSymlinks, ['escape-link']);
+    assert.deepEqual(r.unmatchedDenyPaths, [], 'sanity: nothing unmatched, so no correlation is possible');
+    assert.ok(
+      warnings.every((w) => !/probably did not cover/.test(w)),
+      `expected no correlated warning, got: ${JSON.stringify(warnings)}`
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
