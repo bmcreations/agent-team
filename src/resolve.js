@@ -1,11 +1,15 @@
 import { directReports } from './org.js';
 
 export function resolveMember(config, name, { probe, assignments = {} } = {}) {
-  const member = config.members[name];
-  if (!member) {
+  if (!Object.prototype.hasOwnProperty.call(config.members, name)) {
     throw new Error(
       `unknown member: ${name} (configured: ${Object.keys(config.members).join(', ')})`
     );
+  }
+  const member = config.members[name];
+
+  if (typeof probe !== 'function') {
+    throw new Error(`member "${name}": resolveMember requires a "probe" function`);
   }
 
   let agent = member.agent;

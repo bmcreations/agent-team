@@ -25,6 +25,26 @@ test('an unknown member names what is configured', () => {
   assert.throws(() => resolveMember(CONFIG, 'ghost', { probe: all }), /implementer/);
 });
 
+test('a name colliding with Object.prototype is treated as unknown', () => {
+  assert.throws(() => resolveMember(CONFIG, 'toString', { probe: all }), /unknown member/);
+});
+
+test('a missing probe throws an error naming the member, not a bare TypeError', () => {
+  assert.throws(() => resolveMember(CONFIG, 'implementer', {}), /implementer/);
+});
+
+test('resolveMember never re-defaults isolation or deliverable — it passes through exactly what loadConfig put there', () => {
+  const bare = {
+    members: { solo: { agent: 'claude' } },
+    org: buildOrg({ solo: { agent: 'claude' } }),
+    deny_paths: ['x'],
+    defaults: { on_unavailable: 'claude' }
+  };
+  const r = resolveMember(bare, 'solo', { probe: all });
+  assert.equal(r.isolation, undefined);
+  assert.equal(r.deliverable, undefined);
+});
+
 test('an available agent is used as written, with no warning', () => {
   const r = resolveMember(CONFIG, 'implementer', { probe: all });
   assert.equal(r.agent, 'codex');

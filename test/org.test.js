@@ -79,3 +79,19 @@ test('depthOf throws on an unknown member', () => {
   const org = buildOrg(MEMBERS);
   assert.throws(() => depthOf(org, 'ghost'), /unknown member: ghost/);
 });
+
+test('a name colliding with Object.prototype is treated as unknown, not inherited', () => {
+  const org = buildOrg(MEMBERS);
+  assert.throws(() => depthOf(org, 'toString'), /unknown member: toString/);
+  assert.deepEqual(directReports(org, 'toString'), []);
+  assert.equal(canDelegate(org, 'toString'), false);
+});
+
+test('a real member named toString still works', () => {
+  const org = buildOrg({ ...MEMBERS, toString: { agent: 'claude', reports_to: 'coo' } });
+  assert.equal(depthOf(org, 'toString'), 1);
+  assert.deepEqual(directReports(org, 'toString'), []);
+  assert.equal(canDelegate(org, 'toString'), false);
+  assert.equal(canDelegate(org, 'coo'), true);
+  assert.deepEqual(directReports(org, 'coo'), ['designer', 'eng-lead', 'toString']);
+});

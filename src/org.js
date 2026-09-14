@@ -39,7 +39,8 @@ export function buildOrg(members) {
 }
 
 export function directReports(org, name) {
-  return [...(org.reportsOf[name] ?? [])];
+  if (!Object.prototype.hasOwnProperty.call(org.reportsOf, name)) return [];
+  return [...org.reportsOf[name]];
 }
 
 export function canDelegate(org, name) {
@@ -47,7 +48,7 @@ export function canDelegate(org, name) {
 }
 
 export function depthOf(org, name) {
-  if (!(name in org.parentOf)) {
+  if (!Object.prototype.hasOwnProperty.call(org.parentOf, name)) {
     throw new Error(`unknown member: ${name}`);
   }
   let depth = 0;

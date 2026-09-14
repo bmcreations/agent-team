@@ -51,6 +51,13 @@ test('an unknown isolation level is refused', () => {
   assert.throws(() => loadConfig(root), /isolation "sandbox" is not one of/);
 });
 
+test('an empty-string isolation is refused, not silently defaulted', () => {
+  // "" is falsy but not nullish — this is what distinguishes `??` (correct: keeps ""
+  // and rejects it) from `||` (bug: replaces it with 'read-only' and loads fine).
+  const root = project({ members: { a: { agent: 'x', isolation: '' } }, deny_paths: ['x'] });
+  assert.throws(() => loadConfig(root), /isolation "" is not one of/);
+});
+
 test('an unknown deliverable is refused', () => {
   const root = project({ members: { a: { agent: 'x', deliverable: 'vibes' } }, deny_paths: ['x'] });
   assert.throws(() => loadConfig(root), /deliverable "vibes" is not one of/);
