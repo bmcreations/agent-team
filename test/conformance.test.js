@@ -196,12 +196,74 @@ test('a read_only conformance run notes that a reverted write is outside what th
   );
 });
 
+// --- requireSuccess: the live-vendor mode needs to know the adapter actually reached the
+// model, not just that it failed the way a conformant adapter is allowed to fail. ---
+
+test('a failed status is still conformant by default — this is the graceful-failure contract', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-reqsucc-'));
+  const scriptPath = writeMockScript(dir, { status: 'failed', summary: 'not signed in' });
+
+  const report = await conformanceReport(MOCK, {
+    cwd: dir,
+    env: { AGENT_TEAM_MOCK_SCRIPT: scriptPath }
+  });
+
+  assert.equal(report.conformant, true, JSON.stringify(report.failures));
+});
+
+test('requireSuccess:true fails a run that never reached status ok', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-reqsucc-'));
+  const scriptPath = writeMockScript(dir, { status: 'failed', summary: 'not signed in' });
+
+  const report = await conformanceReport(MOCK, {
+    cwd: dir,
+    env: { AGENT_TEAM_MOCK_SCRIPT: scriptPath },
+    requireSuccess: true
+  });
+
+  assert.equal(report.conformant, false);
+});
+
+test('the requireSuccess failure detail names the adapter\'s own summary, not a bare assertion', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-reqsucc-'));
+  const scriptPath = writeMockScript(dir, {
+    status: 'failed', summary: 'Not signed in. Run `grok login` first.'
+  });
+
+  const report = await conformanceReport(MOCK, {
+    cwd: dir,
+    env: { AGENT_TEAM_MOCK_SCRIPT: scriptPath },
+    requireSuccess: true
+  });
+
+  assert.equal(report.conformant, false);
+  assert.ok(
+    report.failures.some((f) => /Not signed in\. Run `grok login` first\./.test(f.detail)),
+    JSON.stringify(report.failures)
+  );
+});
+
+test('requireSuccess:true still passes a genuinely successful run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-reqsucc-'));
+  const scriptPath = writeMockScript(dir, {
+    status: 'ok', summary: 'reached the model', findings: [], checked_sound: []
+  });
+
+  const report = await conformanceReport(MOCK, {
+    cwd: dir,
+    env: { AGENT_TEAM_MOCK_SCRIPT: scriptPath },
+    requireSuccess: true
+  });
+
+  assert.equal(report.conformant, true, JSON.stringify(report.failures));
+});
+
 // Opt-in: AGENT_TEAM_CONFORMANCE=codex,grok npm test
 const targets = (process.env.AGENT_TEAM_CONFORMANCE ?? '').split(',').filter(Boolean);
 for (const agent of targets) {
   test(`real adapter "${agent}" is conformant`, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'at-conf-real-'));
-    const report = await conformanceReport(join(adapterDir, agent), { cwd: dir });
+    const report = await conformanceReport(join(adapterDir, agent), { cwd: dir, requireSuccess: true });
     assert.equal(report.conformant, true, JSON.stringify(report.failures, null, 2));
   });
 }

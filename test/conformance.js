@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { basename } from 'node:path';
 import { runAdapter } from '../src/adapter.js';
 import { buildBrief } from '../src/brief.js';
 
@@ -45,7 +46,9 @@ function refListDiff(before, after) {
   return { added, removed };
 }
 
-export async function conformanceReport(execPath, { env = {}, cwd = undefined, reports = [] } = {}) {
+export async function conformanceReport(execPath, {
+  env = {}, cwd = undefined, reports = [], requireSuccess = false
+} = {}) {
   const failures = [];
   const notes = [];
 
@@ -167,6 +170,21 @@ export async function conformanceReport(execPath, { env = {}, cwd = undefined, r
     failures.push({
       step: 'delegation-guard',
       detail: 'answered "delegating" for a brief that forbids delegation'
+    });
+  }
+
+  // Off by default: failed | timeout | delegating are all conformant contract-wise — an
+  // adapter that fails gracefully IS conformant, and the tests above pin that. But a
+  // live-vendor run (AGENT_TEAM_CONFORMANCE=<adapter>) exists to answer one question this
+  // status-validity check cannot: did the adapter actually reach the model? A green run
+  // against an unauthenticated CLI answers that question wrongly. requireSuccess is the
+  // opt-in that makes anything but "ok" a failure here, with the adapter's own summary as
+  // the detail so the report reads as "grok returned failed: Not signed in..." rather than
+  // a bare assertion.
+  if (requireSuccess && run.status !== 'ok') {
+    failures.push({
+      step: 'run-status',
+      detail: `${basename(execPath)} returned ${run.status}: ${run.summary ?? '(no summary)'}`
     });
   }
 
