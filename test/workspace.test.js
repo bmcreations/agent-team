@@ -269,6 +269,107 @@ test('a tracked .gitignore does not make deniedFiles remove files deny_paths nev
     'the actually denied secret must still be removed');
 });
 
+// --- C1b: a tracked ignore file naming the same path must not shadow a real deny hit ---
+//
+// check-ignore -v reports the source of whichever rule *wins arbitration*. When the
+// repo's own tracked .gitignore mentions the same path as a deny_paths entry, .gitignore
+// wins and the reported source becomes `.gitignore`, not `.git/info/exclude` — the
+// opposite failure from C1: a real deny_paths hit gets silently dropped, the file ships
+// to the workspace, and the entry is reported as unmatched even though it was named.
+
+function repoWithShadowingGitignoreSamePattern() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  writeFileSync(join(root, '.gitignore'), 'credentials/staging.env\n');
+  writeFileSync(join(root, 'credentials', 'staging.env'), 'PLANTED_SECRET_SAME_PATTERN\n');
+  // -f: force-add the file even though the repo's own .gitignore also matches it —
+  // an operator can legitimately deny a path their .gitignore separately mentions.
+  git('add', '-A', '-f');
+  git('commit', '-q', '-m', 'init');
+  return root;
+}
+
+function repoWithShadowingGitignoreNegation() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(root, 'credentials'), { recursive: true });
+  writeFileSync(join(root, '.gitignore'), '!credentials/secret.env\n');
+  writeFileSync(join(root, 'credentials', 'secret.env'), 'PLANTED_SECRET_NEGATION\n');
+  git('add', '-A', '-f');
+  git('commit', '-q', '-m', 'init');
+  return root;
+}
+
+test('a tracked .gitignore naming the same path as a deny_paths entry does not shadow the deny', () => {
+  const root = repoWithShadowingGitignoreSamePattern();
+  const ws = createWorkspace(root, 'qa', ['credentials/staging.env'], 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'staging.env')), false,
+    'the denied file must not survive just because the tracked .gitignore names it too');
+  assert.deepEqual(ws.unmatchedDenyPaths, [],
+    'the deny entry actually matched a file — it must not be reported as unmatched');
+});
+
+test('a negated pattern in a tracked .gitignore does not shadow the deny', () => {
+  const root = repoWithShadowingGitignoreNegation();
+  const ws = createWorkspace(root, 'qa', ['credentials/secret.env'], 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'credentials', 'secret.env')), false,
+    'the denied file must not survive just because a tracked .gitignore negates it');
+  assert.deepEqual(ws.unmatchedDenyPaths, []);
+});
+
+test('the shadowed deny hit is gone from the object database, not merely absent from the tree', () => {
+  const root = repoWithShadowingGitignoreSamePattern();
+  const blob = execFileSync(
+    'git', ['-C', root, 'rev-parse', 'HEAD:credentials/staging.env'], { encoding: 'utf8' }
+  ).trim();
+  const ws = createWorkspace(root, 'qa', ['credentials/staging.env'], 'workspace');
+  const read = tryGit(ws.dir, 'cat-file', '-p', blob);
+  assert.notEqual(read.status, 0, `blob ${blob} is still readable in the workspace`);
+});
+
+test('a file matched only by the environment global excludesFile is not deleted', () => {
+  const prevGlobal = process.env.GIT_CONFIG_GLOBAL;
+  const globalDir = mkdtempSync(join(tmpdir(), 'at-ws-global-'));
+  const excludesFile = join(globalDir, 'excludes');
+  writeFileSync(excludesFile, 'globally-ignored.txt\n');
+  const globalConfig = join(globalDir, 'gitconfig');
+  writeFileSync(globalConfig, `[core]\n\texcludesFile = ${excludesFile}\n`);
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  try {
+    const root = mkdtempSync(join(tmpdir(), 'at-ws-'));
+    execFileSync('git', ['init', '-q', '-b', 'main', root]);
+    const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+    git('config', 'user.email', 't@e.com');
+    git('config', 'user.name', 'T');
+    git('config', 'commit.gpgsign', 'false');
+    mkdirSync(join(root, 'credentials'), { recursive: true });
+    writeFileSync(join(root, 'credentials', 'signing.p8'), 'PRIVATE KEY\n');
+    // Force-add: this file is only reachable via the global excludesFile above, not via
+    // deny_paths and not via anything tracked in this repo.
+    writeFileSync(join(root, 'globally-ignored.txt'), 'not a secret, just noisy\n');
+    git('add', '-A', '-f');
+    git('commit', '-q', '-m', 'init');
+
+    const ws = createWorkspace(root, 'qa', ['credentials/**'], 'workspace');
+    assert.equal(existsSync(join(ws.dir, 'globally-ignored.txt')), true,
+      'a file matched only by a global excludesFile must survive — deny_paths never named it');
+    assert.equal(existsSync(join(ws.dir, 'credentials', 'signing.p8')), false,
+      'the actually denied secret must still be removed');
+  } finally {
+    if (prevGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = prevGlobal;
+  }
+});
+
 // --- C2: a deny_paths entry matching nothing is reported, not fatal ---
 
 test('deny_paths entries that match no tracked file are returned, not thrown', () => {

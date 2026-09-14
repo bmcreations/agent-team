@@ -7,51 +7,83 @@ import { join, dirname, resolve } from 'node:path';
 const git = (dir, ...args) =>
   execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' }).toString();
 
-// The exclude file this function writes deny_paths into. check-ignore -v's "source"
-// field for a match is this same relative path (git always reports it with forward
-// slashes) whenever a match came from what we wrote — never from the repo's own
-// tracked .gitignore files, which live at other paths.
+// check-ignore -v reports the source of whichever rule *wins arbitration* across every
+// ignore source present in the tree being checked — it is not limited to the exclude
+// file we wrote. Running it against the workspace clone itself (which carries the
+// source repo's own tracked ignore files) means a tracked `.gitignore` naming the same
+// path as a deny_paths entry — or negating it with `!` — can out-arbitrate our exclude
+// file, so the reported source comes back as `.gitignore`, not this one. Filtering on
+// source alone in that tree silently drops a real deny_paths hit: the file survives
+// into the clone and the entry is reported as unmatched, which is the dangerous
+// direction (see docs/superpowers/plans — R9).
+//
+// So arbitration must not happen anywhere the repo's own ignore files can be present.
+// deniedFiles instead builds a throwaway scratch git directory containing *only* the
+// deny patterns — never the workspace clone, never the source repo — and asks
+// check-ignore to arbitrate there. In that tree the only ignore source that can exist
+// is the one this function just wrote, so a match's source is either EXCLUDE_SOURCE or
+// proof the isolation this function relies on has broken.
+//
+// --no-index is still required: without it, check-ignore reports tracked files (which
+// the workspace clone's files are) as not ignored. -v -z still reports each match as a
+// NUL-separated "<source>\0<linenum>\0<pattern>\0<pathname>\0" quad. Gitignore semantics
+// (a bare `credentials` matches the directory at any depth, `*.pem` globs, `!` negates)
+// are what deny_paths deliberately inherits by going through git's own ignore engine
+// instead of reimplementing pattern matching.
 const EXCLUDE_SOURCE = '.git/info/exclude';
 
-// Let git's own ignore engine decide what matches, so deny_paths keep gitignore
-// semantics (a bare `credentials` matches the directory at any depth). --no-index
-// is required: without it, check-ignore reports tracked files as not ignored.
-//
-// -v (rather than plain --stdin) is required too: check-ignore consults every ignore
-// source in the tree, not just the exclude file we just wrote — a repo that tracks its
-// own `.gitignore` would otherwise have those patterns silently treated as deny_paths
-// hits. -v -z reports each match as a NUL-separated
-// "<source>\0<linenum>\0<pattern>\0<pathname>\0" quad; only a match whose source is
-// EXCLUDE_SOURCE is an actual deny_paths hit.
 function deniedFiles(dir, denyPaths) {
-  writeFileSync(join(dir, '.git', 'info', 'exclude'), `${denyPaths.join('\n')}\n`);
   const tracked = execFileSync('git', ['-C', dir, 'ls-files', '-z']);
   const trackedCount = tracked.length === 0
     ? 0
     : tracked.toString().split('\0').filter(Boolean).length;
   if (trackedCount === 0) return { denied: [], trackedCount, matchedDenyPaths: new Set() };
 
-  const matched = spawnSync(
-    'git', ['-C', dir, 'check-ignore', '--no-index', '-v', '-z', '--stdin'],
-    { input: tracked }
-  );
-  // exit 1 means nothing matched, which is not an error
-  const raw = matched.stdout.toString();
-  const parts = raw.length === 0 ? [] : raw.split('\0');
-  if (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+  const scratch = mkdtempSync(join(tmpdir(), 'agent-team-denyscratch-'));
+  try {
+    execFileSync('git', ['init', '-q', scratch], { stdio: 'pipe' });
+    // Truncating write: this also means a global init.templateDir that seeds a fresh
+    // repo's info/exclude cannot leak an extra pattern in here.
+    writeFileSync(join(scratch, '.git', 'info', 'exclude'), `${denyPaths.join('\n')}\n`);
 
-  const denied = [];
-  const matchedDenyPaths = new Set();
-  for (let i = 0; i + 3 < parts.length; i += 4) {
-    const source = parts[i];
-    const pattern = parts[i + 2];
-    const pathname = parts[i + 3];
-    if (source === EXCLUDE_SOURCE) {
+    // core.excludesFile=/dev/null is required, not decoration: without it, a user's
+    // global excludes file (set via $HOME/.config/git/ignore or GIT_CONFIG_GLOBAL) is
+    // still consulted by check-ignore in the scratch dir and can report matches sourced
+    // from it — deleting files deny_paths never named.
+    const matched = spawnSync(
+      'git', ['-C', scratch, '-c', 'core.excludesFile=/dev/null',
+        'check-ignore', '--no-index', '-v', '-z', '--stdin'],
+      { input: tracked }
+    );
+    // exit 1 means nothing matched, which is not an error
+    const raw = matched.stdout.toString();
+    const parts = raw.length === 0 ? [] : raw.split('\0');
+    if (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+
+    const denied = [];
+    const matchedDenyPaths = new Set();
+    for (let i = 0; i + 3 < parts.length; i += 4) {
+      const source = parts[i];
+      const pattern = parts[i + 2];
+      const pathname = parts[i + 3];
+      if (source !== EXCLUDE_SOURCE) {
+        // The scratch dir contains nothing but the exclude file written above — there
+        // is no other ignore source it could legitimately report. An unexpected source
+        // means the isolation this function depends on has broken; silently dropping
+        // the match here would reproduce the exact shadowing bug the scratch dir exists
+        // to prevent, one layer down.
+        throw new Error(
+          `deniedFiles: unexpected check-ignore source "${source}" for "${pathname}" ` +
+          `in scratch dir — expected only "${EXCLUDE_SOURCE}"`
+        );
+      }
       denied.push(pathname);
       matchedDenyPaths.add(pattern);
     }
+    return { denied, trackedCount, matchedDenyPaths };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
-  return { denied, trackedCount, matchedDenyPaths };
 }
 
 function otherBranches(dir, keep) {
