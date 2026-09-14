@@ -1,0 +1,65 @@
+#!/usr/bin/env node
+import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const sub = process.argv[2];
+
+if (sub === 'probe') {
+  const r = spawnSync('claude', ['--version'], { stdio: 'pipe' });
+  if (r.status !== 0) { process.stderr.write('claude not on PATH\n'); process.exit(1); }
+  process.stdout.write(r.stdout.toString().trim() + '\n');
+  process.exit(0);
+} else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({
+    write: true, workspace: true, structured_output: true, tool_dialect: 'claude'
+  }) + '\n');
+  process.exit(0);
+} else if (sub === 'run') {
+  const brief = JSON.parse(readFileSync(0, 'utf8'));
+  const logDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-'));
+  const logPath = join(logDir, 'session.log');
+
+  const args = ['-p', brief.task, '--output-format', 'json'];
+  if (brief.model) args.push('--model', brief.model);
+  if (brief.read_only) args.push('--permission-mode', 'plan');
+
+  const r = spawnSync('claude', args, {
+    cwd: brief.cwd, stdio: 'pipe', timeout: (brief.timeout_s ?? 900) * 1000
+  });
+
+  writeFileSync(logPath, (r.stdout ?? '').toString() + (r.stderr ?? '').toString());
+
+  if (r.status !== 0) {
+    process.stdout.write(JSON.stringify({
+      status: 'failed', summary: `claude exited ${r.status}`, log_path: logPath
+    }) + '\n');
+    process.exit(0);
+  }
+
+  let summary = '';
+  try { summary = JSON.parse(r.stdout.toString()).result ?? ''; }
+  catch { summary = r.stdout.toString().slice(0, 4000); }
+
+  let diff = '';
+  try { diff = execFileSync('git', ['-C', brief.cwd, 'diff', 'HEAD'], { stdio: 'pipe' }).toString(); }
+  catch { /* no repo, no diff */ }
+
+  let branch = null;
+  try { branch = execFileSync('git', ['-C', brief.cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
+  catch { /* ignore */ }
+
+  process.stdout.write(JSON.stringify({
+    status: 'ok',
+    summary,
+    findings: [],
+    checked_sound: [],
+    artifacts: { branch, diff: diff.slice(0, 200_000) },
+    log_path: logPath
+  }) + '\n');
+  process.exit(0);
+} else {
+  process.stderr.write(`unknown subcommand: ${sub}\n`);
+  process.exit(2);
+}
