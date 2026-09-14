@@ -585,6 +585,21 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     git(dir, 'config', 'user.name', 'agent-team');
     git(dir, 'config', 'commit.gpgsign', 'false');
 
+    // An unborn branch (a repo with zero commits) clones without error, but everything past
+    // this point assumes a HEAD: the later orphan commit has no parent-less special case for
+    // "there was never a commit to begin with" and fails with a raw
+    // `Command failed: git -C … commit -q -m workspace: qa`, several steps downstream of the
+    // real cause. Fail here instead, the same way the every-file-denied guard below fails
+    // clearly on its own similar path.
+    try {
+      execFileSync('git', ['-C', dir, 'rev-parse', '--verify', '-q', 'HEAD'], { stdio: 'pipe' });
+    } catch {
+      throw new Error(
+        `workspace for member "${member}": "${repoRoot}" has no commits yet — there is ` +
+        `nothing to clone into a workspace`
+      );
+    }
+
     const { denied, trackedCount, matchedDenyPaths } = deniedFiles(dir, denyPaths);
     if (trackedCount > 0 && denied.length === trackedCount) {
       throw new Error(

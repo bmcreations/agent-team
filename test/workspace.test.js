@@ -147,6 +147,32 @@ test('a denylist matching every tracked file fails clearly, not with a raw git e
   });
 });
 
+// --- A2-5: an unborn branch (a repo with zero commits) must fail with a clear message ---
+
+function unbornRepo() {
+  const root = mkdtempSync(join(tmpdir(), 'at-ws-unborn-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  git('config', 'user.email', 't@e.com');
+  git('config', 'user.name', 'T');
+  git('config', 'commit.gpgsign', 'false');
+  // Deliberately no writeFileSync/add/commit — HEAD never gets a target, so this repo
+  // has no commits at all (an "unborn branch"), not merely zero tracked files right now.
+  return root;
+}
+
+test('a repo with no commits yet fails clearly, not with a raw git error off the orphan commit', () => {
+  const root = unbornRepo();
+  assert.throws(() => createWorkspace(root, 'qa', DENY, 'workspace'), (err) => {
+    assert.match(err.message, /qa/);
+    assert.match(err.message, /no commits/i);
+    // The failure this replaces was `Command failed: git -C … commit -q -m workspace: qa`,
+    // several steps downstream of the real cause and useless to anyone reading it.
+    assert.doesNotMatch(err.message, /Command failed/);
+    return true;
+  });
+});
+
 // --- B1: a partial build must not strand a readable, unredacted clone ---
 
 test('a failure partway through building leaves no readable clone behind', () => {
