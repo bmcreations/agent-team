@@ -132,6 +132,48 @@ test('a read_only brief passes --permission-mode plan, and a writable one does n
   assert.equal(wRecord.argv.includes('--permission-mode'), false);
 });
 
+test('a resolved model is passed as --model, and the flag is absent when model is null', () => {
+  const baseResolved = {
+    member: 'lead',
+    title: 'Lead',
+    agent: 'claude',
+    model: null,
+    skill: null,
+    charter: null,
+    persona: null,
+    isolation: 'workspace',
+    deliverable: 'diff',
+    output_path: null,
+    reports_to: null,
+    reports: [],
+    warning: null
+  };
+
+  const cwdWithModel = mkdtempSync(join(tmpdir(), 'agent-team-claude-model-'));
+  const briefWithModel = buildBrief({
+    resolved: { ...baseResolved, model: 'claude-opus-4' },
+    task: 'x',
+    cwd: cwdWithModel,
+    denyPaths: ['**/.env*']
+  });
+  const recordWithModel = runAdapterAgainstStub(briefWithModel);
+  const modelIndex = recordWithModel.argv.indexOf('--model');
+  assert.notEqual(modelIndex, -1, 'argv must contain --model when brief.model is set');
+  // Check the adjacent argv slot, not a joined string — a whitespace-splitting bug in the
+  // arg list must not be able to pass this.
+  assert.equal(recordWithModel.argv[modelIndex + 1], 'claude-opus-4');
+
+  const cwdNoModel = mkdtempSync(join(tmpdir(), 'agent-team-claude-nomodel-'));
+  const briefNoModel = buildBrief({
+    resolved: { ...baseResolved, model: null },
+    task: 'x',
+    cwd: cwdNoModel,
+    denyPaths: ['**/.env*']
+  });
+  const recordNoModel = runAdapterAgainstStub(briefNoModel);
+  assert.equal(recordNoModel.argv.includes('--model'), false);
+});
+
 // A stub that emits a `result` string past the 64 KB OS pipe buffer, to prove the adapter's
 // stdout write is fully drained before the process exits — not just that small payloads work.
 function createLargeResultClaudeStub(resultLength) {

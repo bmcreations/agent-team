@@ -126,6 +126,22 @@ test('a read_only run that dirties the working tree is reported non-conformant',
   );
 });
 
+test('a run status outside the valid set is reported non-conformant', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-conf-badstatus-'));
+  const scriptPath = writeMockScript(dir, { status: 'banana' });
+
+  const report = await conformanceReport(MOCK, {
+    cwd: dir,
+    env: { AGENT_TEAM_MOCK_SCRIPT: scriptPath }
+  });
+
+  assert.equal(report.conformant, false);
+  assert.ok(
+    report.failures.some((f) => f.step === 'run' && /banana/.test(f.detail)),
+    JSON.stringify(report.failures)
+  );
+});
+
 // Opt-in: AGENT_TEAM_CONFORMANCE=codex,grok npm test
 const targets = (process.env.AGENT_TEAM_CONFORMANCE ?? '').split(',').filter(Boolean);
 for (const agent of targets) {
