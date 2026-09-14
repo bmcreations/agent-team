@@ -50,7 +50,10 @@ async function runMember(ctx) {
   const dialectText = loadDialect(caps.tool_dialect ?? resolved.agent);
 
   let skillText = null;
-  if (resolved.skill && skillsDir) {
+  if (resolved.skill) {
+    if (!skillsDir) {
+      throw new Error(`member "${member}" binds skill "${resolved.skill}" but no skillsDir was provided`);
+    }
     const p = join(skillsDir, resolved.skill, 'SKILL.md');
     if (!existsSync(p)) {
       throw new Error(`member "${member}" binds skill "${resolved.skill}" but ${p} is missing`);

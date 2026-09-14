@@ -86,6 +86,16 @@ test('a successful run returns the result and prunes the workspace', async () =>
   assert.equal(existsSync(r.workspace.dir), false, 'workspace should be pruned on success');
 });
 
+test('a member that binds a skill with no skillsDir provided is refused, not silently dropped', async () => {
+  const { root, script } = project({ status: 'ok', summary: 's' }, {
+    members: { ...TEAM, implementer: { ...TEAM.implementer, skill: 'some-skill' } }
+  });
+  await assert.rejects(
+    () => run(root, script, 'implementer'),
+    /member "implementer" binds skill "some-skill" but no skillsDir was provided/
+  );
+});
+
 test('a failed run KEEPS the workspace for inspection', async () => {
   const { root, script } = project({ status: 'failed', summary: 'exploded' });
   const r = await run(root, script, 'implementer');
