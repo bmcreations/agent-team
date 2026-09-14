@@ -3385,3 +3385,25 @@ leaves the workspace `git status --porcelain` empty.
 - `/agent-team-init` scaffolds the worked example from Revision 2's "Revised config shape" —
   `coo`, `eng-lead`, `implementer`, `reviewer`, `qa`, `designer`, `marketer` — commented so the
   non-engineering members are obviously meant to be edited or deleted rather than kept by default.
+
+**Task R4 (workspace clone)** — a review found that `deniedFiles`' `check-ignore -v` call ran
+against the workspace clone itself, so a repo's own tracked `.gitignore` naming or negating the
+same path as a `deny_paths` entry could out-arbitrate the exclude file the function wrote there.
+The reported match source came back as `.gitignore`, the `source === EXCLUDE_SOURCE` filter
+dropped it, and the denied file shipped to the vendor CLI while `unmatchedDenyPaths` reported the
+entry as if it had matched nothing. Arbitration now happens in a scratch git directory containing
+only the `deny_paths` patterns, with `core.excludesFile=/dev/null` so a machine's global excludes
+file cannot leak matches in either. An unexpected match source in that scratch directory now
+throws instead of being silently dropped.
+
+Separately, the cleanup `rmSync` in `createWorkspace`'s catch block could itself throw (a
+read-only parent, an immutable file) and replace the original error with an unrelated one, while
+still leaving the directory on disk. The cleanup now runs in its own try/catch: a cleanup failure
+is reported via `console.warn` naming the directory, and the original error is always the one
+that propagates.
+
+**Task R6 (dispatcher)** — `workspace.unmatchedDenyPaths` had no reader outside test assertions.
+`dispatch` now logs a `console.warn` naming the member and the unmatched entries when
+`unmatchedDenyPaths` is non-empty, and returns `unmatchedDenyPaths` on the dispatch result
+alongside `workspace`. An entry matching nothing in a given repo is still not an error — the same
+`agent-team.json` is expected to be reused across projects.
