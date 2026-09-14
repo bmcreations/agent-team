@@ -1534,6 +1534,12 @@ git commit -m "feat(adapters): add the codex adapter"
 
 ---
 
+
+**Outcome (`cba6e1d`, 145 lines).** Conformant against the real CLI: `real adapter "codex" is
+conformant (6282ms)`, a run that reached the model and produced a real diff and branch check. The
+flag surface above held exactly as read. `-o/--output-last-message` works as hoped — the summary
+comes from that file, `--json` only fills `log_path`.
+
 ### Task 12: The grok adapter
 
 **Previously marked BLOCKED, wrongly**, for the same reason as Task 11. grok 1.0.30 is installed at
@@ -1588,6 +1594,42 @@ git commit -m "feat(adapters): add the grok adapter"
 ```
 
 ---
+
+
+**Outcome (`979471c`, 183 lines). Conformant, but the happy path is unverified — read this before
+trusting the green tick.**
+
+Three corrections, each verified by running the binary rather than by reading documentation:
+
+1. **The prompt is not a bare positional.** My correction above was itself wrong. A bare positional
+   does not trigger headless mode — it tries to open the interactive TUI and dies outside a TTY with
+   `Error: Device not configured (os error 6)`, which says nothing about the real cause. The flag is
+   `-p`. Confirmed by running both forms back to back in the same directory. So the plan's original
+   `-p` was right and my correction to it was wrong; the adapter ships `-p`.
+
+2. **grok is not authenticated on this machine.** No `~/.grok/auth.json`, no `XAI_API_KEY` in the
+   environment or any shell rc file. `-p` returns
+   `{"type":"error","message":"Not signed in..."}`. The earlier claim that grok was "installed and
+   authenticated" checked only that the binary was on an interactive PATH; it never checked login
+   state, unlike the codex claim, which named the auth file.
+
+3. **`--sandbox read-only` cannot be applied on a machine with Docker Desktop.** The profile is real
+   and kernel-enforced, but applying it here fails resolving `/var/run/docker.sock`, a standard
+   Docker Desktop symlink: `could not apply the 'read-only' sandbox profile; refusing to start with
+   its protections missing`. grok fails closed, so the adapter reports `failed` rather than running
+   unprotected — but any member with `isolation: read-only` routed to grok fails every run on such a
+   machine. `--sandbox workspace` is unaffected.
+
+**What the green conformance tick does and does not mean.** `test/conformance.js:157` accepts
+`failed` as a valid status, correctly — an adapter that fails gracefully is conformant. But that
+means grok passed conformance without ever reaching a model: auth failed first, so the JSON success
+parser has never seen a real success payload. It is written from the vendored docs and falls back to
+raw stdout rather than to `''`, so a shape mismatch degrades rather than silently emptying, but it is
+untested against the real thing.
+
+This is a gap in the suite, not just in this run: **a conformance run against a live vendor cannot
+currently distinguish "the adapter works" from "the adapter failed politely."** Worth a follow-up that
+makes the live-vendor mode require `status: ok`, leaving the contract-only mode as it is.
 
 ### Task 13: Plugin and marketplace manifests
 
