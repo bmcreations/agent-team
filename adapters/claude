@@ -109,8 +109,19 @@ if (sub === 'probe') {
       let diff = '';
       let diffUnreadable = false;
       try {
+        // `git diff HEAD` never shows an untracked path, so a member that CREATES a file —
+        // a new source file, a new test — handed back an empty diff while reporting success,
+        // and the manager saw no work. Intent-to-add (`add -A -N`) makes the new file visible
+        // to diff. It is staged into a THROWAWAY index, never the workspace's own: a read_only
+        // brief's conformance check compares `git status --porcelain` from before the run to
+        // after it, and touching the real index would turn "?? new.txt" into "A  new.txt" and
+        // report a read-only violation that never happened.
+        const diffIndex = join(logDir, 'diff-index');
+        const gitEnv = { ...process.env, GIT_INDEX_FILE: diffIndex };
+        execFileSync('git', ['-C', brief.cwd, 'read-tree', 'HEAD'], { stdio: 'pipe', env: gitEnv });
+        execFileSync('git', ['-C', brief.cwd, 'add', '-A', '-N'], { stdio: 'pipe', env: gitEnv });
         diff = execFileSync('git', ['-C', brief.cwd, 'diff', 'HEAD'], {
-          stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER
+          stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER, env: gitEnv
         }).toString();
       } catch (e) {
         if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
