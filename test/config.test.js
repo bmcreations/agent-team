@@ -657,3 +657,30 @@ test('a string on_unavailable still loads', () => {
   const cfg = loadConfig(project({ ...OK, defaults: { on_unavailable: 'mock' } }));
   assert.equal(cfg.defaults.on_unavailable, 'mock');
 });
+
+// --- permission_mode picks the claude CLI's --permission-mode for a workspace member ---
+
+test('a workspace member may set permission_mode', () => {
+  const root = memberProject('a', { isolation: 'workspace', permission_mode: 'acceptEdits' });
+  assert.equal(loadConfig(root).members.a.permission_mode, 'acceptEdits');
+});
+
+test('a non-string permission_mode is refused', () => {
+  const root = memberProject('a', { isolation: 'workspace', permission_mode: true });
+  assert.throws(() => loadConfig(root), /"permission_mode"/);
+});
+
+test('an empty-string permission_mode is refused', () => {
+  const root = memberProject('a', { isolation: 'workspace', permission_mode: '' });
+  assert.throws(() => loadConfig(root), /"permission_mode"/);
+});
+
+test('permission_mode is refused on a read-only member, which always runs in plan mode', () => {
+  const root = memberProject('a', { isolation: 'read-only', permission_mode: 'auto' });
+  assert.throws(() => loadConfig(root), /"permission_mode".*workspace/);
+});
+
+test('permission_mode is refused on an isolation "none" member, which also runs in plan mode', () => {
+  const root = memberProject('a', { isolation: 'none', permission_mode: 'auto' });
+  assert.throws(() => loadConfig(root), /"permission_mode".*workspace/);
+});

@@ -279,6 +279,25 @@ export function loadConfig(projectRoot) {
         `${path}: member "${name}": isolation "${isolation}" is not one of ${ISOLATIONS.join(', ')}`
       );
     }
+    // permission_mode becomes adapters/claude's --permission-mode for a workspace member
+    // (auto when unset). Only its type is checked, since the CLI's list of modes changes.
+    // Read-only and "none" members always run in plan mode, so setting it there is refused
+    // rather than silently ignored. Like advisor, codex and grok members may carry it for
+    // the on_unavailable fallback to claude.
+    if (m.permission_mode !== undefined && m.permission_mode !== null) {
+      if (typeof m.permission_mode !== 'string' || m.permission_mode === '') {
+        throw new Error(
+          `${path}: member "${name}": "permission_mode" must be a non-empty string — got ` +
+          `${JSON.stringify(m.permission_mode)}`
+        );
+      }
+      if (isolation !== 'workspace') {
+        throw new Error(
+          `${path}: member "${name}": "permission_mode" only applies to isolation "workspace"; ` +
+          `an isolation "${isolation}" member always runs in plan mode`
+        );
+      }
+    }
     const deliverable = m.deliverable ?? DELIVERABLE_FOR[isolation];
     if (!DELIVERABLES.includes(deliverable)) {
       throw new Error(
