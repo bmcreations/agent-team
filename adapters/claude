@@ -3,6 +3,7 @@ import { readFileSync, mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { answerOutcome } from '../src/delegation.js';
 
 const sub = process.argv[2];
 
@@ -152,14 +153,16 @@ if (sub === 'probe') {
       // log to show what happened. An empty diff is no test: user hooks run in the clone too
       // and can write files there. failed keeps the workspace and still returns the diff.
       const refused = !brief.read_only && denied.length > 0;
-      if (refused) {
-        summary = `claude refused ${denied.length} tool call(s): ${denied.join(', ')}. ` +
-          `Member summary: ${summary}`;
-      }
+      const outcome = refused
+        ? {
+            status: 'failed',
+            summary: `claude refused ${denied.length} tool call(s): ${denied.join(', ')}. ` +
+              `Member summary: ${summary}`
+          }
+        : answerOutcome(summary, brief);
 
       process.stdout.write(JSON.stringify({
-        status: refused ? 'failed' : 'ok',
-        summary,
+        ...outcome,
         permission_denials: denied,
         findings: [],
         checked_sound: [],

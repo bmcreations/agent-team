@@ -90,6 +90,25 @@ test('a can_delegate brief is reported conformant when the adapter answers deleg
   assert.equal(report.conformant, true, JSON.stringify(report.failures));
 });
 
+test('a delegating answer with no runnable delegations is reported non-conformant', async () => {
+  for (const delegations of [undefined, [], [{ to: 'worker' }], [{ to: '', task: 't' }]]) {
+    const dir = mkdtempSync(join(tmpdir(), 'at-conf-delegate-shape-'));
+    const scriptPath = writeMockScript(dir, { status: 'delegating', delegations });
+
+    const report = await conformanceReport(MOCK, {
+      cwd: dir,
+      env: { AGENT_TEAM_MOCK_SCRIPT: scriptPath },
+      reports: ['worker']
+    });
+
+    assert.equal(report.brief.can_delegate, true);
+    assert.ok(
+      report.failures.some((f) => f.step === 'delegation-shape'),
+      `${JSON.stringify(delegations)}: ${JSON.stringify(report.failures)}`
+    );
+  }
+});
+
 test('a read_only brief leaves the working tree clean', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'at-conf-readonly-'));
   initGitFixtureRepo(dir);
