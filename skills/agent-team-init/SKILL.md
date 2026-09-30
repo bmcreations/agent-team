@@ -55,7 +55,7 @@ binary-found check above.
     },
     "eng-lead":    { "agent": "claude", "reports_to": "coo", "isolation": "read-only" },
     "implementer": { "agent": "codex",  "reports_to": "eng-lead", "isolation": "workspace",
-                     "model": "gpt-5.5", "effort": "high" },
+                     "effort": "high" },
     "reviewer":    { "agent": "grok",   "reports_to": "eng-lead", "isolation": "read-only",
                      "distinct_from": ["implementer"] },
     "qa":          { "agent": "claude", "reports_to": "eng-lead", "isolation": "workspace" },
