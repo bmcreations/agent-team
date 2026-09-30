@@ -9,8 +9,9 @@ export const DELIVERABLES = ['diff', 'review', 'document', 'decision'];
 
 const DELIVERABLE_FOR = { none: 'document', 'read-only': 'review', workspace: 'diff' };
 
-// Member names are interpolated into a filesystem path (workspace.js joins them under
-// .claude/workspaces/<name>-<id>, and path.join happily normalizes ../ segments) and
+// Member names are interpolated into a filesystem path (workspace.js joins them as
+// <cache root>/agent-team/workspaces/<repo hash>/<name>-<id>, and path.join happily
+// normalizes ../ segments) and
 // into a git branch name (agent-team/<name>-<id>). One shape check keeps both safe:
 // no path traversal, no whitespace/NUL/newline, no leading dash, no slash.
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/i;
