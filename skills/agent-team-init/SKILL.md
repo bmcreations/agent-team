@@ -30,8 +30,8 @@ for a in claude codex grok; do "${CLAUDE_PLUGIN_ROOT}/adapters/$a" probe >/dev/n
   && echo "$a: binary found" || echo "$a: unavailable"; done
 ```
 
-This checks only that the adapter's binary exists and starts cleanly — via `PATH` or its
-`AGENT_TEAM_<VENDOR>_BIN` override. It does not check whether the CLI is authenticated. Report it to
+This checks only that the adapter's binary exists and starts cleanly — via `PATH`, or for codex
+and grok the `AGENT_TEAM_CODEX_BIN` / `AGENT_TEAM_GROK_BIN` override. It does not check whether the CLI is authenticated. Report it to
 the user as exactly that: "binary found" means the binary was found, not that a run against it will
 succeed. There is no separate authentication probe to add here — there isn't a general one, and each
 vendor CLI signals a login failure differently — so say plainly that the first real `/delegate` run

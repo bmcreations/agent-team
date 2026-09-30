@@ -7,22 +7,68 @@ A member is more than a vendor pick. It carries a charter, a deliverable kind, a
 in a reporting tree. A member with reports can answer with delegations instead of a
 deliverable; the dispatcher runs those against its direct reports only, then calls the
 member back with the results so it can synthesise. Tree depth and total adapter runs are
-capped separately.
-
-A vendor CLI returns plain text, so each vendor adapter reads the manager's final answer for
-that delegation, and only when the brief allows delegating. After trimming, the whole answer
-has to be the object `{"status":"delegating","delegations":[{"to":…,"task":…}]}`, either bare
-or as the only content of one fenced block. Every entry needs a non-empty `to` and `task`.
-Anything else is a deliverable, with one exception: an answer that contains
-`"status":"delegating"` but does not meet that shape fails, so a manager that wraps its
-delegation in prose is reported rather than handed back as finished work. The cost is that a
-deliverable quoting that exact string also fails. Whether `to` names a direct report is still
-checked by the dispatcher, which refuses the run outright when it does not.
+capped separately. A manager delegates by answering with nothing but a JSON object; the
+exact rule is under [Delegation](docs/how-it-works.md#delegation).
 
 A rival CLI ships whatever it can read to a third party, so every member runs in a filtered
 clone: a shallow clone with the denied paths deleted and history flattened to one orphan
 commit, so a secret is not recoverable from `HEAD~1` either. A config with an empty denylist
 is refused rather than defaulted.
+
+## Requirements
+
+- Claude Code, to load the plugin and run `/agent-team-init` and `/delegate`.
+- Node 22 or later.
+- git, which builds every member's workspace.
+- The CLI for each vendor you route a member to: `claude`, `codex`, or `grok`.
+
+## Install
+
+agent-team is a Claude Code plugin served from its own marketplace in this repository:
+
+```
+/plugin marketplace add bmcreations/agent-team
+/plugin install agent-team@agent-team
+```
+
+The plugin runs from Claude Code's plugin cache, not from a checkout. There is no npm
+package and no `agent-team` command on `PATH`.
+
+## Quick start
+
+In the project you want a team for:
+
+1. Run `/agent-team-init`. It searches the repository for credential-shaped paths, probes
+   which vendor CLIs are installed, and writes `.claude/agent-team.json` with an
+   orchestrator and three reports.
+2. Read the `deny_paths` it wrote. Anything missing from that list can be sent to a third
+   party.
+3. Run `/delegate <member> <task>`, for example
+   `/delegate explorer where is the retry policy configured?`.
+
+`/delegate` reports the member's summary, which agent ran it, and any fallback warning.
+For a `workspace` member the change comes back as a diff in `artifacts.diff`; nothing is
+written to your checkout.
+
+To see the reporting tree for a config:
+
+```bash
+node ~/.claude/plugins/cache/agent-team/agent-team/<version>/bin/agent-team.js org
+```
+
+## Documentation
+
+- [Configuration](docs/configuration.md): every member field, `defaults`, and `deny_paths`
+  rules.
+- [How it works](docs/how-it-works.md): workspaces, delegation, fallback, and the result
+  a run returns.
+- [Adapters](docs/adapters.md): the contract a vendor adapter implements, each shipped
+  adapter's flags, and the conformance suite.
+- [Design spec](docs/superpowers/specs/2026-09-14-agent-team-design.md): the original
+  design, its rejected alternatives, and open questions. It predates the JSON config
+  and the rename of `worktree` isolation to `workspace`.
+
+## Adapter status
 
 The runtime ships four adapters: claude, codex, grok, and mock. Each is checked against a
 conformance suite, but the suite accepts a graceful failure as conformant, so passing it
@@ -37,9 +83,18 @@ symlink. That is a failure closed, not open: the member's run fails rather than 
 unprotected. And its prompt must be passed with `-p`; a bare positional argument opens the
 interactive interface instead and dies outside a terminal with an error naming neither cause.
 
-Each vendor adapter resolves its CLI from `PATH`, with `AGENT_TEAM_<VENDOR>_BIN` as the
-override. That override is not decoration — neither Codex nor Grok necessarily installs onto
-a login shell's `PATH`, and Codex may expose its binary only from inside the app bundle.
+The codex and grok adapters resolve their CLI from `PATH`, with `AGENT_TEAM_CODEX_BIN` and
+`AGENT_TEAM_GROK_BIN` as overrides. That override is not decoration — neither Codex nor Grok
+necessarily installs onto a login shell's `PATH`, and Codex may expose its binary only from
+inside the app bundle. The claude adapter has no override and always runs `claude` from
+`PATH`.
 
-The design, its rejected alternatives, and the open questions are in
-[docs/superpowers/specs/2026-09-14-agent-team-design.md](docs/superpowers/specs/2026-09-14-agent-team-design.md).
+## Development
+
+```bash
+npm test
+```
+
+The suite uses `node --test` and needs git. It runs the vendor adapters against fake
+binaries; set `AGENT_TEAM_CONFORMANCE=codex,grok` to also require a successful run against
+the real CLIs.
