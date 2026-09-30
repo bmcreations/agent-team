@@ -1,0 +1,4 @@
+.claude/workspaces/
+.claude/worktrees/
+.claude/state/
+node_modules/
