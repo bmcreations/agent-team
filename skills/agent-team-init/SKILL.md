@@ -41,43 +41,75 @@ Assign unavailable agents anyway if the user wants them — `on_unavailable` deg
 warning — but tell the user which members will not run as configured, and which only passed the
 binary-found check above.
 
+The claude probe does not check the advisor either. An installed CLI that does not rank a member's
+model for the advisor runs the member without one, and the run still succeeds. If the user wants
+to confirm the advisor is used, a one-line run shows it:
+
+```bash
+claude -p "Reply with the single word: ok" --model claude-opus-5-5 \
+  --settings '{"advisorModel":"fable"}' --debug-file /tmp/advisor.log
+grep '\[AdvisorTool\]' /tmp/advisor.log
+```
+
+"Server-side tool enabled with ... as the advisor model" means the advisor is on; a line starting
+"Skipping advisor - " gives the reason it is not.
+
 ## Step 4 — write the config
 
 ```json
 {
   "members": {
-    "coo": {
-      "title": "COO",
-      "agent": "claude",
-      "charter": "Decompose an objective into work for the team. Does not implement.",
-      "isolation": "none",
-      "deliverable": "decision"
+    "orchestrator": {
+      "agent": "claude", "model": "claude-opus-5-5", "effort": "high", "advisor": "fable",
+      "charter": "Break an objective into scoped tasks for your reports, then combine their results into one decision. Does not implement.",
+      "isolation": "read-only", "deliverable": "decision"
     },
-    "eng-lead":    { "agent": "claude", "reports_to": "coo", "isolation": "read-only" },
-    "implementer": { "agent": "codex",  "reports_to": "eng-lead", "isolation": "workspace",
-                     "effort": "high" },
-    "reviewer":    { "agent": "grok",   "reports_to": "eng-lead", "isolation": "read-only",
-                     "distinct_from": ["implementer"] },
-    "qa":          { "agent": "claude", "reports_to": "eng-lead", "isolation": "workspace" },
-    "designer":    { "agent": "claude", "reports_to": "coo", "isolation": "none",
-                     "deliverable": "document", "output_path": "docs/design" },
-    "marketer":    { "agent": "claude", "reports_to": "coo", "isolation": "none",
-                     "deliverable": "document", "output_path": "docs/marketing" }
+    "explorer": {
+      "agent": "claude", "model": "sonnet", "effort": "medium", "advisor": "fable",
+      "reports_to": "orchestrator",
+      "charter": "Locate code and report it as path:line. Never edits.",
+      "isolation": "read-only", "deliverable": "document"
+    },
+    "worker": {
+      "agent": "claude", "model": "sonnet", "effort": "medium", "advisor": "fable",
+      "reports_to": "orchestrator",
+      "charter": "Make one scoped change and run the narrowest check that proves it.",
+      "isolation": "workspace", "deliverable": "diff"
+    },
+    "researcher": {
+      "agent": "claude", "model": "sonnet", "effort": "medium", "advisor": "fable",
+      "reports_to": "orchestrator",
+      "charter": "Answer from outside sources, with a cited URL next to each claim.",
+      "isolation": "none", "deliverable": "document"
+    }
   },
   "deny_paths": ["<everything found in step 2>", "**/.env*"],
-  "defaults": { "on_unavailable": "claude", "max_depth": 3, "max_delegations": 20 }
+  "defaults": { "on_unavailable": "claude", "max_depth": 1, "max_delegations": 12 }
 }
 ```
+
+`max_depth: 1` lets the orchestrator delegate and stops its reports from delegating further.
 
 `isolation` is one of `none` (no repo at all — a scratch directory), `read-only` (a filtered clone
 the result is read from, not written back), `workspace` (a filtered clone on its own branch). It is
 never `worktree` — that isolation level was renamed before this config shape shipped.
 
-`coo`, `designer`, and `marketer` are the non-engineering members in this starter table. They exist
-to show the shape a member outside the implementation chain takes — a `none` isolation, a `document`
-or `decision` deliverable, no repo access at all — not because every project needs a COO, a designer,
-and a marketer. Tell the user these three are placeholders: edit their charters to fit the project,
-or delete them outright, rather than leaving them in place unexamined.
+Every starter member runs on claude. To get a second vendor's review of the worker's diff, offer
+the user a member like this one, added under `members`:
+
+```json
+"reviewer": {
+  "agent": "codex", "reports_to": "orchestrator",
+  "isolation": "read-only", "deliverable": "review",
+  "distinct_from": ["worker"]
+}
+```
+
+`distinct_from` compares agents, not members: it refuses to run the reviewer on the same agent the
+worker ran on, including when `on_unavailable` falls the reviewer back to claude. That is also why
+`worker` does not carry `distinct_from: ["orchestrator"]` — both run on claude, and the dispatcher
+records the orchestrator's agent before its reports run, so the worker would be refused every time
+the orchestrator delegated to it.
 
 `model` and `effort` are optional and passed to the member's CLI as written. Leave either out to
 get that CLI's default. A model alias such as `sonnet` follows the CLI's own resolution and can
@@ -95,8 +127,9 @@ not that the level exists, so a bad level fails on the member's first run.
 
 `advisor` is optional and only used when the member runs on claude. It sets Claude Code's
 `advisorModel` for that member's run, so a member can get a different advisor from the one in
-the user's `~/.claude/settings.json`, which every claude member already inherits. Leave it out
-unless members should differ. `fable`, `opus`, and `sonnet` are valid values. Claude Code skips
+the user's `~/.claude/settings.json`, which every claude member already inherits. The starter sets
+it on every member so the team gets an advisor whether or not the user's settings name one.
+`fable`, `opus`, and `sonnet` are valid values. Claude Code skips
 the advisor, without failing the run, when it is less capable than the member's model, when the
 account does not have the feature, or on a third-party provider. A codex or grok member with an
 advisor ignores it unless `on_unavailable` falls it back to claude.
