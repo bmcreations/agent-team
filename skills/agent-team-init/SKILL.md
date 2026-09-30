@@ -101,6 +101,13 @@ the advisor, without failing the run, when it is less capable than the member's 
 account does not have the feature, or on a third-party provider. A codex or grok member with an
 advisor ignores it unless `on_unavailable` falls it back to claude.
 
+`permission_mode` is optional and sets `--permission-mode` for a claude member with
+`isolation: "workspace"`. It defaults to `auto`; without a mode, headless `claude -p` refuses every
+tool call that would prompt, so the member cannot edit its clone. Set it to `acceptEdits` to allow
+file edits but no shell commands. The loader refuses it on `read-only` and `none` members, which
+always run in `plan`. If claude refuses any of a workspace member's tool calls, the run reports
+`status: failed` with the refused tools listed in `permission_denials`, and its workspace is kept.
+
 ## Step 5 — confirm it loads
 
 ```bash

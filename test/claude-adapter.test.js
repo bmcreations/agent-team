@@ -91,7 +91,7 @@ test('a can_delegate brief reaches the subagent with its delegation section inta
   assert.match(promptArg, /"status":"delegating"/);
 });
 
-test('a read_only brief passes --permission-mode plan, and a writable one does not', () => {
+test('a read_only brief passes --permission-mode plan, and a writable one passes its permission_mode or auto', () => {
   const baseResolved = {
     member: 'lead',
     title: 'Lead',
@@ -128,8 +128,22 @@ test('a read_only brief passes --permission-mode plan, and a writable one does n
     denyPaths: ['**/.env*']
   });
   assert.equal(wBrief.read_only, false);
+  // With no mode, headless `claude -p` refuses every tool call that would prompt, so a
+  // workspace member could not edit its own clone. It defaults to auto.
   const wRecord = runAdapterAgainstStub(wBrief);
-  assert.equal(wRecord.argv.includes('--permission-mode'), false);
+  const wPmIndex = wRecord.argv.indexOf('--permission-mode');
+  assert.notEqual(wPmIndex, -1, 'workspace argv must contain --permission-mode');
+  assert.equal(wRecord.argv[wPmIndex + 1], 'auto');
+
+  const setCwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-pm-'));
+  const setBrief = buildBrief({
+    resolved: { ...baseResolved, isolation: 'workspace', permission_mode: 'acceptEdits' },
+    task: 'x',
+    cwd: setCwd,
+    denyPaths: ['**/.env*']
+  });
+  const setRecord = runAdapterAgainstStub(setBrief);
+  assert.equal(setRecord.argv[setRecord.argv.indexOf('--permission-mode') + 1], 'acceptEdits');
 });
 
 test('a resolved model is passed as --model, and the flag is absent when model is null', () => {
@@ -501,4 +515,49 @@ test('a claude process killed by an external SIGTERM is reported as signal-termi
   assert.equal(res.status, 'failed');
   assert.doesNotMatch(res.summary, /timed out/);
   assert.match(res.summary, /SIGTERM/);
+});
+
+// The permission_denials shape is copied from a real `claude -p --output-format json
+// --permission-mode dontAsk` run that tried an Edit and was refused.
+function createDeniedClaudeStub(summary) {
+  const stubDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-denied-stub-'));
+  const stubPath = join(stubDir, 'claude');
+  const envelope = {
+    result: summary,
+    permission_denials: [
+      { tool_name: 'Edit', tool_use_id: 'toolu_1', tool_input: { file_path: 'f.txt' } },
+      { tool_name: 'Bash', tool_use_id: 'toolu_2', tool_input: { command: 'echo x >> f.txt' } }
+    ]
+  };
+  writeFileSync(stubPath, [
+    '#!/usr/bin/env node',
+    `process.stdout.write(${JSON.stringify(JSON.stringify(envelope))} + '\\n');`,
+    ''
+  ].join('\n'));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+test('a workspace run whose edits were all refused fails and names the refused tools', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-denied-'));
+  initGitFixtureRepo(cwd);
+  const stubDir = createDeniedClaudeStub('Both writes were declined, so the file is unchanged.');
+  const res = await runAdapter(ADAPTER, 'run', { brief: briefForCwd(cwd), env: { PATH: `${stubDir}:${process.env.PATH}` } });
+
+  assert.equal(res.status, 'failed');
+  assert.match(res.summary, /Edit, Bash/);
+  assert.match(res.summary, /Both writes were declined/);
+  assert.deepEqual(res.permission_denials, ['Edit', 'Bash']);
+});
+
+test('a workspace run that changed files despite a refusal fails but still returns its diff', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-partdenied-'));
+  initGitFixtureRepo(cwd);
+  writeFileSync(join(cwd, 'f.txt'), 'changed\n');
+  const stubDir = createDeniedClaudeStub('Edited f.txt; one command was declined.');
+  const res = await runAdapter(ADAPTER, 'run', { brief: briefForCwd(cwd), env: { PATH: `${stubDir}:${process.env.PATH}` } });
+
+  assert.equal(res.status, 'failed');
+  assert.match(res.artifacts.diff, /changed/);
+  assert.deepEqual(res.permission_denials, ['Edit', 'Bash']);
 });

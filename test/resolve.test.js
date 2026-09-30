@@ -112,6 +112,7 @@ test('identity fields the member omits come back null, and title falls back to t
   assert.equal(r.model, null);
   assert.equal(r.effort, null);
   assert.equal(r.advisor, null);
+  assert.equal(r.permission_mode, null);
   assert.equal(r.skill, null);
   assert.equal(r.output_path, null);
 });
@@ -121,6 +122,11 @@ test('the resolved member carries its model and effort', () => {
   const r = resolveMember(cfg, 'lead', { probe: all });
   assert.equal(r.model, 'claude-opus-5-5');
   assert.equal(r.effort, 'high');
+});
+
+test('the resolved member carries its permission_mode', () => {
+  const cfg = config({ w: { agent: 'claude', isolation: 'workspace', permission_mode: 'acceptEdits' } });
+  assert.equal(resolveMember(cfg, 'w', { probe: all }).permission_mode, 'acceptEdits');
 });
 
 test('the resolved member carries its advisor', () => {

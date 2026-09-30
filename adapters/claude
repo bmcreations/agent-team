@@ -69,7 +69,9 @@ if (sub === 'probe') {
     // executor outranks it, the feature is off for the account, a third-party provider);
     // `claude --debug` logs "[AdvisorTool] Skipping advisor - <reason>" when it does.
     if (brief.advisor) args.push('--settings', JSON.stringify({ advisorModel: brief.advisor }));
-    if (brief.read_only) args.push('--permission-mode', 'plan');
+    // With no mode, headless `claude -p` refuses every tool call that would prompt, and only
+    // the user's own allowlist gets through, so a workspace member could not edit its clone.
+    args.push('--permission-mode', brief.read_only ? 'plan' : (brief.permission_mode ?? 'auto'));
 
     const timeoutMs = (brief.timeout_s ?? 900) * 1000;
     const r = spawnSync('claude', args, { cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs });
@@ -109,8 +111,12 @@ if (sub === 'probe') {
       }) + '\n', () => process.exit(0));
     } else {
       let summary = '';
-      try { summary = JSON.parse(r.stdout.toString()).result ?? ''; }
-      catch { summary = r.stdout.toString().slice(0, 4000); }
+      let denied = [];
+      try {
+        const envelope = JSON.parse(r.stdout.toString());
+        summary = envelope.result ?? '';
+        denied = (envelope.permission_denials ?? []).map((d) => d.tool_name);
+      } catch { summary = r.stdout.toString().slice(0, 4000); }
 
       let diff = '';
       let diffUnreadable = false;
@@ -141,9 +147,20 @@ if (sub === 'probe') {
       try { branch = execFileSync('git', ['-C', brief.cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
       catch { /* ignore */ }
 
+      // A workspace member with refused tool calls may not have done its work, whatever its
+      // summary says. Reporting ok let dispatch prune the workspace, leaving only the session
+      // log to show what happened. An empty diff is no test: user hooks run in the clone too
+      // and can write files there. failed keeps the workspace and still returns the diff.
+      const refused = !brief.read_only && denied.length > 0;
+      if (refused) {
+        summary = `claude refused ${denied.length} tool call(s): ${denied.join(', ')}. ` +
+          `Member summary: ${summary}`;
+      }
+
       process.stdout.write(JSON.stringify({
-        status: 'ok',
+        status: refused ? 'failed' : 'ok',
         summary,
+        permission_denials: denied,
         findings: [],
         checked_sound: [],
         artifacts: {
