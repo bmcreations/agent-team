@@ -98,6 +98,16 @@ for (const a of ADAPTERS) {
   });
 }
 
+for (const a of ADAPTERS) {
+  test(`adapters/${a.agent}: an advisor is ignored, since it is a Claude Code setting`, () => {
+    const plain = argvFor(a, {});
+    const withAdvisor = argvFor(a, { advisor: 'opus' });
+    // The cwd differs per run, so compare with it masked out.
+    const mask = (argv) => argv.map((v) => (v.startsWith(tmpdir()) || v.includes('agent-team-') ? '<tmp>' : v));
+    assert.deepEqual(mask(withAdvisor), mask(plain));
+  });
+}
+
 test('adapters/codex: the prompt is the last argument, after every flag', () => {
   // adapters/codex: "positional prompt LAST, after all flags". A new flag appended below that
   // line would break the order this test holds it to.

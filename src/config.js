@@ -232,6 +232,17 @@ export function loadConfig(projectRoot) {
         );
       }
     }
+    // advisor is serialized into adapters/claude's --settings JSON as advisorModel. Only
+    // adapters/claude reads it; it is accepted on any member because on_unavailable can put a
+    // codex or grok member on claude. Whether the advisor is at least as capable as the
+    // executor model, as Claude Code requires, is not checkable here.
+    if (m.advisor !== undefined && m.advisor !== null) {
+      if (typeof m.advisor !== 'string' || m.advisor === '') {
+        throw new Error(
+          `${path}: member "${name}": "advisor" must be a non-empty string — got ${JSON.stringify(m.advisor)}`
+        );
+      }
+    }
     // src/resolve.js does `(member.distinct_from ?? []).filter(...)`, which throws a raw
     // "distinct_from.filter is not a function" for any non-array — including the single
     // most natural way to write one exclusion, distinct_from: "reviewer". A typo'd member

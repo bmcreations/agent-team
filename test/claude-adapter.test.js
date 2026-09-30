@@ -215,6 +215,48 @@ test('a resolved effort is passed as --effort, and the flag is absent when effor
   assert.equal(recordNoEffort.argv.includes('--effort'), false);
 });
 
+test('a resolved advisor is passed as advisorModel in --settings, and no --settings when advisor is null', () => {
+  // The claude CLI has no advisor flag; advisorModel is a settings key, and --settings takes
+  // a JSON string that is merged over the user's own settings.
+  const baseResolved = {
+    member: 'lead',
+    title: 'Lead',
+    agent: 'claude',
+    model: null,
+    effort: null,
+    advisor: null,
+    skill: null,
+    charter: null,
+    persona: null,
+    isolation: 'workspace',
+    deliverable: 'diff',
+    output_path: null,
+    reports_to: null,
+    reports: [],
+    warning: null
+  };
+
+  const cwdWithAdvisor = mkdtempSync(join(tmpdir(), 'agent-team-claude-advisor-'));
+  const recordWithAdvisor = runAdapterAgainstStub(buildBrief({
+    resolved: { ...baseResolved, advisor: 'opus' },
+    task: 'x',
+    cwd: cwdWithAdvisor,
+    denyPaths: ['**/.env*']
+  }));
+  const settingsIndex = recordWithAdvisor.argv.indexOf('--settings');
+  assert.notEqual(settingsIndex, -1, 'argv must contain --settings when brief.advisor is set');
+  assert.deepEqual(JSON.parse(recordWithAdvisor.argv[settingsIndex + 1]), { advisorModel: 'opus' });
+
+  const cwdNoAdvisor = mkdtempSync(join(tmpdir(), 'agent-team-claude-noadvisor-'));
+  const recordNoAdvisor = runAdapterAgainstStub(buildBrief({
+    resolved: baseResolved,
+    task: 'x',
+    cwd: cwdNoAdvisor,
+    denyPaths: ['**/.env*']
+  }));
+  assert.equal(recordNoAdvisor.argv.includes('--settings'), false);
+});
+
 // A stub that emits a `result` string past the 64 KB OS pipe buffer, to prove the adapter's
 // stdout write is fully drained before the process exits — not just that small payloads work.
 function createLargeResultClaudeStub(resultLength) {

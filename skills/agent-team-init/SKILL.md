@@ -93,6 +93,14 @@ config's:
 A model may accept only part of its vendor's range. The loader checks that `effort` is a string,
 not that the level exists, so a bad level fails on the member's first run.
 
+`advisor` is optional and only used when the member runs on claude. It sets Claude Code's
+`advisorModel` for that member's run, so a member can get a different advisor from the one in
+the user's `~/.claude/settings.json`, which every claude member already inherits. Leave it out
+unless members should differ. `fable`, `opus`, and `sonnet` are valid values. Claude Code skips
+the advisor, without failing the run, when it is less capable than the member's model, when the
+account does not have the feature, or on a third-party provider. A codex or grok member with an
+advisor ignores it unless `on_unavailable` falls it back to claude.
+
 ## Step 5 — confirm it loads
 
 ```bash
