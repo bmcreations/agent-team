@@ -63,6 +63,7 @@ if (sub === 'probe') {
   } else {
     const args = ['-p', brief.task, '--output-format', 'json'];
     if (brief.model) args.push('--model', brief.model);
+    if (brief.effort) args.push('--effort', brief.effort);
     if (brief.read_only) args.push('--permission-mode', 'plan');
 
     const timeoutMs = (brief.timeout_s ?? 900) * 1000;

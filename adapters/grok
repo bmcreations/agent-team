@@ -81,6 +81,9 @@ if (sub === 'probe') {
                               // finding if that turns out to be wanted.
     ];
     if (brief.model) args.push('-m', brief.model);
+    // --reasoning-effort, per 14-headless-mode.md on grok 1.0.34; a level the model's menu
+    // does not advertise is rejected by grok, not here.
+    if (brief.effort) args.push('--reasoning-effort', brief.effort);
     // Sandbox is OFF BY DEFAULT for grok (per 18-sandbox.md) — unlike codex, where the default
     // is merely unknown, an unpinned grok run here would always be fully unrestricted. Pinned on
     // BOTH branches for the same reason codex pins `-s` on both branches: an adapter that

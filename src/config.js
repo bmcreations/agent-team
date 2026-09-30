@@ -222,6 +222,16 @@ export function loadConfig(projectRoot) {
         );
       }
     }
+    // effort reaches the vendor CLI the same way, for the same reason. Only its type is
+    // checked: the accepted levels differ per vendor and per model (grok also takes
+    // per-model menu ids), so an allowlist here would be wrong for someone.
+    if (m.effort !== undefined && m.effort !== null) {
+      if (typeof m.effort !== 'string' || m.effort === '') {
+        throw new Error(
+          `${path}: member "${name}": "effort" must be a non-empty string — got ${JSON.stringify(m.effort)}`
+        );
+      }
+    }
     // src/resolve.js does `(member.distinct_from ?? []).filter(...)`, which throws a raw
     // "distinct_from.filter is not a function" for any non-array — including the single
     // most natural way to write one exclusion, distinct_from: "reviewer". A typo'd member

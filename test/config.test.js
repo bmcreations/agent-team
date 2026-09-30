@@ -530,6 +530,31 @@ test('an ordinary string model still loads', () => {
   assert.equal(cfg.members.a.model, 'claude-opus-4');
 });
 
+// --- effort reaches the vendor CLI the same way model does ---
+
+test('an object effort is refused before it reaches the vendor CLI', () => {
+  const root = memberProject('a', { effort: { level: 'high' } });
+  assert.throws(() => loadConfig(root), /"effort"/);
+});
+
+test('a numeric effort is refused', () => {
+  const root = memberProject('a', { effort: 3 });
+  assert.throws(() => loadConfig(root), /"effort"/);
+});
+
+test('an empty-string effort is refused', () => {
+  const root = memberProject('a', { effort: '' });
+  assert.throws(() => loadConfig(root), /"effort"/);
+});
+
+test('an effort outside any one vendor\'s levels still loads', () => {
+  // Levels differ per vendor and per model (grok accepts per-model menu ids), so the
+  // config does not second-guess them; the vendor CLI rejects a level it does not know.
+  const root = memberProject('a', { effort: 'xhigh' });
+  const cfg = loadConfig(root);
+  assert.equal(cfg.members.a.effort, 'xhigh');
+});
+
 // --- B1: distinct_from of any non-array type threw a raw, unhelpful TypeError ---
 
 test('a string distinct_from is refused, and the message suggests the array form', () => {
