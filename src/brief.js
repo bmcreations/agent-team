@@ -96,6 +96,7 @@ export function buildBrief({
     output_path: resolved.output_path,
     model: resolved.model,
     effort: resolved.effort,
+    advisor: resolved.advisor,
     timeout_s: timeoutSec,
     deny_paths: denyPaths,
     reports: resolved.reports,

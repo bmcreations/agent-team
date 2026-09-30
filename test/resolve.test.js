@@ -111,6 +111,7 @@ test('identity fields the member omits come back null, and title falls back to t
   assert.equal(r.persona, null);
   assert.equal(r.model, null);
   assert.equal(r.effort, null);
+  assert.equal(r.advisor, null);
   assert.equal(r.skill, null);
   assert.equal(r.output_path, null);
 });
@@ -120,6 +121,11 @@ test('the resolved member carries its model and effort', () => {
   const r = resolveMember(cfg, 'lead', { probe: all });
   assert.equal(r.model, 'claude-opus-5-5');
   assert.equal(r.effort, 'high');
+});
+
+test('the resolved member carries its advisor', () => {
+  const cfg = config({ lead: { agent: 'claude', advisor: 'fable' } });
+  assert.equal(resolveMember(cfg, 'lead', { probe: all }).advisor, 'fable');
 });
 
 test('the resolved member carries its direct reports and its manager', () => {

@@ -555,6 +555,24 @@ test('an effort outside any one vendor\'s levels still loads', () => {
   assert.equal(cfg.members.a.effort, 'xhigh');
 });
 
+// --- advisor is serialized into the claude CLI's --settings JSON ---
+
+test('an object advisor is refused', () => {
+  const root = memberProject('a', { advisor: { model: 'opus' } });
+  assert.throws(() => loadConfig(root), /"advisor"/);
+});
+
+test('an empty-string advisor is refused', () => {
+  const root = memberProject('a', { advisor: '' });
+  assert.throws(() => loadConfig(root), /"advisor"/);
+});
+
+test('an ordinary string advisor still loads', () => {
+  const root = memberProject('a', { advisor: 'opus' });
+  const cfg = loadConfig(root);
+  assert.equal(cfg.members.a.advisor, 'opus');
+});
+
 // --- B1: distinct_from of any non-array type threw a raw, unhelpful TypeError ---
 
 test('a string distinct_from is refused, and the message suggests the array form', () => {
