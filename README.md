@@ -9,6 +9,16 @@ deliverable; the dispatcher runs those against its direct reports only, then cal
 member back with the results so it can synthesise. Tree depth and total adapter runs are
 capped separately.
 
+A vendor CLI returns plain text, so each vendor adapter reads the manager's final answer for
+that delegation, and only when the brief allows delegating. After trimming, the whole answer
+has to be the object `{"status":"delegating","delegations":[{"to":…,"task":…}]}`, either bare
+or as the only content of one fenced block. Every entry needs a non-empty `to` and `task`.
+Anything else is a deliverable, with one exception: an answer that contains
+`"status":"delegating"` but does not meet that shape fails, so a manager that wraps its
+delegation in prose is reported rather than handed back as finished work. The cost is that a
+deliverable quoting that exact string also fails. Whether `to` names a direct report is still
+checked by the dispatcher, which refuses the run outright when it does not.
+
 A rival CLI ships whatever it can read to a third party, so every member runs in a filtered
 clone: a shallow clone with the denied paths deleted and history flattened to one orphan
 commit, so a secret is not recoverable from `HEAD~1` either. A config with an empty denylist

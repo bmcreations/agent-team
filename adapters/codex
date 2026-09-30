@@ -3,6 +3,7 @@ import { readFileSync, mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { answerOutcome } from '../src/delegation.js';
 
 // Binary resolution: PATH is the contract ("codex" must resolve there for a normal install).
 // The env var is only an escape hatch for a non-PATH install — on this machine codex-cli
@@ -139,8 +140,7 @@ if (sub === 'probe') {
       catch { /* ignore */ }
 
       process.stdout.write(JSON.stringify({
-        status: 'ok',
-        summary,
+        ...answerOutcome(summary, brief),
         findings: [],
         checked_sound: [],
         artifacts: {

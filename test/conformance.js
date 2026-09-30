@@ -173,6 +173,23 @@ export async function conformanceReport(execPath, {
     });
   }
 
+  // src/dispatch.js reads delegations off this result and throws on an entry it cannot run,
+  // so a delegating answer has to carry a runnable list, not just the status.
+  if (run.status === 'delegating') {
+    const list = run.delegations;
+    const bad = !Array.isArray(list) || list.length === 0 || list.some((d) =>
+      d === null || typeof d !== 'object' ||
+      typeof d.to !== 'string' || d.to === '' ||
+      typeof d.task !== 'string' || d.task === '');
+    if (bad) {
+      failures.push({
+        step: 'delegation-shape',
+        detail: `"delegating" must carry a non-empty delegations array of {to, task} strings, ` +
+          `got ${JSON.stringify(list)}`
+      });
+    }
+  }
+
   // Off by default: failed | timeout | delegating are all conformant contract-wise — an
   // adapter that fails gracefully IS conformant, and the tests above pin that. But a
   // live-vendor run (AGENT_TEAM_CONFORMANCE=<adapter>) exists to answer one question this
