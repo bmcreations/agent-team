@@ -174,6 +174,47 @@ test('a resolved model is passed as --model, and the flag is absent when model i
   assert.equal(recordNoModel.argv.includes('--model'), false);
 });
 
+test('a resolved effort is passed as --effort, and the flag is absent when effort is null', () => {
+  const baseResolved = {
+    member: 'lead',
+    title: 'Lead',
+    agent: 'claude',
+    model: null,
+    effort: null,
+    skill: null,
+    charter: null,
+    persona: null,
+    isolation: 'workspace',
+    deliverable: 'diff',
+    output_path: null,
+    reports_to: null,
+    reports: [],
+    warning: null
+  };
+
+  const cwdWithEffort = mkdtempSync(join(tmpdir(), 'agent-team-claude-effort-'));
+  const briefWithEffort = buildBrief({
+    resolved: { ...baseResolved, effort: 'high' },
+    task: 'x',
+    cwd: cwdWithEffort,
+    denyPaths: ['**/.env*']
+  });
+  const recordWithEffort = runAdapterAgainstStub(briefWithEffort);
+  const effortIndex = recordWithEffort.argv.indexOf('--effort');
+  assert.notEqual(effortIndex, -1, 'argv must contain --effort when brief.effort is set');
+  assert.equal(recordWithEffort.argv[effortIndex + 1], 'high');
+
+  const cwdNoEffort = mkdtempSync(join(tmpdir(), 'agent-team-claude-noeffort-'));
+  const briefNoEffort = buildBrief({
+    resolved: baseResolved,
+    task: 'x',
+    cwd: cwdNoEffort,
+    denyPaths: ['**/.env*']
+  });
+  const recordNoEffort = runAdapterAgainstStub(briefNoEffort);
+  assert.equal(recordNoEffort.argv.includes('--effort'), false);
+});
+
 // A stub that emits a `result` string past the 64 KB OS pipe buffer, to prove the adapter's
 // stdout write is fully drained before the process exits — not just that small payloads work.
 function createLargeResultClaudeStub(resultLength) {

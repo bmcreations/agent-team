@@ -64,6 +64,10 @@ if (sub === 'probe') {
       '-C', brief.cwd, '-o', lastMessagePath
     ];
     if (brief.model) args.push('-m', brief.model);
+    // NOT observed against the binary: codex exec has no effort flag in the help text above,
+    // so this sets the config key model_reasoning_effort through -c. Unverified until a run
+    // against a real codex confirms the key is honoured.
+    if (brief.effort) args.push('-c', `model_reasoning_effort=${brief.effort}`);
     // Pinned on BOTH branches, not just when read_only. Unlike claude (whose default is
     // already interactive-approval), codex's default sandbox comes from the user's own
     // config.toml and could be danger-full-access — inheriting that would let a rival CLI

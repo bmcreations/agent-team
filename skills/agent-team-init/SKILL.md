@@ -54,7 +54,8 @@ binary-found check above.
       "deliverable": "decision"
     },
     "eng-lead":    { "agent": "claude", "reports_to": "coo", "isolation": "read-only" },
-    "implementer": { "agent": "codex",  "reports_to": "eng-lead", "isolation": "workspace" },
+    "implementer": { "agent": "codex",  "reports_to": "eng-lead", "isolation": "workspace",
+                     "effort": "high" },
     "reviewer":    { "agent": "grok",   "reports_to": "eng-lead", "isolation": "read-only",
                      "distinct_from": ["implementer"] },
     "qa":          { "agent": "claude", "reports_to": "eng-lead", "isolation": "workspace" },
@@ -77,6 +78,20 @@ to show the shape a member outside the implementation chain takes — a `none` i
 or `decision` deliverable, no repo access at all — not because every project needs a COO, a designer,
 and a marketer. Tell the user these three are placeholders: edit their charters to fit the project,
 or delete them outright, rather than leaving them in place unexamined.
+
+`model` and `effort` are optional and passed to the member's CLI as written. Leave either out to
+get that CLI's default. A model alias such as `sonnet` follows the CLI's own resolution and can
+change when the CLI updates; a full model ID pins it. `effort` levels are the vendor's, not this
+config's:
+
+| agent  | flag                                | levels                                                  |
+|--------|-------------------------------------|---------------------------------------------------------|
+| claude | `--effort`                          | low, medium, high, xhigh, max                           |
+| grok   | `--reasoning-effort`                | none, minimal, low, medium, high, xhigh, max, or a per-model menu id |
+| codex  | `-c model_reasoning_effort=<level>` | unverified against a real codex run                     |
+
+A model may accept only part of its vendor's range. The loader checks that `effort` is a string,
+not that the level exists, so a bad level fails on the member's first run.
 
 ## Step 5 — confirm it loads
 

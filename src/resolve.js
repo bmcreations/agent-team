@@ -43,6 +43,7 @@ export function resolveMember(config, name, { probe, assignments = {} } = {}) {
     title: member.title ?? name,
     agent,
     model: member.model ?? null,
+    effort: member.effort ?? null,
     skill: member.skill ?? null,
     charter: member.charter ?? null,
     persona: member.persona ?? null,
