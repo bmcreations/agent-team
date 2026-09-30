@@ -28,7 +28,9 @@ The command returns one JSON object. Report to the user:
 - `checked_sound` if present — a red-team run reporting only problems gives no coverage signal
 - `warning` if the member fell back to another agent, stated plainly
 - `agent`, so the user knows who did the work
-- `artifacts.branch` — the work is on a branch and is **not merged**
+- `artifacts.diff` — a `workspace` member's change, **not applied** to the user's checkout. On an
+  `ok` run the workspace is deleted, so this diff is the only copy; `artifacts.branch` names a
+  branch in that deleted clone. On `failed` or `timeout`, `workspace.dir` still holds the clone.
 - `unmatchedDenyPaths`, if present and non-empty — these deny_paths entries did not win
   arbitration for any file in this repo (either matched nothing, or lost to a more specific
   overlapping entry) — confirm you meant them. Expected when a config is reused across projects.
@@ -40,7 +42,7 @@ agent's full session output and will swamp your context.
 
 ## Do not
 
-- Merge the branch. The user reviews it.
+- Apply the diff. The user reviews it.
 - Re-run a member that failed a `distinct_from` check by editing the config to get past it. The
   constraint exists so an agent does not review its own work.
-- Name a member that is not in the config. Run `agent-team org` to see who exists.
+- Name a member that is not in the config. Run `node "${CLAUDE_PLUGIN_ROOT}/bin/agent-team.js" org` to see who exists.
