@@ -483,12 +483,18 @@ test('a delegation is appended to the run log as one tree, with each manager rou
   });
 });
 
-test('a run from a subdirectory lands in the same run log as one from the repo root', async () => {
+test('a subdirectory and every worktree of a repo read the same run log', async () => {
   await withWorkspaceRoot(async () => {
     const { root, script } = project({ status: 'ok', summary: 'fine' });
     await run(root, script, 'reviewer');
     mkdirSync(join(root, 'sub'));
     assert.equal(readRuns(join(root, 'sub')).length, 1);
+
+    const worktree = join(mkdtempSync(join(tmpdir(), 'at-dsp-wt-')), 'wt');
+    execFileSync('git', ['-C', root, 'worktree', 'add', '-q', '-b', 'side', worktree], { stdio: 'pipe' });
+    await run(worktree, script, 'reviewer');
+    assert.equal(readRuns(root).length, 2);
+    assert.equal(readRuns(worktree).length, 2);
   });
 });
 

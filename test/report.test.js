@@ -8,9 +8,14 @@ import { formatDuration, readRuns, renderReport, renderRun, renderTotals } from 
 
 process.env.AGENT_TEAM_WORKSPACE_ROOT = mkdtempSync(join(tmpdir(), 'at-report-wsroot-'));
 
+// The advisor's model outspends the member in models, as in a real Sonnet run with a Fable
+// advisor, so the table must take the member's model from usage.model, not from cost.
 const usage = (cost, turns, advisor, model = 'claude-sonnet-5-5') => ({
-  duration_ms: 1000, turns, cost_usd: cost, session_id: 's', advisor_calls: advisor,
-  models: { [model]: { input_tokens: 1, output_tokens: 1, cost_usd: cost } }
+  model, duration_ms: 1000, turns, cost_usd: cost, session_id: 's', advisor_calls: advisor,
+  models: {
+    [model]: { input_tokens: 1, output_tokens: 1, cost_usd: cost / 5 },
+    'claude-fable-5-1': { input_tokens: 1, output_tokens: 1, cost_usd: cost * 4 / 5 }
+  }
 });
 const node = (member, extra = {}) => ({
   member, agent: 'claude', model: null, advisor: 'fable', status: 'ok', summary: '', depth: 0,

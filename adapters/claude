@@ -42,11 +42,13 @@ if (rawDiffMaxBufferOverride !== undefined) {
 
 // The envelope's usage.iterations covers only the run's last API call, so a member that
 // called the advisor mid-run and then kept working reports no advisor there. The session
-// transcript records every call as a server_tool_use block named "advisor". It is found by
-// session id under any project folder, so the cwd-to-folder escaping does not matter.
-// null means the transcript could not be found, which is not the same as zero calls.
-function countAdvisorCalls(sessionId) {
-  if (!sessionId) return null;
+// transcript records every call as a server_tool_use block named "advisor", and each
+// assistant line names the member's own model (the advisor's model never appears there).
+// The transcript is found by session id under any project folder, so the cwd-to-folder
+// escaping does not matter. null means it could not be read, which is not zero calls.
+function readTranscript(sessionId) {
+  const none = { advisor_calls: null, model: null };
+  if (!sessionId) return none;
   const projects = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects');
   let file = null;
   try {
@@ -54,18 +56,20 @@ function countAdvisorCalls(sessionId) {
       const candidate = join(projects, dir, `${sessionId}.jsonl`);
       if (existsSync(candidate)) { file = candidate; break; }
     }
-  } catch { return null; }
-  if (!file) return null;
+  } catch { return none; }
+  if (!file) return none;
   let calls = 0;
+  let model = null;
   for (const line of readFileSync(file, 'utf8').split('\n')) {
-    if (!line.includes('server_tool_use')) continue;
+    if (!line.includes('"assistant"')) continue;
     try {
-      const content = JSON.parse(line).message?.content;
-      if (!Array.isArray(content)) continue;
-      calls += content.filter((b) => b?.type === 'server_tool_use' && b.name === 'advisor').length;
+      const message = JSON.parse(line).message;
+      model ??= message?.model ?? null;
+      if (!Array.isArray(message?.content)) continue;
+      calls += message.content.filter((b) => b?.type === 'server_tool_use' && b.name === 'advisor').length;
     } catch { /* a torn last line is skipped */ }
   }
-  return calls;
+  return { advisor_calls: calls, model };
 }
 
 // What the report needs from claude's --output-format json envelope. modelUsage is keyed by
@@ -79,12 +83,14 @@ function usageFrom(envelope) {
       cost_usd: m.costUSD ?? null
     };
   }
+  const transcript = readTranscript(envelope.session_id);
   return {
+    model: transcript.model,
     duration_ms: envelope.duration_ms ?? null,
     turns: envelope.num_turns ?? null,
     cost_usd: envelope.total_cost_usd ?? null,
     session_id: envelope.session_id ?? null,
-    advisor_calls: countAdvisorCalls(envelope.session_id),
+    advisor_calls: transcript.advisor_calls,
     models
   };
 }

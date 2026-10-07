@@ -25,14 +25,10 @@ export function formatDuration(ms) {
 const formatCost = (usd) => (usd == null ? '—' : `$${usd.toFixed(2)}`);
 const formatCount = (n) => (n == null ? '—' : String(n));
 
-// The model that did the member's work: the configured one when set, otherwise the model
-// that spent the most, which leaves out an advisor's smaller share.
-function workModel(node) {
-  if (node.model) return node.model;
-  const models = Object.entries(node.usage?.models ?? {});
-  if (models.length === 0) return node.agent ?? '—';
-  return models.sort((a, b) => (b[1].cost_usd ?? 0) - (a[1].cost_usd ?? 0))[0][0];
-}
+// The model that did the member's work: the configured one, else the one the claude adapter
+// read from the session transcript. Not inferred from modelUsage, where an advisor often
+// outspends the member it advises.
+const workModel = (node) => node.model ?? node.usage?.model ?? node.agent ?? '—';
 
 function table(rows, rightAligned) {
   const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
