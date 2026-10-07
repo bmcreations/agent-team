@@ -37,6 +37,9 @@ The command returns one JSON object. Report to the user:
 - `droppedSymlinks`, if present and non-empty — these tracked symlinks were removed from the
   workspace; if the member's task needed one, that is why it failed.
 
+If the user asks how long it took, what it cost, or whether members used the advisor, point them
+to `/delegation`. Do not add those numbers up from the JSON yourself.
+
 Read `log_path` only if `status` is not `ok`, and grep it rather than reading it whole. It holds the
 agent's full session output and will swamp your context.
 

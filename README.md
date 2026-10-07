@@ -50,6 +50,23 @@ In the project you want a team for:
 For a `workspace` member the change comes back as a diff in `artifacts.diff`; nothing is
 written to your checkout.
 
+To see how the last delegation went, run `/delegation` (or `/delegation --all` for
+per-member totals across runs):
+
+```
+2026-10-07T12:00:00.000Z  Implement Slice 2 (Edit Profile)
+
+member        model              status  elapsed  turns   cost  advisor
+orchestrator  claude-opus-5-5    ok       15m00s     18  $1.84        2
+├ worker      claude-sonnet-5-5  ok        6m40s     37  $1.12        0
+└ reviewer    claude-opus-5-5    ok        2m55s     21  $0.97        2
+
+total 15m00s  $3.93  advisor calls 4
+```
+
+`/delegation` prints straight into the transcript without a model turn. `/agent-team:report`
+prints the same table through a skill, for surfaces that do not load plugin hooks modules.
+
 To see the reporting tree for a config:
 
 ```bash
@@ -60,8 +77,8 @@ node ~/.claude/plugins/cache/agent-team/agent-team/<version>/bin/agent-team.js o
 
 - [Configuration](docs/configuration.md): every member field, `defaults`, and `deny_paths`
   rules.
-- [How it works](docs/how-it-works.md): workspaces, delegation, fallback, and the result
-  a run returns.
+- [How it works](docs/how-it-works.md): workspaces, delegation, fallback, the result
+  a run returns, and the run log behind `/delegation`.
 - [Adapters](docs/adapters.md): the contract a vendor adapter implements, each shipped
   adapter's flags, and the conformance suite.
 - [Design spec](docs/superpowers/specs/2026-09-14-agent-team-design.md): the original

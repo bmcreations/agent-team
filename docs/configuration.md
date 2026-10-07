@@ -110,6 +110,8 @@ member's model, when the account does not have the feature, or on a third-party 
 codex or grok member may carry `advisor`; it only takes effect if `on_unavailable` falls that
 member back to claude.
 
+The `advisor` column of `/delegation` shows how many times each claude member called it.
+
 ### `permission_mode`
 
 Sets `--permission-mode` for a claude member with `isolation: "workspace"`. It defaults to
