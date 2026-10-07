@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlink
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
+import { readRuns } from '../src/report.js';
 
 // Recursively collects every path anywhere under `root` whose own name contains
 // `needle`, at any depth. Used to make a filesystem claim ("no workspace for X
@@ -445,4 +446,61 @@ test('a dropped symlink whose name matches no deny_paths entry gets no correlate
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test('a delegation is appended to the run log as one tree, with each manager round summed', async () => {
+  await withWorkspaceRoot(async () => {
+    const usage = (cost, advisor) => ({
+      duration_ms: 1000, turns: 3, cost_usd: cost, session_id: `s-${cost}`, advisor_calls: advisor,
+      models: { 'claude-opus-5-5': { input_tokens: 10, output_tokens: 2, cost_usd: cost } }
+    });
+    const { root, script } = project({
+      by_member: {
+        'eng-lead': [
+          { status: 'delegating', delegations: [{ to: 'implementer', task: 'build it' }], usage: usage(0.5, 1) },
+          { status: 'ok', summary: 'synthesized', usage: usage(0.25, 0) }
+        ],
+        implementer: { status: 'ok', summary: 'built', usage: usage(1, 2) }
+      }
+    });
+    const r = await run(root, script, 'eng-lead');
+    assert.equal(r.status, 'ok');
+
+    const runs = readRuns(root);
+    assert.equal(runs.length, 1);
+    const { tree, task } = runs[0];
+    assert.equal(task, 'go');
+    assert.equal(tree.member, 'eng-lead');
+    assert.equal(tree.usage.cost_usd, 0.75);
+    assert.equal(tree.usage.turns, 6);
+    assert.equal(tree.usage.advisor_calls, 1);
+    assert.deepEqual(tree.usage.session_ids, ['s-0.5', 's-0.25']);
+    assert.equal(tree.delegated.length, 1);
+    assert.equal(tree.delegated[0].member, 'implementer');
+    assert.equal(tree.delegated[0].usage.advisor_calls, 2);
+    assert.equal('diff' in tree, false);
+    assert.equal('workspace' in tree.delegated[0], false);
+  });
+});
+
+test('a run from a subdirectory lands in the same run log as one from the repo root', async () => {
+  await withWorkspaceRoot(async () => {
+    const { root, script } = project({ status: 'ok', summary: 'fine' });
+    await run(root, script, 'reviewer');
+    mkdirSync(join(root, 'sub'));
+    assert.equal(readRuns(join(root, 'sub')).length, 1);
+  });
+});
+
+test('a dispatch that throws is still logged as a failed run', async () => {
+  await withWorkspaceRoot(async () => {
+    const { root, script } = project({ status: 'ok', summary: 's' }, {
+      members: { ...TEAM, implementer: { ...TEAM.implementer, skill: 'some-skill' } }
+    });
+    await assert.rejects(() => run(root, script, 'implementer'));
+    const runs = readRuns(root);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].tree.status, 'failed');
+    assert.match(runs[0].tree.summary, /binds skill/);
+  });
 });

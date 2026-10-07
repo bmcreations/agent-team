@@ -530,6 +530,17 @@ function repoKey(repoRoot) {
   return createHash('sha256').update(resolve(repoRoot)).digest('hex').slice(0, 12);
 }
 
+// One JSON line per top-level dispatch, read by `agent-team report`. It sits beside the
+// workspaces, outside the repo, for the same reason they do. It is keyed by the git top
+// level, so a delegation started from a subdirectory and a report run from the root read
+// the same file.
+export function runLogPath(projectDir) {
+  let root = resolve(projectDir);
+  const top = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+  if (top.status === 0 && top.stdout.trim()) root = top.stdout.trim();
+  return join(cacheRoot(), 'agent-team', 'runs', `${repoKey(root)}.jsonl`);
+}
+
 // Workspaces must not live inside the repository they are protecting. The brief hands a
 // member its cwd and relative deny_paths, and never discloses repoRoot — nesting the
 // workspace inside the repo made repoRoot trivially derivable as `../../..` (or reachable
