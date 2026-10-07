@@ -26,7 +26,7 @@ test('the marketplace lists the plugin at the repo root', () => {
 });
 
 test('every skill the marketplace ships actually exists', () => {
-  for (const skill of ['red-team', 'delegate', 'agent-team-init']) {
+  for (const skill of ['red-team', 'delegate', 'agent-team-init', 'report']) {
     assert.ok(existsSync(join(ROOT, 'skills', skill, 'SKILL.md')), `missing skills/${skill}/SKILL.md`);
   }
 });
