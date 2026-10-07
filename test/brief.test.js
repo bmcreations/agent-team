@@ -157,3 +157,20 @@ test('a populated priorResults array still renders the section with the summary'
   assert.match(b.task, /Results from your reports/);
   assert.match(b.task, /SUB-RESULT/);
 });
+
+test('a claude member with an advisor is told when to call it, just before the task', () => {
+  const b = buildBrief({
+    resolved: { ...IMPL, agent: 'claude', advisor: 'fable' }, ...base, task: 'THE-TASK'
+  });
+  assert.match(b.task, /# Advisor/);
+  assert.match(b.task, /before your first edit/);
+  assert.match(b.task, /before you write your final answer/);
+  assert.ok(b.task.indexOf('# Advisor') < b.task.indexOf('THE-TASK'), 'advisor before task');
+});
+
+test('a member without an advisor, or not on claude, gets no advisor section', () => {
+  const none = buildBrief({ resolved: { ...IMPL, agent: 'claude', advisor: null }, ...base });
+  const codex = buildBrief({ resolved: { ...IMPL, agent: 'codex', advisor: 'fable' }, ...base });
+  assert.doesNotMatch(none.task, /# Advisor/);
+  assert.doesNotMatch(codex.task, /# Advisor/);
+});

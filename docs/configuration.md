@@ -101,7 +101,9 @@ A model may accept only part of its vendor's range.
 `advisor` sets Claude Code's `advisorModel` for this member's run, through
 `--settings '{"advisorModel":"<value>"}'`. Without it, a claude member inherits whatever the
 user's `~/.claude/settings.json` sets. `fable`, `opus` and `sonnet` are values Claude Code
-accepts.
+accepts. A claude member with `advisor` set also gets an `# Advisor` section in its brief,
+just before the task, telling it to call the advisor before its first edit and again before its
+final answer.
 
 Claude Code skips the advisor, without failing the run, when it is less capable than the
 member's model, when the account does not have the feature, or on a third-party provider. A
