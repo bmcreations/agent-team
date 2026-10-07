@@ -60,6 +60,19 @@ function depthLimitSection(maxDepth) {
   ].join('\n');
 }
 
+// The advisor tool's own guidance already says when to call it, yet a sonnet worker with
+// advisor "fable" called it in 2 of 10 runs, both near the end and never before its first
+// edit. The step is repeated here, next to the task. Claude Code can still skip the advisor
+// (see adapters/claude), so the wording allows for the tool being absent.
+function advisorSection() {
+  return [
+    '# Advisor',
+    '',
+    'If you have an advisor tool, call it once you have oriented and before your first edit',
+    'or your first conclusion, and again before you write your final answer.'
+  ].join('\n');
+}
+
 export function buildBrief({
   resolved, task, cwd, denyPaths, skillText = null, dialectText = null,
   timeoutSec = 900, depth = 0, maxDepth = 3, priorResults = null
@@ -87,6 +100,7 @@ export function buildBrief({
       `# Results from your reports\n\n\`\`\`json\n${JSON.stringify(priorResults, null, 2)}\n\`\`\``
     );
   }
+  if (resolved.agent === 'claude' && resolved.advisor) sections.push(advisorSection());
   sections.push(`# Task\n\n${task}`);
 
   return {
