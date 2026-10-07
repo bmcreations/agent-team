@@ -530,6 +530,19 @@ function repoKey(repoRoot) {
   return createHash('sha256').update(resolve(repoRoot)).digest('hex').slice(0, 12);
 }
 
+// One JSON line per top-level dispatch, read by `agent-team report`. It sits beside the
+// workspaces, outside the repo, for the same reason they do. It is keyed by the repository,
+// not the checkout: the shared git dir is the same from a subdirectory and from every
+// worktree, so delegations started in a desktop-app worktree show up in a report run from
+// the main checkout.
+export function runLogPath(projectDir) {
+  const dir = resolve(projectDir);
+  let key = dir;
+  const common = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' });
+  if (common.status === 0 && common.stdout.trim()) key = dirname(common.stdout.trim());
+  return join(cacheRoot(), 'agent-team', 'runs', `${repoKey(key)}.jsonl`);
+}
+
 // Workspaces must not live inside the repository they are protecting. The brief hands a
 // member its cwd and relative deny_paths, and never discloses repoRoot — nesting the
 // workspace inside the repo made repoRoot trivially derivable as `../../..` (or reachable

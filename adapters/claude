@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { readFileSync, mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
 
@@ -38,6 +38,61 @@ if (rawDiffMaxBufferOverride !== undefined) {
       `positive integer; falling back to the default of ${DIFF_MAX_BUFFER_DEFAULT} bytes`
     );
   }
+}
+
+// The envelope's usage.iterations covers only the run's last API call, so a member that
+// called the advisor mid-run and then kept working reports no advisor there. The session
+// transcript records every call as a server_tool_use block named "advisor", and each
+// assistant line names the member's own model (the advisor's model never appears there).
+// The transcript is found by session id under any project folder, so the cwd-to-folder
+// escaping does not matter. null means it could not be read, which is not zero calls.
+function readTranscript(sessionId) {
+  const none = { advisor_calls: null, model: null };
+  if (!sessionId) return none;
+  const projects = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects');
+  let file = null;
+  try {
+    for (const dir of readdirSync(projects)) {
+      const candidate = join(projects, dir, `${sessionId}.jsonl`);
+      if (existsSync(candidate)) { file = candidate; break; }
+    }
+  } catch { return none; }
+  if (!file) return none;
+  let calls = 0;
+  let model = null;
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (!line.includes('"assistant"')) continue;
+    try {
+      const message = JSON.parse(line).message;
+      model ??= message?.model ?? null;
+      if (!Array.isArray(message?.content)) continue;
+      calls += message.content.filter((b) => b?.type === 'server_tool_use' && b.name === 'advisor').length;
+    } catch { /* a torn last line is skipped */ }
+  }
+  return { advisor_calls: calls, model };
+}
+
+// What the report needs from claude's --output-format json envelope. modelUsage is keyed by
+// model, so the advisor's model shows up there with its own cost when it was called.
+function usageFrom(envelope) {
+  const models = {};
+  for (const [name, m] of Object.entries(envelope.modelUsage ?? {})) {
+    models[name] = {
+      input_tokens: (m.inputTokens ?? 0) + (m.cacheReadInputTokens ?? 0) + (m.cacheCreationInputTokens ?? 0),
+      output_tokens: m.outputTokens ?? 0,
+      cost_usd: m.costUSD ?? null
+    };
+  }
+  const transcript = readTranscript(envelope.session_id);
+  return {
+    model: transcript.model,
+    duration_ms: envelope.duration_ms ?? null,
+    turns: envelope.num_turns ?? null,
+    cost_usd: envelope.total_cost_usd ?? null,
+    session_id: envelope.session_id ?? null,
+    advisor_calls: transcript.advisor_calls,
+    models
+  };
 }
 
 if (sub === 'probe') {
@@ -113,10 +168,12 @@ if (sub === 'probe') {
     } else {
       let summary = '';
       let denied = [];
+      let usage = null;
       try {
         const envelope = JSON.parse(r.stdout.toString());
         summary = envelope.result ?? '';
         denied = (envelope.permission_denials ?? []).map((d) => d.tool_name);
+        usage = usageFrom(envelope);
       } catch { summary = r.stdout.toString().slice(0, 4000); }
 
       let diff = '';
@@ -164,6 +221,7 @@ if (sub === 'probe') {
       process.stdout.write(JSON.stringify({
         ...outcome,
         permission_denials: denied,
+        usage,
         findings: [],
         checked_sound: [],
         artifacts: {

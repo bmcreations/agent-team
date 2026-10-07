@@ -80,3 +80,19 @@ test('"org" on a broken config gives exit 1 and parseable JSON, not a stack trac
   assert.match(parsed.summary, /deny_paths/);
   assert.equal(stderr, '');
 });
+
+test('`agent-team report` prints a plain message, not JSON, when nothing has been logged', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-cli-report-'));
+  const prev = process.env.AGENT_TEAM_WORKSPACE_ROOT;
+  process.env.AGENT_TEAM_WORKSPACE_ROOT = mkdtempSync(join(tmpdir(), 'at-cli-report-ws-'));
+  try {
+    const text = await runCli(['report', '--project', dir]);
+    assert.equal(text.code, 0);
+    assert.match(text.stdout, /No delegations logged/);
+    const json = await runCli(['report', '--json', '--project', dir]);
+    assert.deepEqual(JSON.parse(json.stdout), []);
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_TEAM_WORKSPACE_ROOT;
+    else process.env.AGENT_TEAM_WORKSPACE_ROOT = prev;
+  }
+});

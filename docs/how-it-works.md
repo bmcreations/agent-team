@@ -144,7 +144,44 @@ Config errors and dispatcher refusals come back in the same shape,
 | `unmatchedDenyPaths` | dispatcher | `deny_paths` entries that won no file. See [Configuration](configuration.md#deny_paths). |
 | `droppedSymlinks` | dispatcher | Tracked symlinks removed from the workspace. If the task needed one, this is why it failed. |
 | `depth` | dispatcher | `0` for the member you dispatched. |
+| `model`, `advisor` | dispatcher | The member's configured `model` and `advisor`, or `null`. |
+| `usage` | claude adapter | Duration, turns, cost, per-model tokens and advisor calls. A manager's rounds are summed. See [claude](adapters.md#claude). |
+| `elapsed_ms` | dispatcher | Wall time for the member, including the reports it waited on. |
 | `delegated` | dispatcher | Full results of every report that ran, in order. |
 
 The adapter is killed, with its whole process group, when `--timeout` expires (900 seconds by
 default), and the result is `status: "timeout"`.
+
+## The run log
+
+Each top-level dispatch appends one line to
+`~/.cache/agent-team/runs/<repo-key>.jsonl` (under `$XDG_CACHE_HOME` or
+`$AGENT_TEAM_WORKSPACE_ROOT` when set). The key is a hash of the repository's shared git
+directory, so every worktree and subdirectory of a repo writes to the same log, and a report
+run from the main checkout includes delegations started in a desktop-app worktree.
+
+A line holds `v`, `at` (when the dispatch started), `project`, `task` (first 200
+characters) and `tree`. Each node of `tree` keeps `member`, `agent`, `model`, `advisor`,
+`status`, `summary` (first 300 characters), `depth`, `elapsed_ms`, `usage` and `delegated`.
+Diffs, stderr and workspace paths are left out. A dispatch that throws, for example on a
+config error, is logged as a `failed` node. If the log cannot be written, the run still
+returns its result and a warning goes to stderr.
+
+`agent-team report` reads the log:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/bin/agent-team.js" report [--project <dir>] [--all] [--json]
+```
+
+With no flags it prints the last delegation as a tree. Turns, cost and advisor calls on each
+row are that member's own; `elapsed` includes the reports it waited on. `--all` prints
+per-member totals: runs, failures (any status other than `ok`), median elapsed, total cost,
+and runs that called the advisor out of runs whose transcript could be read. A manager whose
+rounds mixed a readable and an unreadable transcript counts as readable, so the advisor rate is
+approximate. `--json` prints the raw records.
+
+Only delegations started through agent-team are logged. A member played by your own
+interactive session, usually the orchestrator, never appears.
+
+`/delegation` runs `report` from a hooks module (`hooks/register.ts`) and prints the output
+without a model turn. `/agent-team:report` runs it from a skill.

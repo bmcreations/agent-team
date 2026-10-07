@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { loadConfig } from './config.js';
 import { resolveMember } from './resolve.js';
-import { createWorkspace, pruneWorkspace } from './workspace.js';
+import { createWorkspace, pruneWorkspace, runLogPath } from './workspace.js';
 import { buildBrief, loadDialect } from './brief.js';
 import { runAdapter, DEFAULT_TIMEOUT_MS } from './adapter.js';
 
@@ -32,10 +32,73 @@ export async function dispatch({
 }) {
   const config = loadConfig(projectRoot);
   const budget = { runs: config.defaults.max_delegations };
-  return runMember({
-    config, projectRoot, member, task, adapterDir,
-    assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0
+  const startedAt = new Date();
+  try {
+    const result = await runMember({
+      config, projectRoot, member, task, adapterDir,
+      assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0
+    });
+    recordRun(projectRoot, startedAt, task, runNode(result));
+    return result;
+  } catch (err) {
+    recordRun(projectRoot, startedAt, task, {
+      member, status: 'failed', summary: clip(err.message, 300), depth: 0, delegated: []
+    });
+    throw err;
+  }
+}
+
+const clip = (text, n) => (typeof text === 'string' && text.length > n ? `${text.slice(0, n)}…` : text ?? null);
+
+// The run log keeps what the report shows and nothing else: no diff, stderr, or workspace
+// path, which would make each line as large as the run's output.
+function runNode(r) {
+  return {
+    member: r.member, agent: r.agent ?? null, model: r.model ?? null, advisor: r.advisor ?? null,
+    status: r.status, summary: clip(r.summary, 300), depth: r.depth ?? 0,
+    elapsed_ms: r.elapsed_ms ?? null, usage: r.usage ?? null,
+    delegated: (r.delegated ?? []).map(runNode)
+  };
+}
+
+// A run that cannot be logged still returns its result: the log is for the report, and a
+// read-only cache directory must not fail the delegation it describes.
+function recordRun(projectRoot, startedAt, task, tree) {
+  const path = runLogPath(projectRoot);
+  const line = JSON.stringify({
+    v: 1, at: startedAt.toISOString(), project: resolve(projectRoot), task: clip(task, 200), tree
   });
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, line + '\n');
+  } catch (err) {
+    console.warn(`agent-team: could not write the run log at ${path}: ${err.message}`);
+  }
+}
+
+// A manager runs once to delegate and again to synthesize, so its usage is the sum of its
+// own rounds. Its reports' usage stays on their own nodes.
+function addUsage(total, u) {
+  if (!u) return total;
+  if (!total) return { ...u, models: { ...(u.models ?? {}) } };
+  const sum = (a, b) => (a == null && b == null ? null : (a ?? 0) + (b ?? 0));
+  const models = { ...total.models };
+  for (const [name, m] of Object.entries(u.models ?? {})) {
+    const prev = models[name];
+    models[name] = prev
+      ? { input_tokens: prev.input_tokens + m.input_tokens, output_tokens: prev.output_tokens + m.output_tokens,
+          cost_usd: sum(prev.cost_usd, m.cost_usd) }
+      : m;
+  }
+  return {
+    duration_ms: sum(total.duration_ms, u.duration_ms),
+    turns: sum(total.turns, u.turns),
+    cost_usd: sum(total.cost_usd, u.cost_usd),
+    session_id: total.session_id,
+    session_ids: [...(total.session_ids ?? [total.session_id]), u.session_id],
+    advisor_calls: sum(total.advisor_calls, u.advisor_calls),
+    models
+  };
 }
 
 async function runMember(ctx) {
@@ -115,6 +178,8 @@ async function runMember(ctx) {
   const delegated = [];
   let priorResults = null;
   let result;
+  let usage = null;
+  const started = Date.now();
 
   try {
     for (;;) {
@@ -133,6 +198,7 @@ async function runMember(ctx) {
       result = await runAdapter(adapterPath(adapterDir, resolved.agent), 'run', {
         brief, timeoutMs, env, cwd: workspace.dir
       });
+      usage = addUsage(usage, result.usage);
 
       if (result.status !== 'delegating') break;
 
@@ -186,7 +252,8 @@ async function runMember(ctx) {
 
     return {
       ...result,
-      member, agent: resolved.agent, warning: resolved.warning,
+      member, agent: resolved.agent, model: resolved.model, advisor: resolved.advisor,
+      usage, elapsed_ms: Date.now() - started, warning: resolved.warning,
       workspace, unmatchedDenyPaths, droppedSymlinks, depth, delegated
     };
   } catch (err) {

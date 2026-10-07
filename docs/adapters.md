@@ -22,7 +22,8 @@ stdout. The shipped adapters exit `0` and report failure through `status` instea
 on an unknown subcommand.
 
 A `run` result needs `status`, one of `ok`, `failed`, `timeout` or `delegating`, and on `ok`,
-a string `summary`. `delegating` also needs `delegations`; see
+a string `summary`. An optional `usage` object is copied into the run log; only the claude
+adapter sets it, so codex and grok members show `—` in the report. `delegating` also needs `delegations`; see
 [Delegation](how-it-works.md#delegation). Everything else in the object is passed through to
 the caller. The brief's fields are listed in [The brief](how-it-works.md#the-brief).
 
@@ -60,6 +61,20 @@ Binary: `claude` from `PATH`. There is no override variable.
 `summary` is the `result` field of claude's JSON output. `permission_denials` lists the tools
 claude refused; on a non-read-only member, any refusal turns the run into `failed` so its
 workspace is kept.
+
+`usage` is read from the same JSON output and feeds the [run log](how-it-works.md#the-run-log):
+
+| Field | From |
+|---|---|
+| `duration_ms`, `turns`, `cost_usd`, `session_id` | `duration_ms`, `num_turns`, `total_cost_usd`, `session_id` |
+| `models` | `modelUsage`, one entry per model with `input_tokens` (cache reads and writes included), `output_tokens` and `cost_usd`. An advisor's model appears here with its own cost. |
+| `model` | The member's own model, from the session transcript's assistant lines. |
+| `advisor_calls` | `server_tool_use` blocks named `advisor` in the session transcript. |
+
+The transcript is `<session_id>.jsonl` under `$CLAUDE_CONFIG_DIR/projects` (default
+`~/.claude/projects`). The envelope's `usage.iterations` lists only the run's last API call, so
+it misses an advisor called mid-run. When the transcript cannot be found, `model` and
+`advisor_calls` are `null`, not `0`. On a timeout or a non-JSON envelope, `usage` is `null`.
 
 `AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER` raises the byte limit for capturing the diff. An invalid
 value is ignored with a warning and sets `artifacts.diff_max_buffer_invalid_override`.

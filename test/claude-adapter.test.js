@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { buildBrief } from '../src/brief.js';
@@ -560,4 +560,74 @@ test('a workspace run that changed files despite a refusal fails but still retur
   assert.equal(res.status, 'failed');
   assert.match(res.artifacts.diff, /changed/);
   assert.deepEqual(res.permission_denials, ['Edit', 'Bash']);
+});
+
+// The envelope fields are copied from a real `claude -p --output-format json` run with
+// advisorModel set. usage.iterations only covers the last API call, so the adapter counts
+// advisor calls from the session transcript, written here under a fake CLAUDE_CONFIG_DIR.
+function createUsageClaudeStub(sessionId) {
+  const stubDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-usage-stub-'));
+  const stubPath = join(stubDir, 'claude');
+  const envelope = {
+    result: 'done', session_id: sessionId, duration_ms: 4200, num_turns: 7, total_cost_usd: 0.5,
+    modelUsage: {
+      'claude-sonnet-5-5': { inputTokens: 5, cacheReadInputTokens: 100, cacheCreationInputTokens: 20, outputTokens: 30, costUSD: 0.08 },
+      'claude-fable-5-1': { inputTokens: 40, outputTokens: 10, costUSD: 0.42 }
+    }
+  };
+  writeFileSync(stubPath, [
+    '#!/usr/bin/env node',
+    `process.stdout.write(${JSON.stringify(JSON.stringify(envelope))} + '\\n');`,
+    ''
+  ].join('\n'));
+  chmodSync(stubPath, 0o755);
+  return stubDir;
+}
+
+function writeTranscript(configDir, sessionId, advisorCalls) {
+  const dir = join(configDir, 'projects', '-some-escaped-cwd');
+  mkdirSync(dir, { recursive: true });
+  const call = { type: 'server_tool_use', id: 'srvtoolu_1', name: 'advisor', input: {} };
+  const lines = [
+    JSON.stringify({ type: 'user', message: { content: 'go' } }),
+    ...Array.from({ length: advisorCalls }, () => JSON.stringify({ type: 'assistant', message: { model: 'claude-sonnet-5-5', content: [call] } })),
+    JSON.stringify({ type: 'assistant', message: { model: 'claude-sonnet-5-5', content: [{ type: 'server_tool_use', name: 'web_search' }] } }),
+    '{"torn'
+  ];
+  writeFileSync(join(dir, `${sessionId}.jsonl`), lines.join('\n'));
+}
+
+test('a run reports its usage, with advisor calls counted from the session transcript', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-usage-'));
+  initGitFixtureRepo(cwd);
+  const configDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-config-'));
+  writeTranscript(configDir, 'sess-1', 2);
+  const stubDir = createUsageClaudeStub('sess-1');
+  const res = await runAdapter(ADAPTER, 'run', {
+    brief: briefForCwd(cwd), env: { PATH: `${stubDir}:${process.env.PATH}`, CLAUDE_CONFIG_DIR: configDir }
+  });
+
+  assert.equal(res.usage.duration_ms, 4200);
+  assert.equal(res.usage.turns, 7);
+  assert.equal(res.usage.cost_usd, 0.5);
+  assert.equal(res.usage.session_id, 'sess-1');
+  assert.equal(res.usage.advisor_calls, 2);
+  // the advisor (fable) outspends the member, but the member's model comes from the transcript
+  assert.equal(res.usage.model, 'claude-sonnet-5-5');
+  assert.deepEqual(res.usage.models['claude-sonnet-5-5'], { input_tokens: 125, output_tokens: 30, cost_usd: 0.08 });
+  assert.equal(res.usage.models['claude-fable-5-1'].cost_usd, 0.42);
+});
+
+test('advisor calls are null, not zero, when the session transcript cannot be found', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-usage-'));
+  initGitFixtureRepo(cwd);
+  const configDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-config-'));
+  const stubDir = createUsageClaudeStub('sess-missing');
+  const res = await runAdapter(ADAPTER, 'run', {
+    brief: briefForCwd(cwd), env: { PATH: `${stubDir}:${process.env.PATH}`, CLAUDE_CONFIG_DIR: configDir }
+  });
+
+  assert.equal(res.usage.advisor_calls, null);
+  assert.equal(res.usage.model, null);
+  assert.equal(res.usage.turns, 7);
 });
