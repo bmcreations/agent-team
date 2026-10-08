@@ -112,3 +112,48 @@ export function remoteTeamSource(repo, ref = null) {
     tracked: Buffer.from(paths.length ? `${paths.join('\0')}\0` : '')
   };
 }
+
+// --- Spike: joining a session someone else created (docs/spikes/live-sessions.md) ---
+
+const WRITE_TOOLS = ['bash', 'write', 'edit'];
+
+// The agent snapshot on GET /v1/sessions/{id}: which write-capable built-in tools are on,
+// and whether any MCP server is attached (its tools are unknown to us).
+export function writeToolsOn(agent) {
+  const on = new Set();
+  for (const t of agent?.tools ?? []) {
+    if (!/^agent_toolset/.test(t.type ?? '')) continue;
+    const byDefault = t.default_config?.enabled !== false;
+    const configs = new Map((t.configs ?? []).map((c) => [c.name, c.enabled !== false]));
+    for (const name of WRITE_TOOLS) if (configs.get(name) ?? byDefault) on.add(name);
+  }
+  if ((agent?.mcp_servers ?? []).length > 0) on.add('mcp');
+  return [...on];
+}
+
+// What makes it unsafe to hand this session a member's task. The dispatcher checked
+// deny_paths against brief.cloud.repo_url at brief.cloud.ref, so the session must have that
+// repo mounted at that branch for the check to describe what it can read.
+export function joinRefusal(session, brief) {
+  const id = session.id;
+  if (session.archived_at || session.status === 'terminated') return `session ${id} is ${session.archived_at ? 'archived' : 'terminated'}`;
+  const want = parseGithubRepo(brief.cloud.repo_url)?.key;
+  const repos = (session.resources ?? []).filter((r) => r.type === 'github_repository');
+  const ours = repos.find((r) => parseGithubRepo(r.url)?.key === want);
+  if (!ours) return `session ${id} does not mount ${brief.cloud.repo_url}, so deny_paths was checked against a repo it cannot see`;
+  if (repos.length > 1) return `session ${id} mounts ${repos.length} repositories; deny_paths only covers ${brief.cloud.repo_url}`;
+  const co = ours.checkout;
+  if (co?.type === 'branch' && co.name !== brief.cloud.ref) {
+    return `session ${id} has branch "${co.name}" checked out, but deny_paths was checked on "${brief.cloud.ref}"`;
+  }
+  if (co?.type === 'commit' && brief.cloud.sha && co.sha !== brief.cloud.sha) {
+    return `session ${id} has commit ${co.sha} checked out, but deny_paths was checked on ${brief.cloud.sha}`;
+  }
+  if (!co) return `session ${id} reports no checkout for ${brief.cloud.repo_url}`;
+  const writes = writeToolsOn(session.agent);
+  if (writes.length > 0 && !brief.cloud.session_allow_tools) {
+    return `session ${id} has ${writes.join(', ')} enabled, which a read-only member must not get — ` +
+      'set "session_allow_tools": true on the member to send the task anyway';
+  }
+  return null;
+}

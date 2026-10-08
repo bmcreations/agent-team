@@ -125,15 +125,20 @@ pre-flight idle wait exists.
 - `src/config.js`: `session_id` (must be a `sesn_` id on a `claude-cloud`,
   `read-only` member) and `session_allow_tools`.
 - `src/resolve.js`, `src/dispatch.js`: pass both through on `brief.cloud`.
-- `adapters/claude-cloud`: `joinSession()` and `joinRefusal()`, entered when
-  `brief.cloud.session_id` is set. The create path is unchanged.
+- `adapters/claude-cloud`: `joinSession()`, entered when `brief.cloud.session_id`
+  is set. The create path is unchanged.
+- `src/cloud.js`: `joinRefusal()` and `writeToolsOn()`, moved out of the adapter
+  so `scripts/verify-join.mjs` runs the same refusal code.
 - `test/live-session.test.js`: 15 tests against a fake API whose session already
   holds the owner's finished turn. They cover answer selection past the owner's
   idle, a queued event, a busy then idle session, a never-idle session, timeout
   without interrupt or archive, each refusal, budget and confirmation stops, and
   a foreign message inside our turn.
 
-`npm test`: 385 pass, 0 fail.
+- `scripts/verify-join.mjs` and `test/verify-join.test.js`: see
+  [Verifying against a real session](#verifying-against-a-real-session).
+
+`npm test`: 391 pass, 0 fail.
 
 ### Recommendation: build
 
@@ -143,11 +148,48 @@ can detect but not prevent. That's acceptable for read-only lookups and not
 acceptable for anything that writes, which is why the prototype only allows
 read-only members.
 
-Before merging, two behaviours were inferred from schemas rather than stated in
-the docs and should be checked once against a real session: that `processed_at`
-on a sent event fills in when the turn starts, and that `agent.tools` on
-`GET /v1/sessions/{id}` uses the same `agent_toolset_*` shape the adapter sends
-on create.
+Before merging, three behaviours the code depends on need one check against a
+real session, because the docs don't state them outright:
+
+- `processed_at` on a sent event fills in when its turn starts.
+- `agent.tools` on `GET /v1/sessions/{id}` uses the `agent_toolset_*` shape the
+  adapter sends on create. If it doesn't, the write-tool refusal silently passes.
+- The event list comes back in `processed_at` order. `joinSession()` takes the
+  turn by list position. The docs say the list is ordered by `processed_at`, but
+  a fake that listed events in insertion order made a queued message pick up the
+  previous turn's answer, so this is worth confirming rather than assuming.
+
+### Verifying against a real session
+
+`scripts/verify-join.mjs` checks those behaviours and the questions the docs
+leave open. It needs an API key, so it has not been run. Use a throwaway session
+in a test workspace with read-only tools, this repo mounted, and a small budget:
+every step costs a model turn.
+
+```bash
+ANTHROPIC_API_KEY=... node scripts/verify-join.mjs --session sesn_... --repo https://github.com/bmcreations/agent-team --ref main
+```
+
+The default run reads the session, checks the tool and checkout shapes, runs
+`joinRefusal()` against `--repo`/`--ref`, sends one short message, and checks
+that its answer is found by position, that `processed_at` fills in, and that the
+list is in `processed_at` order. Optional steps:
+
+| Flag | What it settles |
+|---|---|
+| `--mid-turn` | Whether a message posted while running joins the current turn or queues as its own, and where a queued event sits in the list |
+| `--second-key` | Whether another key in the same workspace (`ANTHROPIC_API_KEY_2`) can read and post |
+| `--project <dir> --member <m>` | An end-to-end delegation through agent-team; checks the answer, that the session wasn't archived, and that the result names the session |
+| `--archive` | The status code for posting to an archived session. Archives the session, can't be undone, runs last |
+
+It prints PASS, FAIL or INFO per check and exits 1 on any failure. Raw responses
+go to `test/fixtures/live-session/` for use as fixtures in `test/live-session.test.js`.
+They hold the session's metadata, repo URLs and model output, so review them
+before committing.
+
+`test/verify-join.test.js` runs the script against a simulated session, so its
+logic is tested without a key. The simulation encodes the same reading of the docs as the adapter, so
+a pass there says nothing about the real API.
 
 ## 2. Local and desktop Claude Code sessions
 
