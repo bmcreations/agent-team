@@ -716,3 +716,11 @@ test('nobody may report to a team member', () => {
   });
   assert.throws(() => loadConfig(root), /member "helper": reports_to "ios", which is another team/);
 });
+
+test('distinct_from may not name a team member', () => {
+  const root = project({
+    ...OK,
+    members: { ...OK.members, ios: { team: '../ios' }, reviewer: { agent: 'codex', distinct_from: ['ios'] } }
+  });
+  assert.throws(() => loadConfig(root), /"distinct_from" names "ios", which is another team/);
+});

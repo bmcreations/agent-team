@@ -161,7 +161,9 @@ to it dispatches that project's entry member, with the task the manager wrote:
 Everything about how the other team runs comes from its own `.claude/agent-team.json`: its
 members, its `deny_paths`, and its `max_depth`. Fields such as `agent` or `isolation` on a
 `team` member are refused. A `team` member cannot have reports of its own; add them to the
-other team instead.
+other team instead. `distinct_from` cannot name a `team` member, since it compares agents and
+a `team` member runs none here. `distinct_from` cannot name a `team` member, since it compares agents and
+a `team` member runs none here.
 
 From a linked worktree, a relative `team` path that does not lead to a config is retried from
 the main checkout, since sibling repositories usually sit next to the main checkout and not

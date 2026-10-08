@@ -312,6 +312,13 @@ export function loadConfig(projectRoot) {
             `configured member`
           );
         }
+        // A team member runs no agent here, so the check could never fire against it.
+        if (raw.members[other]?.team != null) {
+          throw new Error(
+            `${path}: member "${name}": "distinct_from" names "${other}", which is another ` +
+            `team — distinct_from only compares agents within one team`
+          );
+        }
       }
     }
     const isolation = m.isolation ?? 'read-only';

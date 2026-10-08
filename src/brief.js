@@ -36,7 +36,7 @@ function reportLines(details) {
     .filter((d) => d.charter || d.team)
     .map((d) => {
       const team = d.team
-        ? `another team, in ${d.team}. Its lead gets your task and splits it among that team's members.`
+        ? `Another team, in ${d.team}. Its lead gets your task and splits it among that team's members.`
         : null;
       return `- ${d.name}: ${[d.charter, team].filter(Boolean).join(' ')}`;
     });

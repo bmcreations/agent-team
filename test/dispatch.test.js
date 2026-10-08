@@ -570,7 +570,7 @@ test('a manager\'s brief says which report is another team', async () => {
     by_member: { lead: { status: 'ok', summary: 'nothing to do' } }
   });
   const r = await run(app.root, app.script, 'lead');
-  assert.match(r.received.task, /- ios: Owns the iOS app\. another team, in \.\.\/ios\./);
+  assert.match(r.received.task, /- ios: Owns the iOS app\. Another team, in \.\.\/ios\./);
 });
 
 test('another team\'s runs spend the dispatching team\'s max_delegations', async () => {
