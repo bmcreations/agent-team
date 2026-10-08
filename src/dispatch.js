@@ -256,7 +256,10 @@ function prepareCloud(ctx, resolved) {
       sha: target.sha,
       max_cost_usd: config.defaults.cloud_max_cost_usd,
       push_branch: resolved.isolation === 'workspace' ? `agent-team/${member}-${id}` : null,
-      denied_files_sent: denied.length
+      denied_files_sent: denied.length,
+      // Spike: set, the adapter joins this session instead of creating one.
+      session_id: resolved.session_id ?? null,
+      session_allow_tools: resolved.session_allow_tools === true
     }
   };
 }

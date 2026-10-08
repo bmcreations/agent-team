@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
+import { parseGithubRepo } from '../src/cloud.js';
 
 const sub = process.argv[2];
 const env = process.env;
@@ -145,6 +146,7 @@ async function run(brief) {
   const deadline = started + budgetMs - margin;
   const model = MODEL_ALIASES[brief.model] ?? brief.model ?? DEFAULT_MODEL;
   const readOnly = brief.read_only !== false;
+  if (brief.cloud.session_id) return joinSession(brief, { started, deadline, model });
 
   const agentBody = { name: `agent-team ${readOnly ? 'read-only' : 'workspace'} (${model})`, model, tools: [toolset(readOnly)] };
   const envBody = {
@@ -245,4 +247,127 @@ async function run(brief) {
     artifacts = { diff: '', branch: sha ? brief.cloud.push_branch : null, branch_sha: sha || null, repo_url: brief.cloud.repo_url };
   }
   return { ...base, ...outcome, artifacts };
+}
+
+// --- Spike: join a session someone else created (docs/spikes/live-sessions.md) ---
+
+const WRITE_TOOLS = ['bash', 'write', 'edit'];
+
+// The agent snapshot on GET /v1/sessions/{id}: which write-capable built-in tools are on,
+// and whether any MCP server is attached (its tools are unknown to us).
+function writeToolsOn(agent) {
+  const on = new Set();
+  for (const t of agent?.tools ?? []) {
+    if (!/^agent_toolset/.test(t.type ?? '')) continue;
+    const byDefault = t.default_config?.enabled !== false;
+    const configs = new Map((t.configs ?? []).map((c) => [c.name, c.enabled !== false]));
+    for (const name of WRITE_TOOLS) if (configs.get(name) ?? byDefault) on.add(name);
+  }
+  if ((agent?.mcp_servers ?? []).length > 0) on.add('mcp');
+  return [...on];
+}
+
+// What makes it unsafe to hand this session a member's task. The dispatcher checked
+// deny_paths against brief.cloud.repo_url at brief.cloud.ref, so the session must have that
+// repo mounted at that branch for the check to describe what it can read.
+function joinRefusal(session, brief) {
+  const id = session.id;
+  if (session.archived_at || session.status === 'terminated') return `session ${id} is ${session.archived_at ? 'archived' : 'terminated'}`;
+  const want = parseGithubRepo(brief.cloud.repo_url)?.key;
+  const repos = (session.resources ?? []).filter((r) => r.type === 'github_repository');
+  const ours = repos.find((r) => parseGithubRepo(r.url)?.key === want);
+  if (!ours) return `session ${id} does not mount ${brief.cloud.repo_url}, so deny_paths was checked against a repo it cannot see`;
+  if (repos.length > 1) return `session ${id} mounts ${repos.length} repositories; deny_paths only covers ${brief.cloud.repo_url}`;
+  const co = ours.checkout;
+  if (co?.type === 'branch' && co.name !== brief.cloud.ref) {
+    return `session ${id} has branch "${co.name}" checked out, but deny_paths was checked on "${brief.cloud.ref}"`;
+  }
+  if (co?.type === 'commit' && brief.cloud.sha && co.sha !== brief.cloud.sha) {
+    return `session ${id} has commit ${co.sha} checked out, but deny_paths was checked on ${brief.cloud.sha}`;
+  }
+  if (!co) return `session ${id} reports no checkout for ${brief.cloud.repo_url}`;
+  const writes = writeToolsOn(session.agent);
+  if (writes.length > 0 && !brief.cloud.session_allow_tools) {
+    return `session ${id} has ${writes.join(', ')} enabled, which a read-only member must not get — ` +
+      'set "session_allow_tools": true on the member to send the task anyway';
+  }
+  return null;
+}
+
+const costOf = (ev) => {
+  const n = Number(ev?.list_cost?.amount);
+  return Number.isFinite(n) ? n : null;
+};
+
+async function allEvents(id) {
+  const events = [];
+  await listEvents(id, new Set(), events);
+  return events;
+}
+
+async function joinSession(brief, { started, deadline, model }) {
+  const id = brief.cloud.session_id;
+  const base = { log_path: null, session_id: id };
+  const usage = (extra = {}) => ({
+    duration_ms: Date.now() - started, turns: null, cost_usd: null, session_id: id, model: null,
+    models: null, advisor_calls: null, ...extra
+  });
+
+  let session = await api('GET', `/v1/sessions/${id}`);
+  const refusal = joinRefusal(session, brief);
+  if (refusal) return { ...base, status: 'failed', summary: `claude-cloud: ${refusal}`, usage: usage() };
+  if (brief.model) process.stderr.write(`claude-cloud: session ${id} keeps its own model; "${model}" is ignored\n`);
+  if (!session.budget) process.stderr.write(`claude-cloud: session ${id} has no spend cap, and one cannot be added to an existing session\n`);
+
+  // Posting while running is accepted and queued, but the docs do not say whether it joins
+  // the current turn. Wait for idle so our message starts its own turn.
+  while (session.status !== 'idle') {
+    if (session.status === 'terminated') return { ...base, status: 'failed', summary: `claude-cloud: session ${id} terminated before the task was sent`, usage: usage() };
+    if (Date.now() >= deadline) return { ...base, status: 'failed', summary: `claude-cloud: session ${id} stayed ${session.status}; the task was not sent`, usage: usage() };
+    await sleep(POLL_MS);
+    session = await api('GET', `/v1/sessions/${id}`);
+  }
+
+  const before = await allEvents(id);
+  const baseline = costOf([...before].reverse().find((e) => e.type === 'session.usage'));
+  const sent = await api('POST', `/v1/sessions/${id}/events`, {
+    events: [{ type: 'user.message', content: [{ type: 'text', text: prompt(brief) }] }]
+  });
+  const mine = sent.data?.find((e) => e.type === 'user.message')?.id;
+  if (!mine) throw new Error(`POST /v1/sessions/${id}/events returned no event id`);
+  process.stderr.write(`claude-cloud: joined session ${id}, sent ${mine}\n`);
+
+  // No field links an agent.message to the user.message it answers. Everything after our
+  // event, up to the first idle after it, is our turn — by position only.
+  let turn = null;
+  for (;;) {
+    const events = await allEvents(id);
+    const at = events.findIndex((e) => e.id === mine);
+    if (at >= 0 && events[at].processed_at) {
+      const after = events.slice(at + 1);
+      const end = after.findIndex((e) => e.type === 'session.status_idle' || e.type === 'session.status_terminated');
+      if (end >= 0) { turn = { events: after.slice(0, end), stop: after[end] }; break; }
+    }
+    // Not ours to interrupt or archive: stop watching and leave the session running.
+    if (Date.now() >= deadline) {
+      return { ...base, status: 'timeout', summary: `claude-cloud: stopped watching session ${id}; it is still working on the task, which keeps billing its owner`, usage: usage() };
+    }
+    await sleep(POLL_MS);
+  }
+
+  const answer = [...turn.events].reverse().find((e) => e.type === 'agent.message');
+  const text = answer ? textOf(answer) : '';
+  const after = costOf([...turn.events].reverse().find((e) => e.type === 'session.usage'));
+  const cost = after !== null ? (after - (baseline ?? 0)) / 100 : null;
+  const foreign = turn.events.filter((e) => e.type === 'user.message').length;
+  const result = { ...base, usage: usage({ cost_usd: cost }) };
+  const shared = foreign > 0 ? ` (warning: ${foreign} other user.message event(s) landed in this turn; the answer may mix tasks)` : '';
+
+  const reason = turn.stop.stop_reason?.type;
+  if (turn.stop.type === 'session.status_terminated') return { ...result, status: 'failed', summary: `claude-cloud: session ${id} terminated during the task` };
+  if (reason === 'budget_reached') return { ...result, status: 'failed', summary: `claude-cloud: session ${id} reached its owner's spend cap${text ? `. Last answer: ${text}` : ''}` };
+  if (reason === 'requires_action') return { ...result, status: 'failed', summary: `claude-cloud: session ${id} is waiting for a tool confirmation, which agent-team cannot give` };
+  if (!text) return { ...result, status: 'failed', summary: `claude-cloud: session ${id} ended the turn with no answer` };
+  const outcome = brief.can_delegate ? answerOutcome(text, brief) : { status: 'ok', summary: text };
+  return { ...result, ...outcome, summary: outcome.summary + shared, artifacts: { diff: '' } };
 }

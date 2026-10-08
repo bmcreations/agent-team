@@ -394,6 +394,21 @@ export function parseConfig(raw, path) {
         `${JSON.stringify(m.cloud_allow_denied)}`
       );
     }
+    // Spike: join a Managed Agents session someone else created instead of creating one.
+    // Read-only only — a shared session's working tree is not ours to push from.
+    if (m.session_id !== undefined && m.session_id !== null) {
+      if (m.agent !== CLOUD_AGENT || typeof m.session_id !== 'string' || !/^sesn_\w+$/.test(m.session_id)) {
+        throw new Error(`${path}: member "${name}": "session_id" needs "agent": "${CLOUD_AGENT}" and a sesn_ id — got ${JSON.stringify(m.session_id)}`);
+      }
+      if (isolation !== 'read-only') {
+        throw new Error(`${path}: member "${name}": a member that joins an existing session must be "read-only"`);
+      }
+    }
+    for (const key of ['session_allow_tools']) {
+      if (m[key] !== undefined && m[key] !== null && typeof m[key] !== 'boolean') {
+        throw new Error(`${path}: member "${name}": "${key}" must be true or false — got ${JSON.stringify(m[key])}`);
+      }
+    }
     const deliverable = m.deliverable ?? DELIVERABLE_FOR[isolation];
     if (!DELIVERABLES.includes(deliverable)) {
       throw new Error(
