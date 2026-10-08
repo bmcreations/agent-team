@@ -65,7 +65,7 @@ grep '\[AdvisorTool\]' /tmp/advisor.log
       "isolation": "read-only", "deliverable": "decision"
     },
     "explorer": {
-      "agent": "claude", "model": "sonnet", "effort": "medium", "advisor": "fable",
+      "agent": "claude", "model": "claude-haiku-5-5", "effort": "medium", "advisor": "fable",
       "reports_to": "orchestrator",
       "charter": "Locate code and report it as path:line. Never edits.",
       "isolation": "read-only", "deliverable": "document"
@@ -113,7 +113,8 @@ the orchestrator delegated to it.
 
 `model` and `effort` are optional and passed to the member's CLI as written. Leave either out to
 get that CLI's default. A model alias such as `sonnet` follows the CLI's own resolution and can
-change when the CLI updates; a full model ID pins it. `effort` levels are the vendor's, not this
+change when the CLI updates; a full model ID pins it. The starter explorer runs on `claude-haiku-5-5`
+because it only searches and reports; the worker and researcher stay on `sonnet`. `effort` levels are the vendor's, not this
 config's:
 
 | agent  | flag                                | levels                                                  |
@@ -131,7 +132,9 @@ the user's `~/.claude/settings.json`, which every claude member already inherits
 it on every member so the team gets an advisor whether or not the user's settings name one.
 `fable`, `opus`, and `sonnet` are valid values. Claude Code skips
 the advisor, without failing the run, when it is less capable than the member's model, when the
-account does not have the feature, or on a third-party provider. A codex or grok member with an
+account does not have the feature, or on a third-party provider. It also skips it for a model
+missing from the installed CLI's model catalog: Claude Code 2.1.285 skips it for
+`claude-haiku-5-5` and 2.1.294 runs it, so an explorer on an older CLI runs without an advisor. A codex or grok member with an
 advisor ignores it unless `on_unavailable` falls it back to claude.
 
 `permission_mode` is optional and sets `--permission-mode` for a claude member with

@@ -6,7 +6,7 @@
       "isolation": "read-only", "deliverable": "decision"
     },
     "explorer": {
-      "agent": "claude", "model": "sonnet", "effort": "medium", "advisor": "fable",
+      "agent": "claude", "model": "claude-haiku-5-5", "effort": "medium", "advisor": "fable",
       "reports_to": "orchestrator",
       "charter": "Locate code and report it as path:line. Never edits.",
       "isolation": "read-only", "deliverable": "document"
