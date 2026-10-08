@@ -29,11 +29,26 @@ export function loadDialect(dialect) {
   return existsSync(resolvedPath) ? readFileSync(resolvedPath, 'utf8') : null;
 }
 
-function delegationSection(reports, depth, maxDepth) {
+// One line per report that has something to say: its charter, and for another team, that
+// the task goes to that team's lead, who splits it among its own members.
+function reportLines(details) {
+  return details
+    .filter((d) => d.charter || d.team)
+    .map((d) => {
+      const team = d.team
+        ? `another team, in ${d.team}. Its lead gets your task and splits it among that team's members.`
+        : null;
+      return `- ${d.name}: ${[d.charter, team].filter(Boolean).join(' ')}`;
+    });
+}
+
+function delegationSection(reports, depth, maxDepth, details = []) {
+  const lines = reportLines(details);
   return [
     '# Delegating',
     '',
     `Your direct reports are: ${reports.join(', ')}.`,
+    ...(lines.length ? ['', ...lines, ''] : []),
     `You are at depth ${depth} of a maximum of ${maxDepth}.`,
     '',
     'If this work belongs to your reports, answer with delegations instead of a deliverable:',
@@ -93,7 +108,7 @@ export function buildBrief({
   if (resolved.charter) sections.push(`# Your charter\n\n${resolved.charter}`);
   if (resolved.persona) sections.push(`# How you work\n\n${resolved.persona}`);
   if (skillText) sections.push(skillText);
-  if (canDelegate) sections.push(delegationSection(resolved.reports, depth, maxDepth));
+  if (canDelegate) sections.push(delegationSection(resolved.reports, depth, maxDepth, resolved.report_details));
   else if (hasReports) sections.push(depthLimitSection(maxDepth));
   if (hasPriorResults) {
     sections.push(

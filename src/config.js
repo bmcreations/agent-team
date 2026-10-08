@@ -137,6 +137,42 @@ function validateDenyPath(entry, path) {
   }
 }
 
+// A member with "team" stands for another project's agent-team: delegating to it dispatches
+// that project's entry member under that project's own config, deny_paths included. Only
+// the fields that describe it to a manager here are accepted; everything that says how a
+// member runs belongs to the other team's config, so it is refused rather than ignored.
+const TEAM_FIELDS = new Set(['team', 'member', 'reports_to', 'title', 'charter']);
+
+function validateTeamMember(m, name, path) {
+  if (typeof m.team !== 'string' || m.team === '') {
+    throw new Error(
+      `${path}: member "${name}": "team" must be a non-empty string naming a project ` +
+      `directory — got ${JSON.stringify(m.team)}`
+    );
+  }
+  const extra = Object.keys(m).filter((k) => !TEAM_FIELDS.has(k));
+  if (extra.length > 0) {
+    throw new Error(
+      `${path}: member "${name}": a "team" member only takes ${[...TEAM_FIELDS].join(', ')} — ` +
+      `${extra.join(', ')} belong in that team's own config`
+    );
+  }
+  if (m.member !== undefined && m.member !== null) {
+    validateNameShape(m.member, `member "${name}": "member"`, path);
+  }
+  for (const field of ['title', 'charter']) {
+    if (m[field] !== undefined && m[field] !== null) validateStringField(m[field], name, field, path);
+  }
+  if (m.reports_to !== undefined && m.reports_to !== null &&
+      (typeof m.reports_to !== 'string' || m.reports_to === '')) {
+    throw new Error(
+      `${path}: member "${name}": "reports_to" must be a string naming another member — ` +
+      `got ${JSON.stringify(m.reports_to)}`
+    );
+  }
+  return { ...m };
+}
+
 export function loadConfig(projectRoot) {
   const path = join(projectRoot, CONFIG_RELPATH);
   if (!existsSync(path)) {
@@ -179,6 +215,10 @@ export function loadConfig(projectRoot) {
     // "agent is required" for a value that was never going to have one.
     if (m === null || Array.isArray(m)) {
       throw new Error(`${path}: member "${name}" must be an object — got ${JSON.stringify(m)}`);
+    }
+    if (m.team !== undefined && m.team !== null) {
+      members[name] = validateTeamMember(m, name, path);
+      continue;
     }
     if (typeof m.agent !== 'string' || m.agent === '') {
       throw new Error(`${path}: member "${name}": "agent" is required`);
@@ -311,6 +351,16 @@ export function loadConfig(projectRoot) {
   // Throws on an unknown manager or a cycle. Doing it here means a broken chart
   // is a config error, not something discovered three delegations deep.
   const org = buildOrg(members);
+
+  // A team member is a leaf here: the other team's own config decides who works under it.
+  for (const [name, m] of Object.entries(members)) {
+    if (m.reports_to && members[m.reports_to].team) {
+      throw new Error(
+        `${path}: member "${name}": reports_to "${m.reports_to}", which is another team — ` +
+        `add "${name}" to that team's own config instead`
+      );
+    }
+  }
 
   const defaults = {
     on_unavailable: 'claude',

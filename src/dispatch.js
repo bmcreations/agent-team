@@ -1,9 +1,10 @@
-import { existsSync, readFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
-import { loadConfig } from './config.js';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { loadConfig, CONFIG_RELPATH } from './config.js';
 import { resolveMember } from './resolve.js';
-import { createWorkspace, pruneWorkspace, runLogPath } from './workspace.js';
+import { createWorkspace, pruneWorkspace, runLogPath, mainCheckoutRoot } from './workspace.js';
 import { buildBrief, loadDialect } from './brief.js';
 import { runAdapter, DEFAULT_TIMEOUT_MS } from './adapter.js';
 
@@ -36,7 +37,8 @@ export async function dispatch({
   try {
     const result = await runMember({
       config, projectRoot, member, task, adapterDir,
-      assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0
+      assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0,
+      teams: [realpathSync(projectRoot)]
     });
     recordRun(projectRoot, startedAt, task, runNode(result));
     return result;
@@ -54,7 +56,8 @@ const clip = (text, n) => (typeof text === 'string' && text.length > n ? `${text
 // path, which would make each line as large as the run's output.
 function runNode(r) {
   return {
-    member: r.member, agent: r.agent ?? null, model: r.model ?? null, advisor: r.advisor ?? null,
+    member: r.member, ...(r.team ? { team: r.team } : {}),
+    agent: r.agent ?? null, model: r.model ?? null, advisor: r.advisor ?? null,
     status: r.status, summary: clip(r.summary, 300), depth: r.depth ?? 0,
     elapsed_ms: r.elapsed_ms ?? null, usage: r.usage ?? null,
     delegated: (r.delegated ?? []).map(runNode)
@@ -101,9 +104,69 @@ function addUsage(total, u) {
   };
 }
 
+// A team path is absolute, under ~/, or relative to the project. A relative path that does
+// not lead to a config from a linked worktree is retried from the main checkout, since
+// sibling repositories sit next to the main checkout, not next to its worktrees.
+function teamRoot(projectRoot, team) {
+  const expanded = team === '~' || team.startsWith('~/') ? join(homedir(), team.slice(1)) : team;
+  if (isAbsolute(expanded)) return expanded;
+  const local = resolve(projectRoot, expanded);
+  if (existsSync(join(local, CONFIG_RELPATH))) return local;
+  const main = mainCheckoutRoot(projectRoot);
+  const fromMain = main ? resolve(main, expanded) : null;
+  return fromMain && existsSync(join(fromMain, CONFIG_RELPATH)) ? fromMain : local;
+}
+
+// The member another team is entered through: the one named, else that team's only root.
+function teamEntry(teamConfig, entry, root, member) {
+  if (entry) return entry;
+  if (teamConfig.org.roots.length !== 1) {
+    throw new Error(
+      `member "${member}": team at ${root} has ${teamConfig.org.roots.length} top-level members ` +
+      `(${teamConfig.org.roots.join(', ')}) — set "member" to pick one`
+    );
+  }
+  return teamConfig.org.roots[0];
+}
+
+// Delegating to a team member dispatches the other project's entry member under that
+// project's own config: its deny_paths build the workspaces, its max_depth bounds the tree
+// below it. Its runs still spend this dispatch's max_delegations, capped by its own.
+async function runTeam(ctx, spec) {
+  const { projectRoot, member, depth, budget, teams } = ctx;
+  const started = Date.now();
+  const root = teamRoot(projectRoot, spec.team);
+  if (!existsSync(join(root, CONFIG_RELPATH))) {
+    throw new Error(`member "${member}": no agent-team config for team "${spec.team}" at ${join(root, CONFIG_RELPATH)}`);
+  }
+  const real = realpathSync(root);
+  if (teams.includes(real)) {
+    throw new Error(`member "${member}": team "${spec.team}" is already in this delegation (${[...teams, real].join(' -> ')})`);
+  }
+  const config = loadConfig(root);
+  const entry = teamEntry(config, spec.member, root, member);
+
+  const teamBudget = { runs: Math.min(budget.runs, config.defaults.max_delegations) };
+  const before = teamBudget.runs;
+  const sub = await runMember({
+    ...ctx, config, projectRoot: root, member: entry, depth: 0,
+    assignments: {}, budget: teamBudget, teams: [...teams, real]
+  });
+  budget.runs -= before - teamBudget.runs;
+
+  return {
+    status: sub.status, summary: sub.summary ?? null,
+    member, team: { path: root, member: entry },
+    elapsed_ms: Date.now() - started, depth, delegated: [sub]
+  };
+}
+
 async function runMember(ctx) {
   const { config, projectRoot, member, task, adapterDir, assignments,
           skillsDir, env, timeoutMs, budget, depth } = ctx;
+
+  const spec = config.members[member];
+  if (spec?.team) return runTeam(ctx, spec);
 
   const probe = makeProbe(adapterDir, env);
   const resolved = resolveMember(config, member, { probe, assignments });  // throws before side effects

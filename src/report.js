@@ -28,7 +28,9 @@ const formatCount = (n) => (n == null ? '—' : String(n));
 // The model that did the member's work: the configured one, else the one the claude adapter
 // read from the session transcript. Not inferred from modelUsage, where an advisor often
 // outspends the member it advises.
-const workModel = (node) => node.model ?? node.usage?.model ?? node.agent ?? '—';
+// A team member did no work of its own: its row stands for the other team, whose lead is
+// the row below it.
+const workModel = (node) => (node.team ? 'team' : node.model ?? node.usage?.model ?? node.agent ?? '—');
 
 function table(rows, rightAligned) {
   const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));

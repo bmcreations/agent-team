@@ -104,6 +104,24 @@ Every adapter run, including each call back to a manager, spends one unit of
 `max_delegations`. When the budget runs out, the current run fails with
 `delegation budget exhausted`.
 
+### Other teams
+
+A report that is a [`team` member](configuration.md#other-teams) runs another project's team.
+The dispatcher loads that project's config and runs its entry member at depth 0 of that
+team, so the other team's `max_depth` bounds the tree below it. Each of its members works in
+a filtered clone of its own repository, built with its own `deny_paths`.
+
+Its runs still spend this dispatch's `max_delegations`. The other team starts with whichever
+is smaller, its own `max_delegations` or what this dispatch has left, and what it uses comes
+off this dispatch's budget.
+
+The manager gets the entry member's `status` and `summary` back, like any report. The full
+tree, including a worker's `artifacts.diff` in the other repository, is in the result under
+the team member's `delegated`. Nothing is written to either checkout.
+
+A delegation that reaches a project already in its chain, such as an iOS team delegating
+back to the orchestrator that called it, is refused and fails the dispatch.
+
 ### How an answer is read as a delegation
 
 A vendor CLI returns plain text, so each vendor adapter reads the manager's final answer for
@@ -159,6 +177,10 @@ Each top-level dispatch appends one line to
 `$AGENT_TEAM_WORKSPACE_ROOT` when set). The key is a hash of the repository's shared git
 directory, so every worktree and subdirectory of a repo writes to the same log, and a report
 run from the main checkout includes delegations started in a desktop-app worktree.
+
+Another team's runs are logged in the dispatching project's log, nested under the `team`
+member, whose row shows `team` in the model column. They are not also written to the other
+project's log.
 
 A line holds `v`, `at` (when the dispatch started), `project`, `task` (first 200
 characters) and `tree`. Each node of `tree` keeps `member`, `agent`, `model`, `advisor`,
