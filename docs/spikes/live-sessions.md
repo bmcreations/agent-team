@@ -46,8 +46,9 @@ So correlation is by position only. The prototype:
    `session.status_terminated`, as our turn. The last `agent.message` in that
    span is the answer.
 
-This rules out the obvious bug in the existing create-path logic, where "first
-idle ends the run" would return the owner's previous answer. It doesn't rule out
+The create path's "first idle ends the run" is correct for a session it owns,
+but reused here it would return the owner's previous answer. Position-based
+correlation avoids that. It doesn't rule out
 a second client posting into the same turn. The prototype detects that case after
 the fact (another `user.message` inside our span) and appends a warning, but it
 can't prevent it. The API has no lock and no reply-to link.
@@ -110,7 +111,8 @@ working tree isn't ours to push a branch from.
 `session.usage` is a cumulative snapshot, emitted "immediately before it goes
 idle" ([budgets](https://platform.claude.com/docs/en/managed-agents/budgets)).
 The prototype reports the difference between the last snapshot before our event
-and the last one in our turn.
+and the last one in our turn, both read from the same event list after the turn
+ends, so a turn that lands between our idle check and our POST isn't counted.
 
 The create path interrupts and archives its session on timeout. A joined session
 belongs to someone else, so the prototype does neither. On timeout it stops

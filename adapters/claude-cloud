@@ -328,8 +328,6 @@ async function joinSession(brief, { started, deadline, model }) {
     session = await api('GET', `/v1/sessions/${id}`);
   }
 
-  const before = await allEvents(id);
-  const baseline = costOf([...before].reverse().find((e) => e.type === 'session.usage'));
   const sent = await api('POST', `/v1/sessions/${id}/events`, {
     events: [{ type: 'user.message', content: [{ type: 'text', text: prompt(brief) }] }]
   });
@@ -346,7 +344,10 @@ async function joinSession(brief, { started, deadline, model }) {
     if (at >= 0 && events[at].processed_at) {
       const after = events.slice(at + 1);
       const end = after.findIndex((e) => e.type === 'session.status_idle' || e.type === 'session.status_terminated');
-      if (end >= 0) { turn = { events: after.slice(0, end), stop: after[end] }; break; }
+      // Baseline from events before ours in this same list, so a turn that slipped in
+      // between our idle check and our POST is not billed to us.
+      const prior = costOf(events.slice(0, at).reverse().find((e) => e.type === 'session.usage'));
+      if (end >= 0) { turn = { events: after.slice(0, end), stop: after[end], baseline: prior }; break; }
     }
     // Not ours to interrupt or archive: stop watching and leave the session running.
     if (Date.now() >= deadline) {
@@ -358,7 +359,7 @@ async function joinSession(brief, { started, deadline, model }) {
   const answer = [...turn.events].reverse().find((e) => e.type === 'agent.message');
   const text = answer ? textOf(answer) : '';
   const after = costOf([...turn.events].reverse().find((e) => e.type === 'session.usage'));
-  const cost = after !== null ? (after - (baseline ?? 0)) / 100 : null;
+  const cost = after !== null ? (after - (turn.baseline ?? 0)) / 100 : null;
   const foreign = turn.events.filter((e) => e.type === 'user.message').length;
   const result = { ...base, usage: usage({ cost_usd: cost }) };
   const shared = foreign > 0 ? ` (warning: ${foreign} other user.message event(s) landed in this turn; the answer may mix tasks)` : '';
