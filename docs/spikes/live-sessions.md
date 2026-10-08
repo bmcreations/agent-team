@@ -166,8 +166,12 @@ leave open. It needs an API key, so it has not been run. Use a throwaway session
 in a test workspace with read-only tools, this repo mounted, and a small budget:
 every step costs a model turn.
 
+`scripts/create-scratch-session.mjs` creates one with the adapter's own request
+bodies and prints its id. A key that isn't scoped to one workspace also needs
+`ANTHROPIC_WORKSPACE_ID`.
+
 ```bash
-ANTHROPIC_API_KEY=... node scripts/verify-join.mjs --session sesn_... --repo https://github.com/bmcreations/agent-team --ref main
+SID=$(GITHUB_TOKEN=... node scripts/create-scratch-session.mjs) && node scripts/verify-join.mjs --session "$SID" --repo https://github.com/bmcreations/agent-team --ref main
 ```
 
 The default run reads the session, checks the tool and checkout shapes, runs

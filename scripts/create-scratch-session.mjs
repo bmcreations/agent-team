@@ -10,7 +10,8 @@
 //   --budget-cents <n>    session budget, in the units the adapter uses (default 100)
 //   --model <id>          default claude-haiku-4-5-20251001
 //
-// Needs ANTHROPIC_API_KEY, and GITHUB_TOKEN (or AGENT_TEAM_GITHUB_TOKEN) with read access to
+// Needs ANTHROPIC_API_KEY (plus ANTHROPIC_WORKSPACE_ID if the key isn't scoped to one
+// workspace), and GITHUB_TOKEN (or AGENT_TEAM_GITHUB_TOKEN) with read access to
 // the repo. The token goes to the Managed Agents API as the repo's authorization_token.
 import { parseArgs } from 'node:util';
 import { execFileSync } from 'node:child_process';
@@ -46,7 +47,7 @@ if (!repo) {
 async function api(path, body) {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-beta': BETA },
+    headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-beta': BETA, ...(env.ANTHROPIC_WORKSPACE_ID ? { 'anthropic-workspace-id': env.ANTHROPIC_WORKSPACE_ID } : {}) },
     body: JSON.stringify(body)
   });
   const text = await res.text();

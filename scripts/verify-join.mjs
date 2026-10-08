@@ -13,6 +13,7 @@
 //   --out <dir>                    where raw responses go (default test/fixtures/live-session)
 //   --timeout <s>                  per wait (default 300)
 //
+// Set ANTHROPIC_WORKSPACE_ID if the key isn't scoped to one workspace.
 // Every step costs a model turn on the session's owner. Use a throwaway session with a budget.
 import { parseArgs } from 'node:util';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
@@ -63,7 +64,7 @@ const check = (name, ok, detail) => report(ok ? 'PASS' : 'FAIL', name, detail);
 async function call(method, path, body, key = env.ANTHROPIC_API_KEY) {
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-beta': BETA },
+    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-beta': BETA, ...(env.ANTHROPIC_WORKSPACE_ID ? { 'anthropic-workspace-id': env.ANTHROPIC_WORKSPACE_ID } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   const text = await res.text();
