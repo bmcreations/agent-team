@@ -213,6 +213,16 @@ test('a session that runs past the timeout is interrupted and archived', async (
   } finally { await api.close(); }
 });
 
+test('a session that ignores the interrupt is still archived before the dispatcher kills it', async () => {
+  const api = await fakeApi(() => [{ id: 'e1', type: 'session.status_running' }]);
+  try {
+    const { root } = project({ members: { scout: { agent: 'claude-cloud' } } });
+    const r = await dispatch({ projectRoot: root, member: 'scout', task: 'go', adapterDir, env: cloudEnv(api), timeoutMs: 8000 });
+    assert.equal(r.status, 'timeout');
+    assert.deepEqual(api.archived, ['sesn_1']);
+  } finally { await api.close(); }
+});
+
 test('reaching the cost cap is a failure that names the cap', async () => {
   const api = await fakeApi(() => [
     { id: 'e1', type: 'session.status_running' },

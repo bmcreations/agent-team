@@ -19,7 +19,7 @@ const POLL_MS = Number(env.AGENT_TEAM_CLOUD_POLL_MS) > 0 ? Number(env.AGENT_TEAM
 const DEFAULT_MODEL = 'claude-opus-5-5';
 // Short names the local claude CLI accepts, which the API does not.
 const MODEL_ALIASES = {
-  opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', fable: 'claude-fable-5-1', haiku: 'claude-haiku-4-5'
+  opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', fable: 'claude-fable-5-1', haiku: 'claude-haiku-4-5-20251001'
 };
 
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + '\n', () => process.exit(0));
@@ -101,10 +101,9 @@ function toolset(readOnly) {
 
 function prompt(brief) {
   const { cloud } = brief;
-  const repoName = cloud.repo_url.split('/').pop();
   const lines = [
-    `The repository ${cloud.repo_url} is checked out at /workspace/${repoName} on branch ` +
-    `"${cloud.ref}". Work there.`
+    `The repository ${cloud.repo_url} is checked out in your environment on branch ` +
+    `"${cloud.ref}". Work in that checkout.`
   ];
   if (cloud.push_branch) {
     lines.push(
@@ -142,7 +141,8 @@ async function run(brief) {
   // The dispatcher SIGKILLs this process group when timeout_s runs out, which would leave the
   // session running and billing. Stop polling early enough to interrupt and archive it first.
   const budgetMs = (brief.timeout_s ?? 900) * 1000;
-  const deadline = started + budgetMs - Math.min(30_000, Math.floor(budgetMs / 4));
+  const margin = Math.min(30_000, Math.floor(budgetMs / 4));
+  const deadline = started + budgetMs - margin;
   const model = MODEL_ALIASES[brief.model] ?? brief.model ?? DEFAULT_MODEL;
   const readOnly = brief.read_only !== false;
 
@@ -189,7 +189,8 @@ async function run(brief) {
       if (!interrupted && Date.now() >= deadline) {
         interrupted = true;
         await api('POST', `/v1/sessions/${session.id}/events`, { events: [{ type: 'user.interrupt' }] }).catch(() => {});
-        const grace = Date.now() + 20_000;
+        // Bounded by the dispatcher's own kill, so the archive in finally always gets to run.
+        const grace = Math.min(Date.now() + 20_000, started + budgetMs - Math.min(5_000, Math.floor(margin / 2)));
         while (Date.now() < grace) {
           await sleep(Math.min(POLL_MS, 2000));
           await listEvents(session.id, seen, events).catch(() => {});
