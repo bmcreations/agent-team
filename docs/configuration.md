@@ -106,7 +106,9 @@ just before the task, telling it to call the advisor before its first edit and a
 final answer.
 
 Claude Code skips the advisor, without failing the run, when it is less capable than the
-member's model, when the account does not have the feature, or on a third-party provider. A
+member's model, when the account does not have the feature, or on a third-party provider. It
+also skips it for a model missing from the installed CLI's model catalog: Claude Code 2.1.285
+skips it for `claude-haiku-5-5`, and 2.1.294 runs it. A
 codex or grok member may carry `advisor`; it only takes effect if `on_unavailable` falls that
 member back to claude.
 
