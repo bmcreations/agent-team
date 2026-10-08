@@ -188,6 +188,7 @@ applies, so the member runs locally instead.
 | Variable | What it is |
 |---|---|
 | `ANTHROPIC_API_KEY` | An API key with Managed Agents access. Sessions are billed to it, separately from a Claude subscription. |
+| `ANTHROPIC_WORKSPACE_ID` | The workspace to use, sent as `anthropic-workspace-id`. Required when the key isn't scoped to a single workspace; the API rejects every request without it. |
 | `AGENT_TEAM_GITHUB_TOKEN` | A fine-grained GitHub token scoped to the repositories cloud members run on, with Contents read access for `read-only` members and read and write for `workspace` ones. The session uses it to clone and push. Your `gh` login is never sent. |
 
 The dispatcher refuses a cloud run when:
