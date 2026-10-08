@@ -28,6 +28,9 @@ its probe, the dispatch is refused.
 
 A rival CLI sends whatever it reads to its vendor, so no member runs in your checkout.
 
+A [`claude-cloud`](configuration.md#cloud-members) member is the exception: it gets no local
+workspace, and the dispatcher checks `deny_paths` against what the session will clone instead.
+
 **`none`** gets an empty temporary directory and no repository.
 
 **`read-only`** and **`workspace`** get a filtered clone, built like this:
@@ -121,6 +124,10 @@ the team member's `delegated`. Nothing is written to either checkout.
 
 A delegation that reaches a project already in its chain, such as an iOS team delegating
 back to the orchestrator that called it, is refused and fails the dispatch.
+
+A team named by GitHub repository runs differently: no workspace is built, and its entry
+member runs as one [cloud session](configuration.md#cloud-members) that cannot delegate. It
+counts as one run against `max_delegations`.
 
 ### How an answer is read as a delegation
 
