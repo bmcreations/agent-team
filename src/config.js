@@ -1,8 +1,12 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildOrg } from './org.js';
+import { parseGithubRepo } from './cloud.js';
 
 export const CONFIG_RELPATH = join('.claude', 'agent-team.json');
+
+// The adapter that runs a member as a Managed Agents session instead of a local CLI.
+export const CLOUD_AGENT = 'claude-cloud';
 
 export const ISOLATIONS = ['none', 'read-only', 'workspace'];
 export const DELIVERABLES = ['diff', 'review', 'document', 'decision'];
@@ -141,7 +145,7 @@ function validateDenyPath(entry, path) {
 // that project's entry member under that project's own config, deny_paths included. Only
 // the fields that describe it to a manager here are accepted; everything that says how a
 // member runs belongs to the other team's config, so it is refused rather than ignored.
-const TEAM_FIELDS = new Set(['team', 'member', 'reports_to', 'title', 'charter']);
+const TEAM_FIELDS = new Set(['team', 'member', 'ref', 'reports_to', 'title', 'charter']);
 
 function validateTeamMember(m, name, path) {
   if (typeof m.team !== 'string' || m.team === '') {
@@ -149,6 +153,26 @@ function validateTeamMember(m, name, path) {
       `${path}: member "${name}": "team" must be a non-empty string naming a project ` +
       `directory — got ${JSON.stringify(m.team)}`
     );
+  }
+  // A GitHub repository instead of a path makes it a cloud team: it has no checkout here,
+  // and its entry member runs as one claude-cloud session (see src/dispatch.js).
+  const remote = parseGithubRepo(m.team);
+  if (!remote && /^(github:|https?:\/\/|git@)/.test(m.team)) {
+    throw new Error(
+      `${path}: member "${name}": "team" ${JSON.stringify(m.team)} looks like a URL but is not ` +
+      'a GitHub repository — write "github:owner/repo" or a local path'
+    );
+  }
+  if (m.ref !== undefined && m.ref !== null) {
+    if (!remote) {
+      throw new Error(
+        `${path}: member "${name}": "ref" only applies to a team named by GitHub repository; ` +
+        'a local team runs whatever that checkout has'
+      );
+    }
+    if (typeof m.ref !== 'string' || m.ref === '') {
+      throw new Error(`${path}: member "${name}": "ref" must be a non-empty branch name — got ${JSON.stringify(m.ref)}`);
+    }
   }
   const extra = Object.keys(m).filter((k) => !TEAM_FIELDS.has(k));
   if (extra.length > 0) {
@@ -184,7 +208,15 @@ export function loadConfig(projectRoot) {
   } catch (err) {
     throw new Error(`${path}: ${err.message}`);
   }
+  return parseConfig(raw, path);
+}
 
+// Validates an already-parsed config. `path` only labels errors, so a cloud team's config
+// read through the GitHub API (src/cloud.js) goes through the same checks as a local one.
+export function parseConfig(raw, path) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${path}: the config must be a JSON object`);
+  }
   if (!raw.members || typeof raw.members !== 'object' || Array.isArray(raw.members)) {
     throw new Error(`${path}: "members" is required and must be an object`);
   }
@@ -346,6 +378,22 @@ export function loadConfig(projectRoot) {
         );
       }
     }
+    // A cloud session has no local directory to stand for "none", and its clone is the repo.
+    if (m.agent === CLOUD_AGENT && isolation === 'none') {
+      throw new Error(
+        `${path}: member "${name}": a "${CLOUD_AGENT}" member works in a clone of the repo, so ` +
+        'isolation "none" has no meaning for it — use "read-only" or "workspace"'
+      );
+    }
+    // The only way past the refusal in src/dispatch.js when deny_paths matches a file the
+    // cloud will clone. Strictly true, so a stray "yes" or 1 cannot switch it on.
+    if (m.cloud_allow_denied !== undefined && m.cloud_allow_denied !== null &&
+        typeof m.cloud_allow_denied !== 'boolean') {
+      throw new Error(
+        `${path}: member "${name}": "cloud_allow_denied" must be true or false — got ` +
+        `${JSON.stringify(m.cloud_allow_denied)}`
+      );
+    }
     const deliverable = m.deliverable ?? DELIVERABLE_FOR[isolation];
     if (!DELIVERABLES.includes(deliverable)) {
       throw new Error(
@@ -373,6 +421,7 @@ export function loadConfig(projectRoot) {
     on_unavailable: 'claude',
     max_depth: 3,
     max_delegations: 20,
+    cloud_max_cost_usd: 5,
     ...(raw.defaults ?? {})
   };
   // Checked after the merge, not on raw.defaults, so a bad value baked into the hardcoded
@@ -384,6 +433,15 @@ export function loadConfig(projectRoot) {
   validateBoundedInteger(defaults.max_depth, 'max_depth', 0, path);
   validateBoundedInteger(defaults.max_delegations, 'max_delegations', 1, path);
   validateFallbackAgent(defaults.on_unavailable, path);
+  // Every cloud session is created with this as its hard spend cap (the Managed Agents
+  // session budget), so a run left going cannot keep billing past it.
+  if (typeof defaults.cloud_max_cost_usd !== 'number' || !Number.isFinite(defaults.cloud_max_cost_usd) ||
+      defaults.cloud_max_cost_usd <= 0) {
+    throw new Error(
+      `${path}: "defaults.cloud_max_cost_usd" must be a positive number of dollars — got ` +
+      `${JSON.stringify(defaults.cloud_max_cost_usd)}`
+    );
+  }
 
   return {
     members,

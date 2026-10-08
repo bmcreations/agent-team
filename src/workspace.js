@@ -350,7 +350,15 @@ export function deniedFiles(dir, denyPaths) {
     ? 0
     : tracked.toString().split('\0').filter(Boolean).length;
   if (trackedCount === 0) return { denied: [], trackedCount, matchedDenyPaths: new Set() };
+  return { ...arbitrateDenyPaths(tracked, denyPaths, cloneIgnoreCase(dir)), trackedCount };
+}
 
+// The deny_paths arbitration itself, over a NUL-separated list of tracked paths. Split out of
+// deniedFiles so src/cloud.js can run the same check over the file list of a commit the
+// cloud will clone, which has no local checkout to ls-files. `ignoreCase` is the filesystem
+// the paths will land on: the clone's own core.ignorecase locally, false for a cloud container.
+export function arbitrateDenyPaths(tracked, denyPaths, ignoreCase) {
+  if (tracked.length === 0) return { denied: [], matchedDenyPaths: new Set() };
   const { stdin, byPathname } = normalisationAliases(tracked);
 
   const scratch = mkdtempSync(join(tmpdir(), 'agent-team-denyscratch-'));
@@ -383,11 +391,11 @@ export function deniedFiles(dir, denyPaths) {
     const matched = gitCapture('git check-ignore (deny_paths arbitration)',
       ['-C', scratch,
         '-c', 'core.excludesFile=/dev/null',
-        '-c', `core.ignorecase=${cloneIgnoreCase(dir)}`,
+        '-c', `core.ignorecase=${ignoreCase}`,
         'check-ignore', '--no-index', '-v', '-z', '--stdin'],
       { input: stdin, okStatus: [0, 1] });
     const { denied, matchedDenyPaths } = parseCheckIgnoreOutput(matched);
-    return { denied: resolveDeniedPaths(denied, byPathname), trackedCount, matchedDenyPaths };
+    return { denied: resolveDeniedPaths(denied, byPathname), matchedDenyPaths };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

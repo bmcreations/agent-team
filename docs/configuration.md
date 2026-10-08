@@ -153,7 +153,8 @@ to it dispatches that project's entry member, with the task the manager wrote:
 
 | Field | Required | What it does |
 |---|---|---|
-| `team` | yes | The other project's directory: absolute, under `~/`, or relative to this project. |
+| `team` | yes | The other project's directory: absolute, under `~/`, or relative to this project. Or a GitHub repository, `github:owner/repo` or its URL, for a team with no checkout here; see [Cloud members](#cloud-members). |
+| `ref` | no | For a GitHub team only: the branch to run. Defaults to the repository's default branch. |
 | `member` | no | The member to enter that team through. Defaults to that team's only top-level member; a team with more than one is refused until you set it. |
 | `reports_to` | no | As for any member. |
 | `charter`, `title` | no | Shown to this member's manager. The manager's brief lists each report's charter and says which reports are other teams. |
@@ -162,7 +163,6 @@ Everything about how the other team runs comes from its own `.claude/agent-team.
 members, its `deny_paths`, and its `max_depth`. Fields such as `agent` or `isolation` on a
 `team` member are refused. A `team` member cannot have reports of its own; add them to the
 other team instead. `distinct_from` cannot name a `team` member, since it compares agents and
-a `team` member runs none here. `distinct_from` cannot name a `team` member, since it compares agents and
 a `team` member runs none here.
 
 From a linked worktree, a relative `team` path that does not lead to a config is retried from
@@ -170,6 +170,53 @@ the main checkout, since sibling repositories usually sit next to the main check
 next to its worktrees. The other team's config is read when the member is first delegated to,
 so a missing one fails that dispatch, not `agent-team org`. How the runs nest and what they
 spend is under [Other teams](how-it-works.md#other-teams).
+
+### Cloud members
+
+A member with `"agent": "claude-cloud"` runs as a [Claude Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview) session
+on Anthropic's infrastructure instead of a local CLI. The session clones this project's GitHub
+`origin` at the current branch. Nothing local is sent: uncommitted changes and unpushed
+commits are invisible to it.
+
+```json
+"scout": { "agent": "claude-cloud", "model": "sonnet", "reports_to": "orchestrator" }
+```
+
+It needs two environment variables. Without either, the probe fails and `on_unavailable`
+applies, so the member runs locally instead.
+
+| Variable | What it is |
+|---|---|
+| `ANTHROPIC_API_KEY` | An API key with Managed Agents access. Sessions are billed to it, separately from a Claude subscription. |
+| `AGENT_TEAM_GITHUB_TOKEN` | A fine-grained GitHub token scoped to the repositories cloud members run on, with Contents read access for `read-only` members and read and write for `workspace` ones. The session uses it to clone and push. Your `gh` login is never sent. |
+
+The dispatcher refuses a cloud run when:
+
+- the current branch is not on `origin`, or `origin` has a different commit than local `HEAD`,
+  since the session would work on code the manager has not seen;
+- `deny_paths` matches any file in `origin`'s copy of the branch. A local member never sees a
+  denied file because it is removed from the workspace; a cloud clone cannot be filtered.
+  Setting `"cloud_allow_denied": true` on the member sends the clone anyway and prints a
+  warning naming the files on every run.
+
+`isolation` maps as follows:
+
+| `isolation` | In the session |
+|---|---|
+| `read-only` | Read, glob and grep tools only. |
+| `workspace` | Shell and file-editing tools. The session pushes its work to a new branch, `agent-team/<member>-<id>`, which the result reports as `artifacts.branch` with an empty `artifacts.diff`. |
+| `none` | Refused at load. |
+
+No session has web tools. Every session is created with a spend cap of
+`defaults.cloud_max_cost_usd`. The adapter stops polling before the dispatch timeout, interrupts
+the session and archives it, so a timed-out run does not keep billing.
+
+A `team` member that names a GitHub repository has no checkout here. Its config is read
+through `gh` at `ref`, its entry member runs as one `claude-cloud` session whatever agent that
+config gives it, and the deny check runs against that repository's own `deny_paths`. The
+session cannot delegate: each further hop would be another clone and another billed session.
+Its cost cap is the lower of the two configs' `cloud_max_cost_usd`. A project cannot reach
+itself through its own GitHub name; the cycle check compares `origin` as well as the path.
 
 ## `deny_paths`
 
@@ -205,6 +252,7 @@ Optional.
 |---|---|---|
 | `on_unavailable` | `claude` | The agent to use when a member's agent fails its probe. The run carries a `warning` saying so. If the fallback also fails its probe, the run is refused. |
 | `max_depth` | `3` | How many levels below the dispatched member can be delegated to. `0` turns delegation off. |
+| `cloud_max_cost_usd` | `5` | The spend cap, in US dollars, set on every [cloud](#cloud-members) session. |
 | `max_delegations` | `20` | Total adapter runs allowed across one dispatch, counting the dispatched member and every call back to a manager. Minimum `1`. |
 
 `/agent-team-init` writes `max_depth: 1` and `max_delegations: 12`, which lets the orchestrator
