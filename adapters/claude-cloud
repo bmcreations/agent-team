@@ -1,0 +1,247 @@
+#!/usr/bin/env node
+// Runs a member as a Claude Managed Agents session on Anthropic's infrastructure instead of
+// a local CLI. The session clones the brief's GitHub repository itself; the dispatcher has
+// already refused the run if deny_paths matches anything in that clone (src/dispatch.js,
+// prepareCloud). Plain fetch rather than the Anthropic SDK: the plugin runs from a git
+// checkout with no npm install step.
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { answerOutcome } from '../src/delegation.js';
+
+const sub = process.argv[2];
+const env = process.env;
+const BASE = (env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, '');
+const BETA = 'managed-agents-2026-04-01';
+const POLL_MS = Number(env.AGENT_TEAM_CLOUD_POLL_MS) > 0 ? Number(env.AGENT_TEAM_CLOUD_POLL_MS) : 3000;
+const DEFAULT_MODEL = 'claude-opus-5-5';
+// Short names the local claude CLI accepts, which the API does not.
+const MODEL_ALIASES = {
+  opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', fable: 'claude-fable-5-1', haiku: 'claude-haiku-4-5'
+};
+
+const emit = (obj) => process.stdout.write(JSON.stringify(obj) + '\n', () => process.exit(0));
+
+if (sub === 'probe') {
+  // Cheap and offline, as the contract asks: a missing variable is the common failure.
+  const missing = ['ANTHROPIC_API_KEY', 'AGENT_TEAM_GITHUB_TOKEN'].filter((k) => !env[k]);
+  if (missing.length > 0) {
+    process.stderr.write(`claude-cloud needs ${missing.join(' and ')}\n`);
+    process.exit(1);
+  }
+  process.exit(0);
+} else if (sub === 'capabilities') {
+  // remote: the dispatcher builds no local workspace and checks deny_paths against the
+  // GitHub commit instead. workspace: false because results come back as a pushed branch.
+  emit({ write: true, workspace: false, remote: true, structured_output: false, tool_dialect: 'claude' });
+} else if (sub === 'run') {
+  run(JSON.parse(readFileSync(0, 'utf8'))).then(emit, (err) => emit({ status: 'failed', summary: `claude-cloud: ${err.message}` }));
+} else {
+  process.stderr.write(`unknown subcommand: ${sub}\n`);
+  process.exit(2);
+}
+
+async function api(method, path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': BETA
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    const err = new Error(`${method} ${path} -> ${res.status}: ${text.slice(0, 500)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return text ? JSON.parse(text) : {};
+}
+
+// Agents and environments are persistent, reusable objects, so one is created per distinct
+// definition and its id kept here, under the same cache root as workspaces.
+function cachePath() {
+  const root = env.AGENT_TEAM_WORKSPACE_ROOT || env.XDG_CACHE_HOME || join(homedir(), '.cache');
+  return join(root, 'agent-team', 'cloud-ids.json');
+}
+
+function readCache() {
+  try { return JSON.parse(readFileSync(cachePath(), 'utf8')); } catch { return {}; }
+}
+
+function writeCache(cache) {
+  mkdirSync(dirname(cachePath()), { recursive: true });
+  writeFileSync(cachePath(), JSON.stringify(cache, null, 2));
+}
+
+async function ensure(kind, body, fresh) {
+  const key = `${BASE}|${kind}|${createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0, 16)}`;
+  const cache = readCache();
+  if (!fresh && cache[key]) return cache[key];
+  const created = await api('POST', kind === 'agent' ? '/v1/agents' : '/v1/environments', body);
+  writeCache({ ...readCache(), [key]: created.id });
+  return created.id;
+}
+
+// read-only gets the file-reading tools and nothing that writes or runs commands. Neither
+// mode gets web tools: the clone is the only thing a member should be sending anywhere.
+function toolset(readOnly) {
+  const on = readOnly ? ['read', 'glob', 'grep'] : ['bash', 'read', 'write', 'edit', 'glob', 'grep'];
+  return {
+    type: 'agent_toolset_20260401',
+    default_config: { enabled: false, permission_policy: { type: 'always_allow' } },
+    configs: on.map((name) => ({ name, enabled: true }))
+  };
+}
+
+function prompt(brief) {
+  const { cloud } = brief;
+  const repoName = cloud.repo_url.split('/').pop();
+  const lines = [
+    `The repository ${cloud.repo_url} is checked out at /workspace/${repoName} on branch ` +
+    `"${cloud.ref}". Work there.`
+  ];
+  if (cloud.push_branch) {
+    lines.push(
+      `When your change is ready, commit it on a new branch named "${cloud.push_branch}" and ` +
+      `push that branch to origin. Do not push to any other branch.`
+    );
+  } else {
+    lines.push('This is read-only work: change nothing in the repository.');
+  }
+  return `${lines.join(' ')}\n\n---\n\n${brief.task}`;
+}
+
+const textOf = (ev) => (ev.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+
+async function listEvents(id, seen, events) {
+  let page = null;
+  do {
+    const res = await api('GET', `/v1/sessions/${id}/events?limit=1000${page ? `&page=${encodeURIComponent(page)}` : ''}`);
+    for (const ev of res.data ?? []) {
+      if (ev.id && seen.has(ev.id)) continue;
+      if (ev.id) seen.add(ev.id);
+      events.push(ev);
+    }
+    page = res.next_page ?? null;
+  } while (page);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function run(brief) {
+  if (!brief.cloud?.repo_url) {
+    return { status: 'failed', summary: 'claude-cloud: the brief has no cloud target — run it through the dispatcher' };
+  }
+  const started = Date.now();
+  // The dispatcher SIGKILLs this process group when timeout_s runs out, which would leave the
+  // session running and billing. Stop polling early enough to interrupt and archive it first.
+  const budgetMs = (brief.timeout_s ?? 900) * 1000;
+  const deadline = started + budgetMs - Math.min(30_000, Math.floor(budgetMs / 4));
+  const model = MODEL_ALIASES[brief.model] ?? brief.model ?? DEFAULT_MODEL;
+  const readOnly = brief.read_only !== false;
+
+  const agentBody = { name: `agent-team ${readOnly ? 'read-only' : 'workspace'} (${model})`, model, tools: [toolset(readOnly)] };
+  const envBody = {
+    name: 'agent-team',
+    config: { type: 'cloud', networking: { type: 'limited', allow_package_managers: true, allow_mcp_servers: false } }
+  };
+  const sessionBody = (agentId, envId) => ({
+    agent: agentId,
+    environment_id: envId,
+    resources: [{
+      type: 'github_repository',
+      url: brief.cloud.repo_url,
+      authorization_token: env.AGENT_TEAM_GITHUB_TOKEN,
+      checkout: { type: 'branch', name: brief.cloud.ref }
+    }],
+    budget: { type: 'limit', max_list_cost: { amount: String(Math.round(brief.cloud.max_cost_usd * 100)), currency: 'USD' } },
+    initial_events: [{ type: 'user.message', content: [{ type: 'text', text: prompt(brief) }] }],
+    metadata: { agent_team_member: brief.member }
+  });
+
+  let session;
+  try {
+    session = await api('POST', '/v1/sessions', sessionBody(await ensure('agent', agentBody), await ensure('environment', envBody)));
+  } catch (err) {
+    // A cached agent or environment archived or deleted since: make fresh ones, once.
+    if (err.status !== 404) throw err;
+    session = await api('POST', '/v1/sessions', sessionBody(await ensure('agent', agentBody, true), await ensure('environment', envBody, true)));
+  }
+  process.stderr.write(`claude-cloud: session ${session.id}\n`);
+
+  const seen = new Set();
+  const events = [];
+  let interrupted = false;
+  let stop = null;
+  try {
+    for (;;) {
+      await listEvents(session.id, seen, events);
+      // Created with initial_events, a session starts in running and never passes through
+      // idle first, so the first idle or terminated status is the end of the work.
+      stop = events.find((e) => e.type === 'session.status_idle' || e.type === 'session.status_terminated') ?? null;
+      if (stop) break;
+      if (!interrupted && Date.now() >= deadline) {
+        interrupted = true;
+        await api('POST', `/v1/sessions/${session.id}/events`, { events: [{ type: 'user.interrupt' }] }).catch(() => {});
+        const grace = Date.now() + 20_000;
+        while (Date.now() < grace) {
+          await sleep(Math.min(POLL_MS, 2000));
+          await listEvents(session.id, seen, events).catch(() => {});
+          if (events.some((e) => e.type === 'session.status_idle' || e.type === 'session.status_terminated')) break;
+        }
+        break;
+      }
+      await sleep(POLL_MS);
+    }
+  } finally {
+    // Archived, not deleted: it stops the session but keeps its trace for the Console.
+    await api('POST', `/v1/sessions/${session.id}/archive`, {}).catch((err) => {
+      process.stderr.write(`claude-cloud: could not archive session ${session.id}: ${err.message}\n`);
+    });
+  }
+
+  const answer = [...events].reverse().find((e) => e.type === 'agent.message');
+  const text = answer ? textOf(answer) : '';
+  const usageEvent = [...events].reverse().find((e) => e.type === 'session.usage');
+  const cost = usageEvent?.list_cost?.amount;
+  const usage = {
+    duration_ms: Date.now() - started,
+    turns: null,
+    cost_usd: cost !== undefined && cost !== null && Number.isFinite(Number(cost)) ? Number(cost) / 100 : null,
+    session_id: session.id,
+    model,
+    models: null,
+    advisor_calls: null
+  };
+  const errors = events.filter((e) => /error$/.test(e.type ?? '')).map((e) => e.error?.message ?? e.message ?? e.type);
+  const base = { log_path: null, session_id: session.id, usage };
+
+  if (interrupted) {
+    return { ...base, status: 'timeout', summary: text || 'claude-cloud: stopped at the dispatch timeout' };
+  }
+  const reason = stop?.stop_reason?.type;
+  if (reason === 'budget_reached') {
+    return { ...base, status: 'failed', summary: `cloud session reached its cost cap of $${brief.cloud.max_cost_usd}${text ? `. Last answer: ${text}` : ''}` };
+  }
+  if (reason === 'requires_action') {
+    return { ...base, status: 'failed', summary: 'cloud session stopped waiting for a tool confirmation, which agent-team cannot give' };
+  }
+  if (!text) {
+    return { ...base, status: 'failed', summary: `cloud session ended with no answer${errors.length ? `: ${errors.join('; ')}` : ''}` };
+  }
+
+  const outcome = brief.can_delegate ? answerOutcome(text, brief) : { status: 'ok', summary: text };
+  let artifacts = { diff: '' };
+  if (brief.cloud.push_branch) {
+    const pushed = spawnSync('git', ['ls-remote', brief.cloud.repo_url, `refs/heads/${brief.cloud.push_branch}`], { encoding: 'utf8' });
+    const sha = pushed.status === 0 ? pushed.stdout.split('\t')[0].trim() : '';
+    artifacts = { diff: '', branch: sha ? brief.cloud.push_branch : null, branch_sha: sha || null, repo_url: brief.cloud.repo_url };
+  }
+  return { ...base, ...outcome, artifacts };
+}

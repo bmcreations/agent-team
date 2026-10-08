@@ -46,6 +46,7 @@ export function resolveMember(config, name, { probe, assignments = {} } = {}) {
     effort: member.effort ?? null,
     advisor: member.advisor ?? null,
     permission_mode: member.permission_mode ?? null,
+    cloud_allow_denied: member.cloud_allow_denied === true,
     skill: member.skill ?? null,
     charter: member.charter ?? null,
     persona: member.persona ?? null,

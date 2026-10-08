@@ -1,8 +1,10 @@
-import { existsSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { homedir } from 'node:os';
+import { randomBytes } from 'node:crypto';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { loadConfig, CONFIG_RELPATH } from './config.js';
+import { loadConfig, parseConfig, CONFIG_RELPATH, CLOUD_AGENT } from './config.js';
+import { cloudTarget, deniedInCloud, localRepoKey, parseGithubRepo, remoteTeamSource } from './cloud.js';
 import { resolveMember } from './resolve.js';
 import { createWorkspace, pruneWorkspace, runLogPath, mainCheckoutRoot } from './workspace.js';
 import { buildBrief, loadDialect } from './brief.js';
@@ -38,7 +40,7 @@ export async function dispatch({
     const result = await runMember({
       config, projectRoot, member, task, adapterDir,
       assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0,
-      teams: [realpathSync(projectRoot)]
+      teams: teamKeys(projectRoot)
     });
     recordRun(projectRoot, startedAt, task, runNode(result));
     return result;
@@ -117,6 +119,18 @@ function teamRoot(projectRoot, team) {
   return fromMain && existsSync(join(fromMain, CONFIG_RELPATH)) ? fromMain : local;
 }
 
+// What identifies a project in the cycle check: its real path, and the GitHub repository it
+// pushes to, so a local team cannot reach itself again through its own GitHub name.
+function teamKeys(root) {
+  return [realpathSync(root), localRepoKey(root)].filter(Boolean);
+}
+
+function refuseCycle(member, team, keys, teams) {
+  if (keys.some((k) => teams.includes(k))) {
+    throw new Error(`member "${member}": team "${team}" is already in this delegation (${[...teams, keys[0]].join(' -> ')})`);
+  }
+}
+
 // The member another team is entered through: the one named, else that team's only root.
 function teamEntry(teamConfig, entry, root, member) {
   if (entry) return entry;
@@ -134,15 +148,15 @@ function teamEntry(teamConfig, entry, root, member) {
 // below it. Its runs still spend this dispatch's max_delegations, capped by its own.
 async function runTeam(ctx, spec) {
   const { projectRoot, member, depth, budget, teams } = ctx;
+  const repo = parseGithubRepo(spec.team);
+  if (repo) return runCloudTeam(ctx, spec, repo);
   const started = Date.now();
   const root = teamRoot(projectRoot, spec.team);
   if (!existsSync(join(root, CONFIG_RELPATH))) {
     throw new Error(`member "${member}": no agent-team config for team "${spec.team}" at ${join(root, CONFIG_RELPATH)}`);
   }
-  const real = realpathSync(root);
-  if (teams.includes(real)) {
-    throw new Error(`member "${member}": team "${spec.team}" is already in this delegation (${[...teams, real].join(' -> ')})`);
-  }
+  const keys = teamKeys(root);
+  refuseCycle(member, spec.team, keys, teams);
   const config = loadConfig(root);
   const entry = teamEntry(config, spec.member, root, member);
 
@@ -150,7 +164,7 @@ async function runTeam(ctx, spec) {
   const before = teamBudget.runs;
   const sub = await runMember({
     ...ctx, config, projectRoot: root, member: entry, depth: 0,
-    assignments: {}, budget: teamBudget, teams: [...teams, real]
+    assignments: {}, budget: teamBudget, teams: [...teams, ...keys]
   });
   budget.runs -= before - teamBudget.runs;
 
@@ -158,6 +172,92 @@ async function runTeam(ctx, spec) {
     status: sub.status, summary: sub.summary ?? null,
     member, team: { path: root, member: entry },
     elapsed_ms: Date.now() - started, depth, delegated: [sub]
+  };
+}
+
+// A team named by GitHub repository has no checkout here, so it runs as one cloud session:
+// its entry member, under its own config read through the GitHub API, on claude-cloud, with
+// delegation off. Every further hop would be another clone and another billed session.
+async function runCloudTeam(ctx, spec, repo) {
+  const { member, depth, budget, teams } = ctx;
+  const started = Date.now();
+  refuseCycle(member, spec.team, [repo.key], teams);
+  const source = remoteTeamSource(repo, spec.ref ?? null);
+  const remote = parseConfig(source.raw, `${repo.url}@${source.ref}:${CONFIG_RELPATH}`);
+  const entry = teamEntry(remote, spec.member, repo.url, member);
+  const entrySpec = remote.members[entry];
+  if (entrySpec.team) {
+    throw new Error(`member "${member}": entry member "${entry}" of ${repo.url} is itself a team — set "member" to a member that runs an agent`);
+  }
+  const config = {
+    ...remote,
+    members: {
+      ...remote.members,
+      [entry]: { ...entrySpec, agent: CLOUD_AGENT, isolation: entrySpec.isolation === 'none' ? 'read-only' : entrySpec.isolation }
+    },
+    defaults: {
+      ...remote.defaults,
+      max_depth: 0,
+      on_unavailable: CLOUD_AGENT,   // no local fallback: there is nothing local to run it on
+      cloud_max_cost_usd: Math.min(remote.defaults.cloud_max_cost_usd, ctx.config.defaults.cloud_max_cost_usd)
+    }
+  };
+
+  const teamBudget = { runs: Math.min(budget.runs, remote.defaults.max_delegations) };
+  const before = teamBudget.runs;
+  const sub = await runMember({
+    ...ctx, config, projectRoot: null, member: entry, depth: 0,
+    assignments: {}, budget: teamBudget, teams: [...teams, repo.key],
+    cloudSource: { repo, ref: source.ref, sha: source.sha, dirty: false, tracked: source.tracked }
+  });
+  budget.runs -= before - teamBudget.runs;
+
+  return {
+    status: sub.status, summary: sub.summary ?? null,
+    member, team: { repo: repo.url, ref: source.ref, member: entry },
+    elapsed_ms: Date.now() - started, depth, delegated: [sub]
+  };
+}
+
+// The stand-in for createWorkspace when a member runs in the cloud. Nothing is cloned here;
+// the session clones origin itself, so deny_paths is checked against that commit instead and
+// a match refuses the run. The local directory only gives the adapter a cwd.
+function prepareCloud(ctx, resolved) {
+  const { config, projectRoot, member } = ctx;
+  if (resolved.isolation === 'none') {
+    throw new Error(`member "${member}": a cloud member cannot run with isolation "none"`);
+  }
+  const target = ctx.cloudSource ?? cloudTarget(projectRoot);
+  const denied = deniedInCloud(target.tracked, config.deny_paths);
+  const where = `${target.repo.url} (${target.ref})`;
+  if (denied.length > 0) {
+    const shown = denied.slice(0, 10).join(', ') + (denied.length > 10 ? `, and ${denied.length - 10} more` : '');
+    if (!resolved.cloud_allow_denied) {
+      throw new Error(
+        `member "${member}": deny_paths matches ${denied.length} file(s) in ${where}, which a ` +
+        `cloud session would clone in full: ${shown} — untrack them, or set ` +
+        `"cloud_allow_denied": true on "${member}" to send them anyway`
+      );
+    }
+    console.warn(
+      `agent-team: member "${member}": cloud_allow_denied is set — the cloud session clones ` +
+      `${where} including ${denied.length} file(s) deny_paths matches: ${shown}`
+    );
+  }
+  if (target.dirty) {
+    console.warn(`agent-team: member "${member}": uncommitted changes here are not in ${where}, which is what the cloud session sees`);
+  }
+  const id = randomBytes(3).toString('hex');
+  return {
+    workspace: { dir: mkdtempSync(join(tmpdir(), `agent-team-${member}-`)), branch: null, id, kind: 'cloud' },
+    cloud: {
+      repo_url: target.repo.url,
+      ref: target.ref,
+      sha: target.sha,
+      max_cost_usd: config.defaults.cloud_max_cost_usd,
+      push_branch: resolved.isolation === 'workspace' ? `agent-team/${member}-${id}` : null,
+      denied_files_sent: denied.length
+    }
   };
 }
 
@@ -187,7 +287,15 @@ async function runMember(ctx) {
     skillText = readFileSync(p, 'utf8');
   }
 
-  const workspace = createWorkspace(projectRoot, member, config.deny_paths, resolved.isolation);
+  let workspace;
+  let cloud = null;
+  if (caps.remote === true) {
+    ({ workspace, cloud } = prepareCloud(ctx, resolved));
+  } else if (ctx.cloudSource) {
+    throw new Error(`member "${member}": a team named by GitHub repository can only run on "${CLOUD_AGENT}", got "${resolved.agent}"`);
+  } else {
+    workspace = createWorkspace(projectRoot, member, config.deny_paths, resolved.isolation);
+  }
   // The same agent-team.json commonly gets reused across projects, so a deny_paths entry
   // matching nothing in this particular repo is not itself an error (see workspace.js).
   // But it is worth an operator's attention — it may mean the entry was meant to match
@@ -255,7 +363,7 @@ async function runMember(ctx) {
       const brief = buildBrief({
         resolved, task, cwd: workspace.dir, denyPaths: config.deny_paths,
         skillText, dialectText, timeoutSec: Math.floor(timeoutMs / 1000),
-        depth, maxDepth, priorResults
+        depth, maxDepth, priorResults, cloud
       });
 
       result = await runAdapter(adapterPath(adapterDir, resolved.agent), 'run', {
@@ -317,7 +425,8 @@ async function runMember(ctx) {
       ...result,
       member, agent: resolved.agent, model: resolved.model, advisor: resolved.advisor,
       usage, elapsed_ms: Date.now() - started, warning: resolved.warning,
-      workspace, unmatchedDenyPaths, droppedSymlinks, depth, delegated
+      workspace, unmatchedDenyPaths, droppedSymlinks, depth, delegated,
+      ...(cloud ? { cloud } : {})
     };
   } catch (err) {
     // A throw here (e.g. a reporting-line violation) means this frame's workspace
