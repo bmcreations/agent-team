@@ -535,11 +535,15 @@ function repoKey(repoRoot) {
 // not the checkout: the shared git dir is the same from a subdirectory and from every
 // worktree, so delegations started in a desktop-app worktree show up in a report run from
 // the main checkout.
+// The main checkout of the repository holding projectDir: the same directory for a
+// subdirectory and for every linked worktree. Null outside a git repository.
+export function mainCheckoutRoot(projectDir) {
+  const common = spawnSync('git', ['-C', resolve(projectDir), 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' });
+  return common.status === 0 && common.stdout.trim() ? dirname(common.stdout.trim()) : null;
+}
+
 export function runLogPath(projectDir) {
-  const dir = resolve(projectDir);
-  let key = dir;
-  const common = spawnSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' });
-  if (common.status === 0 && common.stdout.trim()) key = dirname(common.stdout.trim());
+  const key = mainCheckoutRoot(projectDir) ?? resolve(projectDir);
   return join(cacheRoot(), 'agent-team', 'runs', `${repoKey(key)}.jsonl`);
 }
 

@@ -684,3 +684,43 @@ test('permission_mode is refused on an isolation "none" member, which also runs 
   const root = memberProject('a', { isolation: 'none', permission_mode: 'auto' });
   assert.throws(() => loadConfig(root), /"permission_mode".*workspace/);
 });
+
+const withMember = (name, m) => project({ ...OK, members: { ...OK.members, [name]: m } });
+
+test('a team member needs no agent and keeps its fields', () => {
+  const cfg = loadConfig(withMember('ios', { team: '../code-ios-app', member: 'orchestrator', reports_to: 'coo' }));
+  assert.deepEqual(cfg.members.ios, { team: '../code-ios-app', member: 'orchestrator', reports_to: 'coo' });
+  assert.deepEqual(cfg.org.reportsOf.coo, ['eng-lead', 'ios']);
+});
+
+test('a team member refuses fields that belong in the other team\'s config', () => {
+  assert.throws(
+    () => loadConfig(withMember('ios', { team: '../ios', agent: 'claude', isolation: 'workspace' })),
+    /member "ios": a "team" member only takes .* — agent, isolation belong in that team's own config/
+  );
+});
+
+test('team must be a non-empty string', () => {
+  assert.throws(() => loadConfig(withMember('ios', { team: '' })), /"team" must be a non-empty string/);
+  assert.throws(() => loadConfig(withMember('ios', { team: 3 })), /"team" must be a non-empty string/);
+});
+
+test('a team member\'s entry member must be a valid name', () => {
+  assert.throws(() => loadConfig(withMember('ios', { team: '../ios', member: '../x' })), /"member" "\.\.\/x" is invalid/);
+});
+
+test('nobody may report to a team member', () => {
+  const root = project({
+    ...OK,
+    members: { ...OK.members, ios: { team: '../ios' }, helper: { agent: 'claude', reports_to: 'ios' } }
+  });
+  assert.throws(() => loadConfig(root), /member "helper": reports_to "ios", which is another team/);
+});
+
+test('distinct_from may not name a team member', () => {
+  const root = project({
+    ...OK,
+    members: { ...OK.members, ios: { team: '../ios' }, reviewer: { agent: 'codex', distinct_from: ['ios'] } }
+  });
+  assert.throws(() => loadConfig(root), /"distinct_from" names "ios", which is another team/);
+});

@@ -38,7 +38,7 @@ function fail(err) {
 if (positionals[0] === 'org') {
   try {
     const config = loadConfig(values.project);
-    process.stdout.write(renderOrg(config.org) + '\n');
+    process.stdout.write(renderOrg(config.org, config.members) + '\n');
     process.exit(0);
   } catch (err) {
     fail(err);

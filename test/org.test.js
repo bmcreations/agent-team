@@ -139,3 +139,8 @@ test('a real member named toString still works', () => {
   assert.equal(canDelegate(org, 'coo'), true);
   assert.deepEqual(directReports(org, 'coo'), ['designer', 'eng-lead', 'toString']);
 });
+
+test('renderOrg names the team a team member stands for', () => {
+  const members = { ...MEMBERS, ios: { team: '../ios', member: 'lead', reports_to: 'coo' } };
+  assert.match(renderOrg(buildOrg(members), members), /^ {2}ios -> team \.\.\/ios \(lead\)$/m);
+});

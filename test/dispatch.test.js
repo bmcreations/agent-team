@@ -51,8 +51,7 @@ const TEAM = {
   marketer: { agent: 'mock', isolation: 'none' }
 };
 
-function project(scripted, { members = TEAM, defaults = {}, denyPaths = ['credentials/**'] } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'at-dsp-'));
+function project(scripted, { members = TEAM, defaults = {}, denyPaths = ['credentials/**'], root = mkdtempSync(join(tmpdir(), 'at-dsp-')) } = {}) {
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   const git = (...a) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
   git('config', 'user.email', 't@e.com');
@@ -509,4 +508,133 @@ test('a dispatch that throws is still logged as a failed run', async () => {
     assert.equal(runs[0].tree.status, 'failed');
     assert.match(runs[0].tree.summary, /binds skill/);
   });
+});
+
+// Two projects side by side under one directory, the way sibling platform repos sit next to
+// an orchestrator repo. The app team's lead delegates to "ios", which is the ios project's team.
+const IOS_TEAM = {
+  'ios-lead': { agent: 'mock', isolation: 'read-only', deliverable: 'decision' },
+  'ios-worker': { agent: 'mock', reports_to: 'ios-lead', isolation: 'workspace' }
+};
+
+function teams(scripted, { app = {}, ios = {}, iosDeny = ['secrets/**'] } = {}) {
+  const parent = mkdtempSync(join(tmpdir(), 'at-dsp-teams-'));
+  const iosProject = project({}, { root: join(parent, 'ios'), members: IOS_TEAM, denyPaths: iosDeny, ...ios });
+  const appProject = project(scripted, {
+    root: join(parent, 'app'),
+    members: {
+      lead: { agent: 'mock', isolation: 'read-only', deliverable: 'decision' },
+      ios: { team: '../ios', reports_to: 'lead', charter: 'Owns the iOS app.' },
+      ...(app.members ?? {})
+    },
+    defaults: app.defaults ?? {}
+  });
+  return { parent, app: appProject, ios: iosProject };
+}
+
+test('a manager delegates to another team, which runs under its own config', async () => {
+  const { app, ios } = teams({
+    by_member: {
+      lead: [
+        { status: 'delegating', delegations: [{ to: 'ios', task: 'add the button' }] },
+        { status: 'ok', summary: 'both platforms done' }
+      ],
+      'ios-lead': [
+        { status: 'delegating', delegations: [{ to: 'ios-worker', task: 'edit the view' }] },
+        { status: 'ok', summary: 'ios button added' }
+      ],
+      'ios-worker': { status: 'ok', summary: 'edited' }
+    }
+  });
+  const r = await run(app.root, app.script, 'lead');
+  assert.equal(r.status, 'ok');
+
+  const [team] = r.delegated;
+  assert.equal(team.member, 'ios');
+  assert.equal(team.team.path, ios.root);
+  assert.equal(team.team.member, 'ios-lead');
+  assert.equal(team.summary, 'ios button added');
+
+  const [lead] = team.delegated;
+  assert.equal(lead.member, 'ios-lead');
+  assert.match(lead.received.task, /add the button/);
+  const [worker] = lead.delegated;
+  assert.equal(worker.member, 'ios-worker');
+  assert.deepEqual(worker.received.deny_paths, ['secrets/**'], 'the other team\'s deny_paths apply');
+
+  assert.match(r.received.task, /ios button added/);
+});
+
+test('a manager\'s brief says which report is another team', async () => {
+  const { app } = teams({
+    by_member: { lead: { status: 'ok', summary: 'nothing to do' } }
+  });
+  const r = await run(app.root, app.script, 'lead');
+  assert.match(r.received.task, /- ios: Owns the iOS app\. Another team, in \.\.\/ios\./);
+});
+
+test('another team\'s runs spend the dispatching team\'s max_delegations', async () => {
+  const { app } = teams({
+    by_member: {
+      lead: { status: 'delegating', delegations: [{ to: 'ios', task: 'x' }] },
+      'ios-lead': { status: 'delegating', delegations: [{ to: 'ios-worker', task: 'y' }] },
+      'ios-worker': { status: 'ok', summary: 'edited' }
+    }
+  }, { app: { defaults: { max_delegations: 4 } } });
+  const r = await run(app.root, app.script, 'lead');
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /budget/);
+  // lead, ios-lead, ios-worker, ios-lead again: the app's four runs are spent, so the ios
+  // team's second worker is refused although its own config allows 12.
+  const iosLead = r.delegated[0].delegated[0];
+  assert.deepEqual(iosLead.delegated.map((d) => d.status), ['ok', 'failed']);
+  assert.match(iosLead.delegated[1].summary, /budget/);
+  assert.match(r.delegated[0].summary, /budget/);
+});
+
+test('a team that delegates back to a team already in the chain is refused', async () => {
+  const { app, ios } = teams({
+    by_member: {
+      lead: { status: 'delegating', delegations: [{ to: 'ios', task: 'x' }] },
+      'ios-lead': { status: 'delegating', delegations: [{ to: 'back', task: 'y' }] }
+    }
+  }, {
+    ios: { members: { ...IOS_TEAM, back: { team: '../app', reports_to: 'ios-lead' } } }
+  });
+  await assert.rejects(() => run(app.root, app.script, 'lead'), /already in this delegation/);
+  assert.ok(ios.root);
+});
+
+test('a relative team path from a linked worktree resolves from the main checkout', async () => {
+  const { app } = teams({
+    by_member: {
+      lead: [
+        { status: 'delegating', delegations: [{ to: 'ios', task: 'x' }] },
+        { status: 'ok', summary: 'done' }
+      ],
+      'ios-lead': { status: 'ok', summary: 'ios done' }
+    }
+  });
+  const worktree = join(mkdtempSync(join(tmpdir(), 'at-dsp-wt-')), 'wt');
+  execFileSync('git', ['-C', app.root, 'worktree', 'add', '-q', '-b', 'side', worktree], { stdio: 'pipe' });
+  const r = await run(worktree, app.script, 'lead');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.delegated[0].summary, 'ios done');
+});
+
+test('a team member can be dispatched directly', async () => {
+  const { app } = teams({ by_member: { 'ios-lead': { status: 'ok', summary: 'direct' } } });
+  const r = await run(app.root, app.script, 'ios');
+  assert.equal(r.status, 'ok');
+  assert.equal(r.delegated[0].member, 'ios-lead');
+  const [logged] = readRuns(app.root).slice(-1);
+  assert.equal(logged.tree.team.member, 'ios-lead');
+  assert.equal(logged.tree.delegated[0].member, 'ios-lead');
+});
+
+test('a team with no config is refused with its path', async () => {
+  const { app } = teams({ by_member: {} }, {
+    app: { members: { android: { team: '../android', reports_to: 'lead' } } }
+  });
+  await assert.rejects(() => run(app.root, app.script, 'android'), /no agent-team config for team "\.\.\/android"/);
 });

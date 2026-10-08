@@ -51,6 +51,8 @@ directory name and a git branch name.
 | `advisor` | no | the user's `advisorModel` | Claude only. See [Advisor](#advisor). |
 | `permission_mode` | no | `auto` | Claude only, and only on `workspace` members. See [Permission mode](#permission_mode). |
 
+A member can instead stand for another project's team. See [Other teams](#other-teams).
+
 The loader checks the type of `model`, `effort`, `advisor` and `permission_mode` (a
 non-empty string), not whether the value exists. A bad value fails on the member's first
 run, not at load.
@@ -123,6 +125,51 @@ no mode cannot edit its clone. `acceptEdits` allows file edits but no shell comm
 The loader refuses `permission_mode` on `read-only` and `none` members, which always run in
 `plan`. If claude refuses any of a workspace member's tool calls, the run reports
 `status: "failed"` with the refused tools in `permission_denials`, and the workspace is kept.
+
+### Other teams
+
+A member with `team` in place of `agent` stands for another project's agent-team. Delegating
+to it dispatches that project's entry member, with the task the manager wrote:
+
+```json
+{
+  "members": {
+    "orchestrator": {
+      "agent": "claude", "model": "claude-opus-5-5",
+      "isolation": "read-only", "deliverable": "decision"
+    },
+    "ios": {
+      "team": "code-ios-app", "reports_to": "orchestrator",
+      "charter": "Owns the iOS app."
+    },
+    "android": {
+      "team": "code-android-app", "member": "orchestrator", "reports_to": "orchestrator",
+      "charter": "Owns the Android app."
+    }
+  },
+  "deny_paths": ["**/.env*"]
+}
+```
+
+| Field | Required | What it does |
+|---|---|---|
+| `team` | yes | The other project's directory: absolute, under `~/`, or relative to this project. |
+| `member` | no | The member to enter that team through. Defaults to that team's only top-level member; a team with more than one is refused until you set it. |
+| `reports_to` | no | As for any member. |
+| `charter`, `title` | no | Shown to this member's manager. The manager's brief lists each report's charter and says which reports are other teams. |
+
+Everything about how the other team runs comes from its own `.claude/agent-team.json`: its
+members, its `deny_paths`, and its `max_depth`. Fields such as `agent` or `isolation` on a
+`team` member are refused. A `team` member cannot have reports of its own; add them to the
+other team instead. `distinct_from` cannot name a `team` member, since it compares agents and
+a `team` member runs none here. `distinct_from` cannot name a `team` member, since it compares agents and
+a `team` member runs none here.
+
+From a linked worktree, a relative `team` path that does not lead to a config is retried from
+the main checkout, since sibling repositories usually sit next to the main checkout and not
+next to its worktrees. The other team's config is read when the member is first delegated to,
+so a missing one fails that dispatch, not `agent-team org`. How the runs nest and what they
+spend is under [Other teams](how-it-works.md#other-teams).
 
 ## `deny_paths`
 

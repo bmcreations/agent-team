@@ -60,10 +60,12 @@ export function depthOf(org, name) {
   return depth;
 }
 
-export function renderOrg(org) {
+export function renderOrg(org, members = {}) {
   const lines = [];
   const walk = (name, indent) => {
-    lines.push(`${' '.repeat(indent)}${name}`);
+    const team = members[name]?.team;
+    const entry = members[name]?.member;
+    lines.push(`${' '.repeat(indent)}${name}${team ? ` -> team ${team}${entry ? ` (${entry})` : ''}` : ''}`);
     for (const child of directReports(org, name)) walk(child, indent + 2);
   };
   for (const root of org.roots) walk(root, 0);

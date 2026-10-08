@@ -10,6 +10,10 @@ member back with the results so it can synthesise. Tree depth and total adapter 
 capped separately. A manager delegates by answering with nothing but a JSON object; the
 exact rule is under [Delegation](docs/how-it-works.md#delegation).
 
+A member can also stand for another project's team. An orchestrator for a product can
+delegate to the iOS and Android repos' own teams, and each runs under its own repo's config
+and denylist. See [Other teams](docs/configuration.md#other-teams).
+
 A rival CLI ships whatever it can read to a third party, so every member runs in a filtered
 clone: a shallow clone with the denied paths deleted and history flattened to one orphan
 commit, so a secret is not recoverable from `HEAD~1` either. A config with an empty denylist
