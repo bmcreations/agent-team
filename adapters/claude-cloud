@@ -212,7 +212,8 @@ async function run(brief) {
   const answer = [...events].reverse().find((e) => e.type === 'agent.message');
   const text = answer ? textOf(answer) : '';
   const usageEvent = [...events].reverse().find((e) => e.type === 'session.usage');
-  const cost = usageEvent?.list_cost?.amount;
+  // A real session.usage event nests the cost under usage.
+  const cost = usageEvent?.usage?.list_cost?.amount;
   const usage = {
     duration_ms: Date.now() - started,
     turns: null,
