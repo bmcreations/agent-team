@@ -50,7 +50,9 @@ async function api(method, path, body) {
       'content-type': 'application/json',
       'x-api-key': env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
-      'anthropic-beta': BETA
+      'anthropic-beta': BETA,
+      // Required when the key isn't scoped to one workspace.
+      ...(env.ANTHROPIC_WORKSPACE_ID ? { 'anthropic-workspace-id': env.ANTHROPIC_WORKSPACE_ID } : {})
     },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
@@ -210,7 +212,8 @@ async function run(brief) {
   const answer = [...events].reverse().find((e) => e.type === 'agent.message');
   const text = answer ? textOf(answer) : '';
   const usageEvent = [...events].reverse().find((e) => e.type === 'session.usage');
-  const cost = usageEvent?.list_cost?.amount;
+  // A real session.usage event nests the cost under usage.
+  const cost = usageEvent?.usage?.list_cost?.amount;
   const usage = {
     duration_ms: Date.now() - started,
     turns: null,
