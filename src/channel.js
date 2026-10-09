@@ -23,7 +23,7 @@ export function listChannels(env = process.env) {
   return names.filter((n) => n.endsWith('.json')).flatMap((n) => {
     try {
       const entry = JSON.parse(readFileSync(join(dir, n), 'utf8'));
-      return alive(entry.pid) ? [entry] : [];
+      return alive(entry.pid) ? [{ ...entry, ready: entry.ready === true }] : [];
     } catch { return []; }
   });
 }
@@ -31,7 +31,8 @@ export function listChannels(env = process.env) {
 // Sends `text` to the session and resolves with its reply. The channel gives no delivery
 // acknowledgement: a session not started with the channel flag drops the task silently,
 // so a missing reply only ever shows up as the timeout.
-export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = process.env } = {}) {
+// `onSent(taskId)` fires once the task is written to the socket.
+export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = process.env, onSent } = {}) {
   const entry = listChannels(env).find((c) => c.session_id === sessionId);
   if (!entry) return Promise.reject(new Error(`no running agent-team channel for session ${sessionId}`));
   const taskId = `t_${randomBytes(6).toString('hex')}`;
@@ -42,7 +43,7 @@ export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = pro
     const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); sock.destroy(); fn(v); } };
     const timer = setTimeout(() => finish(reject, new Error(`no reply to ${taskId} from session ${sessionId} within ${timeoutMs} ms`)), timeoutMs);
     sock.setEncoding('utf8');
-    sock.on('connect', () => sock.write(JSON.stringify({ task_id: taskId, text }) + '\n'));
+    sock.on('connect', () => sock.write(JSON.stringify({ task_id: taskId, text }) + '\n', () => onSent?.(taskId)));
     sock.on('data', (chunk) => {
       buf += chunk;
       const nl = buf.indexOf('\n');

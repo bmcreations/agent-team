@@ -116,3 +116,51 @@ test('the registry skips dead servers, and a server cleans up when its session e
   assert.deepEqual(listChannels(s.env), []);
   await assert.rejects(askSession(SID, 'x', { env: s.env }), /no running agent-team channel/);
 });
+
+test('an entry is marked ready only after the MCP handshake completes', async (t) => {
+  const s = startServer();
+  t.after(() => s.child.kill());
+  await s.registered();
+  assert.equal(listChannels(s.env)[0].ready, false);
+  await s.call('initialize', {});
+  s.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+  while (!listChannels(s.env)[0].ready) await new Promise((r) => setTimeout(r, 10));
+});
+
+const ASK = new URL('../scripts/ask-session.mjs', import.meta.url).pathname;
+function ask(env, args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [ASK, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('exit', (code) => resolve({ code, out, err }));
+  });
+}
+
+test('ask-session picks the only ready session and reports sent and replied', async (t) => {
+  const s = startServer();
+  t.after(() => s.child.kill());
+  await s.call('initialize', {});
+  s.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+  while (!listChannels(s.env)[0]?.ready) await new Promise((r) => setTimeout(r, 10));
+
+  const run = ask(s.env, ['--timeout', '5', 'which version?']);
+  const ev = await s.next((m) => m.method === 'notifications/claude/channel');
+  await s.call('tools/call', { name: 'reply', arguments: { task_id: ev.params.meta.task_id, text: '0.4.0' } });
+  const r = await run;
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, '0.4.0\n');
+  assert.match(r.err, new RegExp(`→ sent ${ev.params.meta.task_id} to session ${SID.slice(0, 8)}`));
+  assert.match(r.err, /← reply to t_\w+ after \d+\.\ds/);
+});
+
+test('ask-session refuses to guess when no session is ready', async (t) => {
+  const s = startServer();
+  t.after(() => s.child.kill());
+  await s.registered();
+  const r = await ask(s.env, ['hello']);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /no ready session/);
+  assert.match(r.err, new RegExp(`${SID}  waiting`));
+});

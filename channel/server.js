@@ -13,7 +13,7 @@
 // abandons the task.
 
 import { createServer } from 'node:net';
-import { mkdirSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, chmodSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { channelDir } from '../src/channel.js';
 
@@ -33,7 +33,10 @@ const notify = (method, params) => send({ method, params });
 
 function handle(msg) {
   const { id, method, params } = msg;
-  if (id === undefined) return;   // notifications from the client need no answer
+  if (id === undefined) {   // notifications from the client need no answer
+    if (method === 'notifications/initialized') markReady();
+    return;
+  }
   switch (method) {
     case 'initialize':
       return send({ id, result: {
@@ -107,9 +110,19 @@ if (sessionId) {
     });
     sock.on('close', () => { if (pending.get(sock.taskId) === sock) pending.delete(sock.taskId); });
     sock.on('error', () => {});
-  }).listen(sockPath, () => {
-    writeFileSync(entryPath, JSON.stringify({ session_id: sessionId, cwd: process.cwd(), pid: process.pid, socket: sockPath }) + '\n');
-  });
+  }).listen(sockPath, writeEntry);
+}
+
+// `ready` means Claude Code finished the MCP handshake with this server. The server starts
+// (and registers) before that, so an entry without it can't take tasks yet.
+let ready = false;
+function writeEntry() {
+  if (!entryPath) return;
+  writeFileSync(entryPath, JSON.stringify({ session_id: sessionId, cwd: process.cwd(), pid: process.pid, socket: sockPath, ready }) + '\n');
+}
+function markReady() {
+  ready = true;
+  if (existsSync(sockPath ?? '')) writeEntry();   // otherwise listen's callback writes it
 }
 
 function cleanup() {

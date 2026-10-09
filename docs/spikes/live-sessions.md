@@ -370,8 +370,13 @@ The limits:
 - `src/channel.js`: `listChannels()` reads the registry and skips dead pids;
   `askSession(id, text)` sends `{task_id, text}` and waits for the matching
   reply or the timeout.
-- `scripts/ask-session.mjs`: `--list`, or `--session <id> "task"`.
-- `test/channel.test.js`: 5 tests that drive the server over stdio the way
+- `scripts/ask-session.mjs`: `--list`, or `[--session <id>] "task"`. Without
+  `--session` it sends to the only ready session. A registry entry is `ready`
+  once Claude Code completes the MCP handshake with the server; the server
+  registers before that. Whether the handshake waits for the
+  development-channels prompt is not documented and not yet checked, so `ready`
+  may still include a session stuck on that prompt.
+- `test/channel.test.js`: 8 tests that drive the server over stdio the way
   Claude Code does, including two tasks answered out of order and a late reply
   to an abandoned task. They prove the plumbing only. No fake can show that a
   real session calls `reply` rather than answering in its transcript; that
