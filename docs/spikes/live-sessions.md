@@ -9,7 +9,7 @@ was checked once against a real CLI session; see "Supervised run".
 | Question | Recommendation |
 | :- | :- |
 | 1. Join an existing Managed Agents session (`session_id` on a `claude-cloud` member) | **Build**, read-only only, with the refusals in the prototype |
-| 2a. Send a task to a local CLI session, opted in at start | **Build as experimental, behind the channels research preview.** Channels are documented and two-way; see the channel prototype |
+| 2a. Send a task to a local CLI session, opted in at start | **Build as experimental** (decided), behind the channels research preview. Channels are documented and two-way; see the channel prototype |
 | 2b. Send a task to a desktop app session, or a CLI session not started with the channel | **Wait**. Listing is documented; sending with a readable reply is not |
 
 ## 1. Managed Agents: `session_id` on a `claude-cloud` member
@@ -401,10 +401,10 @@ A fresh session in a scratch clone of `main`, started with
 
 ### Recommendation
 
-- **Local CLI sessions: build as experimental**, if it's acceptable for the
-  target session to start with `--dangerously-load-development-channels` until
-  channels leave research preview. If that flag is not acceptable to ship, wait
-  for the allowlist to open. The supervised run above passed.
+- **Local CLI sessions: build as experimental** (decided 2026-10-09). The
+  target session starts with `--dangerously-load-development-channels` until
+  channels leave research preview; revisit the flag then. The supervised run
+  above passed.
 - **Desktop app sessions, and CLI sessions started without the channel: wait.**
   Listing alone doesn't make a delegation target. Revisit if the inbox socket's
   message frame and reply path are documented for non-child senders, or if
