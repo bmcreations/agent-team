@@ -403,8 +403,12 @@ A fresh session in a scratch clone of `main`, started with
   (the server starts before the prompt is answered) but dropped two tasks. A
   registry entry therefore does not mean the session can take work; only a
   timeout says so.
-- Not checked: how the task looks in the owner's transcript. The terminal
-  capture used during the run didn't show the redrawn screen.
+- In the owner's session (screen recording of a second run, 2026-10-09), the
+  task shows as a line prefixed `agent-team:` with the task text. Claude read
+  the files, said it was replying via the channel, called the `reply` tool,
+  then also wrote a summary in its own transcript. The task, and anything
+  Claude writes about it, stays in the owner's conversation and uses its
+  context. The caller got the answer after 19.0 s.
 
 ### Recommendation
 
