@@ -3,7 +3,8 @@
 Status: spike, not for merge. Based on `feat/cloud-members` (PR #16). Docs read on
 2026-10-08 against Claude Code 2.1.294 and the Managed Agents beta
 `managed-agents-2026-04-01`. Part 1 was later checked against the live API in
-supervised runs; see "Results from a real session".
+supervised runs; see "Results from a real session". The channel route in Part 2
+was checked once against a real CLI session; see "Supervised run".
 
 | Question | Recommendation |
 | :- | :- |
