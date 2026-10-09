@@ -197,9 +197,10 @@ a pass there says nothing about the real API.
 
 ### Results from a real session (2026-10-09)
 
-One default run against a scratch session (Haiku 4.5, read-only tools, this repo
-at `main`, created with `scripts/create-scratch-session.mjs`): 10 checks passed
-and 1 failed. The optional steps have not been run.
+Runs against a scratch session (Haiku 4.5, read-only tools, this repo at `main`,
+created with `scripts/create-scratch-session.mjs`). The first default run passed
+10 checks and failed the cost check. After the cost fix below, a run with
+`--mid-turn` passed all 11.
 
 Confirmed:
 
@@ -225,19 +226,21 @@ Found:
   `span.model_request_*` events, and `session.status_running` lands just before
   our `user.message` in the list. None of these affect how the turn is found.
 
+- A message posted while a turn is running is not a separate turn. In the run,
+  B was posted while A was running. It was processed right after A's
+  `agent.message` (15:17:42.92, then B at 15:17:43.05), and both ended on a
+  single `session.status_idle` with no idle between them. A client waiting on A
+  would see B's answer as the last `agent.message`. The join path's wait for
+  idle before posting is required, not just cautious.
+- Cost amounts are whole cents. The cumulative `usage.list_cost.amount` went
+  0, 1, 3 over three short Haiku turns, which can't be dollars, so dividing by
+  100 is right. Whole-cent rounding means a small turn's cost reads as 0 or 1.
+- A message still queued (null `processed_at`) is listed after every processed
+  event.
+
 Still open:
 
-- The unit of `list_cost.amount` and of the budget's `max_list_cost.amount`. The
-  adapter treats both as cents. A turn of about 3,500 input and 46 output tokens
-  on Haiku reported `"0"`, which fits whole cents rounded down and fits whole
-  dollars equally well. A turn that costs more than a cent would settle it.
-- The optional steps: `--mid-turn`, `--second-key`, `--project`, `--archive`.
-
-## 2. Local and desktop Claude Code sessions
-
-The question was whether a plain Node process on the host can list running
-sessions and send one a task, through something documented. Listing, yes.
-Sending a task and reading the reply, no.
+- `--second-key`, `--project` and `--archive` have not been run.
 
 ### What is documented and callable
 
