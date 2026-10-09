@@ -130,7 +130,7 @@ async function turnAfter(mineId, key) {
   }
 }
 
-const costOf = (ev) => (Number.isFinite(Number(ev?.list_cost?.amount)) ? Number(ev.list_cost.amount) : null);
+const costOf = (ev) => (Number.isFinite(Number(ev?.usage?.list_cost?.amount)) ? Number(ev.usage.list_cost.amount) : null);
 const lastUsage = (list) => [...list].reverse().find((e) => e.type === 'session.usage');
 
 // --- 1. The session object, and one message's round trip ---

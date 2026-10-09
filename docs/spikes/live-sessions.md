@@ -195,6 +195,44 @@ before committing.
 logic is tested without a key. The simulation encodes the same reading of the docs as the adapter, so
 a pass there says nothing about the real API.
 
+### Results from a real session (2026-10-09)
+
+One default run against a scratch session (Haiku 4.5, read-only tools, this repo
+at `main`, created with `scripts/create-scratch-session.mjs`): 10 checks passed
+and 1 failed. The optional steps have not been run.
+
+Confirmed:
+
+- `agent.tools` comes back in the shape the adapter sends: one
+  `agent_toolset_20260401` entry with `default_config` and named `configs[]`.
+  Each config also carries `type` and `permission_policy`, which
+  `joinRefusal()` ignores. It reported no write tools, as expected.
+- `checkout` is `{"type":"branch","name":"main"}`, and `joinRefusal()` accepted
+  the session for this repo at `main`.
+- The POST response returns the `user.message` with its `sevt_` id and no
+  `processed_at` field. In the event list, the field was null on first sight and
+  filled in once the turn ran.
+- The list came back in `processed_at` order. The reply was the `agent.message`
+  between our event and the next `session.status_idle`, ending on `end_turn`.
+
+Found:
+
+- `session.usage` nests the cost at `usage.list_cost`, not at the top level. The
+  adapter read the top level, so `cost_usd` would always have been null, in
+  the create path from PR 16 as well as the join path. Fixed, and the fakes now
+  use the real shape.
+- A turn also emits `session.thread_status_running`/`_idle`, `agent.thinking` and
+  `span.model_request_*` events, and `session.status_running` lands just before
+  our `user.message` in the list. None of these affect how the turn is found.
+
+Still open:
+
+- The unit of `list_cost.amount` and of the budget's `max_list_cost.amount`. The
+  adapter treats both as cents. A turn of about 3,500 input and 46 output tokens
+  on Haiku reported `"0"`, which fits whole cents rounded down and fits whole
+  dollars equally well. A turn that costs more than a cent would settle it.
+- The optional steps: `--mid-turn`, `--second-key`, `--project`, `--archive`.
+
 ## 2. Local and desktop Claude Code sessions
 
 The question was whether a plain Node process on the host can list running

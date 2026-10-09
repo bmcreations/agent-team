@@ -214,7 +214,8 @@ async function run(brief) {
   const answer = [...events].reverse().find((e) => e.type === 'agent.message');
   const text = answer ? textOf(answer) : '';
   const usageEvent = [...events].reverse().find((e) => e.type === 'session.usage');
-  const cost = usageEvent?.list_cost?.amount;
+  // The real event nests the cost under usage (checked with scripts/verify-join.mjs).
+  const cost = usageEvent?.usage?.list_cost?.amount;
   const usage = {
     duration_ms: Date.now() - started,
     turns: null,
@@ -254,7 +255,7 @@ async function run(brief) {
 // --- Spike: join a session someone else created (docs/spikes/live-sessions.md) ---
 
 const costOf = (ev) => {
-  const n = Number(ev?.list_cost?.amount);
+  const n = Number(ev?.usage?.list_cost?.amount);
   return Number.isFinite(n) ? n : null;
 };
 

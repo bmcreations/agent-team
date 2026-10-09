@@ -48,7 +48,7 @@ async function simulatedSession({ joinMidTurn = false, steps = 3, agent, otherWo
     if (--s.left > 0) return;
     s.cost += 50;
     s.events.push({ id: id(), type: 'agent.message', processed_at: at(), content: [{ type: 'text', text: s.reply }] });
-    s.events.push({ id: id(), type: 'session.usage', processed_at: at(), list_cost: { amount: String(s.cost), currency: 'USD' } });
+    s.events.push({ id: id(), type: 'session.usage', processed_at: at(), usage: { list_cost: { amount: String(s.cost), currency: 'USD' } } });
     s.events.push({ id: id(), type: 'session.status_idle', processed_at: at(), stop_reason: { type: 'end_turn' } });
     s.status = 'idle';
   };

@@ -55,7 +55,7 @@ async function fakeSession({ session = sessionObj(), statuses = null, next }) {
   const prior = [
     { id: 'p1', type: 'user.message', processed_at: 't1', content: [{ type: 'text', text: 'owner task' }] },
     { id: 'p2', type: 'agent.message', processed_at: 't2', content: [{ type: 'text', text: 'OWNER ANSWER' }] },
-    { id: 'p3', type: 'session.usage', processed_at: 't3', list_cost: { amount: '100', currency: 'USD' } },
+    { id: 'p3', type: 'session.usage', processed_at: 't3', usage: { list_cost: { amount: '100', currency: 'USD' } } },
     { id: 'p4', type: 'session.status_idle', processed_at: 't4', stop_reason: { type: 'end_turn' } }
   ];
   const state = { sent: [], archived: [], gets: 0, created: [], events: prior, posted: false };
@@ -99,7 +99,7 @@ const ourTurn = (s, text = 'build 272', cents = '142') => [
   { id: 'mine', type: 'user.message', processed_at: 't5' },
   { id: 'm1', type: 'session.status_running', processed_at: 't6' },
   { id: 'm2', type: 'agent.message', processed_at: 't7', content: [{ type: 'text', text }] },
-  { id: 'm3', type: 'session.usage', processed_at: 't8', list_cost: { amount: cents, currency: 'USD' } },
+  { id: 'm3', type: 'session.usage', processed_at: 't8', usage: { list_cost: { amount: cents, currency: 'USD' } } },
   { id: 'm4', type: 'session.status_idle', processed_at: 't9', stop_reason: { type: 'end_turn' } }
 ];
 
