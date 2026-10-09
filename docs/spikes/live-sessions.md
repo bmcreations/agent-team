@@ -238,9 +238,14 @@ Found:
 - A message still queued (null `processed_at`) is listed after every processed
   event.
 
+- Archiving returns 200 and sets both `archived_at` and `status: "terminated"`.
+  A later POST to `/events` gets a 400 `invalid_request_error`, "Cannot send
+  events to archived session". `joinRefusal()` checks both fields, so a member
+  pointed at an archived session is refused before anything is sent.
+
 Still open:
 
-- `--second-key`, `--project` and `--archive` have not been run.
+- `--second-key` and `--project` have not been run.
 
 ### What is documented and callable
 
