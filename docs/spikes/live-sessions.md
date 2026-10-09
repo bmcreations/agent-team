@@ -243,9 +243,16 @@ Found:
   events to archived session". `joinRefusal()` checks both fields, so a member
   pointed at an archived session is refused before anything is sent.
 
+- A full delegation through agent-team works. A read-only `claude-cloud` member
+  with `session_id` set was asked for the version in `package.json` and returned
+  `0.4.0`, which is correct for `main`. The adapter left the session open, the
+  result named the joined session, and `cost_usd` was 0.01, matching the
+  session's own `usage.list_cost` going from 0 to 1 cent over that turn.
+
 Still open:
 
-- `--second-key` and `--project` have not been run.
+- `--second-key` has not been run, so access from a second key in the same
+  workspace is still unconfirmed.
 
 ### What is documented and callable
 
