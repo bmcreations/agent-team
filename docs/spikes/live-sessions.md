@@ -2,12 +2,14 @@
 
 Status: spike, not for merge. Based on `feat/cloud-members` (PR #16). Docs read on
 2026-10-08 against Claude Code 2.1.294 and the Managed Agents beta
-`managed-agents-2026-04-01`. No live API calls were made.
+`managed-agents-2026-04-01`. Part 1 was later checked against the live API in
+supervised runs; see "Results from a real session".
 
 | Question | Recommendation |
 | :- | :- |
 | 1. Join an existing Managed Agents session (`session_id` on a `claude-cloud` member) | **Build**, read-only only, with the refusals in the prototype |
-| 2. Send a task to a local or desktop Claude Code session from a plain Node process | **Wait**. Listing is documented; sending with a readable reply is not |
+| 2a. Send a task to a local CLI session, opted in at start | **Build as experimental, behind the channels research preview.** Channels are documented and two-way; see the channel prototype |
+| 2b. Send a task to a desktop app session, or a CLI session not started with the channel | **Wait**. Listing is documented; sending with a readable reply is not |
 
 ## 1. Managed Agents: `session_id` on a `claude-cloud` member
 
@@ -298,18 +300,105 @@ What's documented stops short of a usable client:
 Writing a client would mean guessing the message format. That's the private
 internals this spike was scoped to avoid, so it stops here.
 
-**Channels** push events into a running session and can be two-way, but the
-session has to be started with `--channels <plugin>`, and they're a research
-preview ([channels](https://code.claude.com/docs/en/channels)). That doesn't
-cover a session someone already has open.
+**Channels** are the exception, and have their own section below.
 
 **The desktop app's session tools** (list, read, message other Code tab
 sessions) are documented only as something "Claude can" do from inside a desktop
 session ([desktop](https://code.claude.com/docs/en/desktop)). No external
 endpoint is documented.
 
-### Recommendation: wait
+### Channels: a documented two-way route, opted in at session start
 
-Listing alone doesn't make a delegation target. Revisit if the inbox socket's
-message frame and reply path are documented for non-child senders, or if
-`--cloud <session-id>` gains a documented way to read the reply.
+A channel is an MCP server that "pushes events into your running Claude Code
+session" ([channels](https://code.claude.com/docs/en/channels)), and it can be
+two-way: the server exposes a tool that Claude calls to send messages back
+([channels reference](https://code.claude.com/docs/en/channels-reference)). That
+covers both halves agent-team needs, using only documented contracts:
+
+- **Sending.** The server emits `notifications/claude/channel` with `content`
+  and a `meta` map. Each `meta` entry "becomes an attribute on the `<channel>`
+  tag", so a `task_id` travels with the task.
+- **Matching the reply.** The `reply` tool takes that `task_id` back, so replies
+  match by id. That is stronger than Managed Agents, where the only link is
+  position in the event stream.
+- **Addressing a session.** `CLAUDE_CODE_SESSION_ID` is set in "stdio MCP
+  server subprocesses" ([env vars](https://code.claude.com/docs/en/env-vars)),
+  so the server can register under the same `sessionId` that
+  `claude agents --json` reports.
+- **Shipping it.** A plugin declares a channel with a `channels` entry bound to
+  one of its `mcpServers`
+  ([plugins reference](https://code.claude.com/docs/en/plugins-reference)), and
+  agent-team is already a plugin.
+
+The limits:
+
+- **Opt-in at session start, behind a warning.** "Events only arrive while the
+  session is open," and only if the session loaded the channel. During the
+  research preview, custom channels aren't on the allowlist, so the session has
+  to start with `--dangerously-load-development-channels`, which asks for
+  confirmation. Team and Enterprise orgs must also enable channels.
+- **No delivery acknowledgement.** If the session didn't load the channel,
+  Claude Code "drops the events silently and returns no error to your server."
+  The caller only finds out from a timeout. That is also why the prototype
+  doesn't add the server to `plugin.json` yet: every session would start it and
+  register, including sessions that will drop every task.
+- **Busy sessions batch.** "If several notifications arrive while Claude is
+  busy, they're delivered together on the next turn". Matching by `task_id`
+  survives that, but the task waits for whatever the owner is doing.
+- **Nothing is enforced, only requested.** The task runs inside someone's own
+  interactive session, with that session's permissions, tools, working tree and
+  context budget. `deny_paths`, `isolation` and cost caps can't be applied; the
+  most agent-team can do is ask in the channel's `instructions`. The task and
+  its answer also stay in the owner's conversation history.
+- **Answering through `reply` is up to the model.** The instructions say to
+  call `reply` exactly once with the `task_id`. If Claude answers in the
+  transcript instead, the caller times out.
+- **Desktop app sessions.** The channels pages only describe CLI sessions
+  started with a flag. Nothing documents loading a channel into a desktop Code
+  tab session.
+
+### Channel prototype
+
+- `channel/server.js`: a dependency-free stdio MCP server. It declares
+  `claude/channel`, exposes `reply(task_id, text)`, and listens on a Unix
+  socket at `~/.cache/agent-team/channels/<session-id>.sock` in a `0700`
+  directory, which is the only access control. It writes a registry entry
+  (`session_id`, `cwd`, `pid`, `socket`) next to the socket and removes both
+  when its stdin closes. It doesn't declare `claude/channel/permission`, so tool
+  approvals stay in the owner's terminal.
+- `src/channel.js`: `listChannels()` reads the registry and skips dead pids;
+  `askSession(id, text)` sends `{task_id, text}` and waits for the matching
+  reply or the timeout.
+- `scripts/ask-session.mjs`: `--list`, or `--session <id> "task"`.
+- `test/channel.test.js`: 5 tests that drive the server over stdio the way
+  Claude Code does, including two tasks answered out of order and a late reply
+  to an abandoned task. They prove the plumbing only. No fake can show that a
+  real session calls `reply` rather than answering in its transcript; that
+  needs the supervised run below.
+
+Not wired into the dispatcher. A `claude-local` adapter would need a decision on
+workspaces: the session works in its own checkout, so agent-team's worktree and
+`deny_paths` checks don't apply.
+
+### Supervised run (not yet done)
+
+1. In a scratch directory with a `.mcp.json` naming `channel/server.js` under
+   the key `agent-team`, start a fresh session (never one in use):
+   `claude --dangerously-load-development-channels server:agent-team`, and
+   accept the prompt.
+2. From another terminal, `node scripts/ask-session.mjs --list` should show the
+   session, and `--session <id> "What version is in package.json?"` should
+   print the answer.
+3. Check in the session that the task arrived as a `<channel>` event and that
+   Claude answered with the `reply` tool.
+
+### Recommendation
+
+- **Local CLI sessions: build as experimental**, if it's acceptable for the
+  target session to start with `--dangerously-load-development-channels` until
+  channels leave research preview. If that flag is not acceptable to ship, wait
+  for the allowlist to open. Either way, the supervised run comes first.
+- **Desktop app sessions, and CLI sessions started without the channel: wait.**
+  Listing alone doesn't make a delegation target. Revisit if the inbox socket's
+  message frame and reply path are documented for non-child senders, or if
+  `--cloud <session-id>` gains a documented way to read the reply.
