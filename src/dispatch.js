@@ -40,7 +40,7 @@ export async function dispatch({
     const result = await runMember({
       config, projectRoot, member, task, adapterDir,
       assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0,
-      teams: teamKeys(projectRoot)
+      teams: teamKeys(projectRoot), originRoot: projectRoot
     });
     recordRun(projectRoot, startedAt, task, runNode(result));
     return result;
@@ -219,6 +219,23 @@ async function runCloudTeam(ctx, spec, repo) {
   };
 }
 
+// The stand-in for createWorkspace when a member runs in someone's live Claude Code session.
+// The task lands in that person's interactive session, so only a dispatch started in this
+// project may send one: another project's team delegating here is refused.
+function prepareSession(ctx, resolved) {
+  const { projectRoot, member } = ctx;
+  if (ctx.originRoot !== projectRoot || ctx.cloudSource) {
+    throw new Error(
+      `member "${member}": a "${resolved.agent}" member runs in someone's live session, so only ` +
+      `this project's own team can delegate to it — refusing a delegation from ${ctx.originRoot}`
+    );
+  }
+  return {
+    workspace: { dir: mkdtempSync(join(tmpdir(), `agent-team-${member}-`)), branch: null, id: null, kind: 'session' },
+    session: { id: resolved.session_id, project_root: projectRoot }
+  };
+}
+
 // The stand-in for createWorkspace when a member runs in the cloud. Nothing is cloned here;
 // the session clones origin itself, so deny_paths is checked against that commit instead and
 // a match refuses the run. The local directory only gives the adapter a cwd.
@@ -289,7 +306,10 @@ async function runMember(ctx) {
 
   let workspace;
   let cloud = null;
-  if (caps.remote === true) {
+  let session = null;
+  if (caps.live_session === true) {
+    ({ workspace, session } = prepareSession(ctx, resolved));
+  } else if (caps.remote === true) {
     ({ workspace, cloud } = prepareCloud(ctx, resolved));
   } else if (ctx.cloudSource) {
     throw new Error(`member "${member}": a team named by GitHub repository can only run on "${CLOUD_AGENT}", got "${resolved.agent}"`);
@@ -363,7 +383,7 @@ async function runMember(ctx) {
       const brief = buildBrief({
         resolved, task, cwd: workspace.dir, denyPaths: config.deny_paths,
         skillText, dialectText, timeoutSec: Math.floor(timeoutMs / 1000),
-        depth, maxDepth, priorResults, cloud
+        depth, maxDepth, priorResults, cloud, session
       });
 
       result = await runAdapter(adapterPath(adapterDir, resolved.agent), 'run', {
@@ -426,7 +446,8 @@ async function runMember(ctx) {
       member, agent: resolved.agent, model: resolved.model, advisor: resolved.advisor,
       usage, elapsed_ms: Date.now() - started, warning: resolved.warning,
       workspace, unmatchedDenyPaths, droppedSymlinks, depth, delegated,
-      ...(cloud ? { cloud } : {})
+      ...(cloud ? { cloud } : {}),
+      ...(session ? { session } : {})
     };
   } catch (err) {
     // A throw here (e.g. a reporting-line violation) means this frame's workspace
