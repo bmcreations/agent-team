@@ -380,24 +380,30 @@ Not wired into the dispatcher. A `claude-local` adapter would need a decision on
 workspaces: the session works in its own checkout, so agent-team's worktree and
 `deny_paths` checks don't apply.
 
-### Supervised run (not yet done)
+### Supervised run (2026-10-09)
 
-1. In a scratch directory with a `.mcp.json` naming `channel/server.js` under
-   the key `agent-team`, start a fresh session (never one in use):
-   `claude --dangerously-load-development-channels server:agent-team`, and
-   accept the prompt.
-2. From another terminal, `node scripts/ask-session.mjs --list` should show the
-   session, and `--session <id> "What version is in package.json?"` should
-   print the answer.
-3. Check in the session that the task arrived as a `<channel>` event and that
-   Claude answered with the `reply` tool.
+A fresh session in a scratch clone of `main`, started with
+`claude --dangerously-load-development-channels server:agent-team`:
+
+- `ask-session.mjs --list` showed the session under the same id that
+  `claude agents --json` reports for it.
+- `--session <id> "What version is in package.json in your working directory?"`
+  printed `0.4.0` after 6.1 s, under the task id that was sent. `0.4.0` is
+  correct for `main`. The answer came through the `reply` tool, since that is
+  the only path back to the caller.
+- A session left on the development-channels warning had already registered
+  (the server starts before the prompt is answered) but dropped two tasks. A
+  registry entry therefore does not mean the session can take work; only a
+  timeout says so.
+- Not checked: how the task looks in the owner's transcript. The terminal
+  capture used during the run didn't show the redrawn screen.
 
 ### Recommendation
 
 - **Local CLI sessions: build as experimental**, if it's acceptable for the
   target session to start with `--dangerously-load-development-channels` until
   channels leave research preview. If that flag is not acceptable to ship, wait
-  for the allowlist to open. Either way, the supervised run comes first.
+  for the allowlist to open. The supervised run above passed.
 - **Desktop app sessions, and CLI sessions started without the channel: wait.**
   Listing alone doesn't make a delegation target. Revisit if the inbox socket's
   message frame and reply path are documented for non-child senders, or if
