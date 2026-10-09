@@ -115,6 +115,16 @@ On macOS with Docker Desktop installed, `--sandbox read-only` refuses to start b
 `/var/run/docker.sock` is a symlink, so `read-only` grok members fail. They fail closed; grok
 does not run unprotected.
 
+### claude-session
+
+Experimental. Sends the task to a running Claude Code session through the agent-team channel
+(`channel/server.js`) and returns the session's reply as the summary. `probe` succeeds when
+any session is running the channel; the run picks which one from the brief and fails if none
+or several match. Capabilities declare `live_session: true`, so the dispatcher creates no
+workspace and refuses delegations from another project. The result never carries a diff,
+findings or a delegation. Setup and limits are under
+[Live session members](configuration.md#live-session-members-experimental).
+
 ### mock
 
 For tests. `run` reads a JSON script from `AGENT_TEAM_MOCK_SCRIPT` and prints it back with the

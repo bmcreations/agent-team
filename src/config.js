@@ -7,6 +7,7 @@ export const CONFIG_RELPATH = join('.claude', 'agent-team.json');
 
 // The adapter that runs a member as a Managed Agents session instead of a local CLI.
 export const CLOUD_AGENT = 'claude-cloud';
+export const SESSION_AGENT = 'claude-session';
 
 export const ISOLATIONS = ['none', 'read-only', 'workspace'];
 export const DELIVERABLES = ['diff', 'review', 'document', 'decision'];
@@ -384,6 +385,16 @@ export function parseConfig(raw, path) {
         `${path}: member "${name}": a "${CLOUD_AGENT}" member works in a clone of the repo, so ` +
         'isolation "none" has no meaning for it — use "read-only" or "workspace"'
       );
+    }
+    // Pins a claude-session member to one running session; without it the member uses the
+    // only session running in the project.
+    if (m.session_id !== undefined && m.session_id !== null) {
+      if (m.agent !== SESSION_AGENT) {
+        throw new Error(`${path}: member "${name}": "session_id" only applies to a "${SESSION_AGENT}" member`);
+      }
+      if (typeof m.session_id !== 'string' || m.session_id === '') {
+        throw new Error(`${path}: member "${name}": "session_id" must be a non-empty string — got ${JSON.stringify(m.session_id)}`);
+      }
     }
     // The only way past the refusal in src/dispatch.js when deny_paths matches a file the
     // cloud will clone. Strictly true, so a stray "yes" or 1 cannot switch it on.

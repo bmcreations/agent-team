@@ -91,7 +91,10 @@ node ~/.claude/plugins/cache/agent-team/agent-team/<version>/bin/agent-team.js o
 
 ## Adapter status
 
-The runtime ships four adapters: claude, codex, grok, and mock. Each is checked against a
+The runtime ships four adapters: claude, codex, grok, and mock. Two more are opt-in:
+`claude-cloud` runs a member as a Managed Agents session, and the experimental `claude-session`
+hands a task to a Claude Code session already running on this machine
+([Live session members](docs/configuration.md#live-session-members-experimental)). Each is checked against a
 conformance suite, but the suite accepts a graceful failure as conformant, so passing it
 proves the adapter honours the contract rather than that it works end to end. Codex has been
 exercised against a run that reached the model; grok has not, so its success-response parser

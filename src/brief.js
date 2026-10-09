@@ -90,7 +90,7 @@ function advisorSection() {
 
 export function buildBrief({
   resolved, task, cwd, denyPaths, skillText = null, dialectText = null,
-  timeoutSec = 900, depth = 0, maxDepth = 3, priorResults = null, cloud = null
+  timeoutSec = 900, depth = 0, maxDepth = 3, priorResults = null, cloud = null, session = null
 }) {
   if (!Array.isArray(denyPaths) || denyPaths.length === 0) {
     throw new Error(
@@ -138,6 +138,9 @@ export function buildBrief({
     max_depth: maxDepth,
     // Only for a claude-cloud member: the GitHub repository and branch its session clones,
     // the cost cap, and the branch a workspace member pushes its work to.
-    ...(cloud ? { cloud } : {})
+    ...(cloud ? { cloud } : {}),
+    // Only for a claude-session member: the session to use, if pinned, and the project whose
+    // running session it falls back to.
+    ...(session ? { session } : {})
   };
 }
