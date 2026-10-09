@@ -373,9 +373,11 @@ The limits:
 - `scripts/ask-session.mjs`: `--list`, or `[--session <id>] "task"`. Without
   `--session` it sends to the only ready session. A registry entry is `ready`
   once Claude Code completes the MCP handshake with the server; the server
-  registers before that. Whether the handshake waits for the
-  development-channels prompt is not documented and not yet checked, so `ready`
-  may still include a session stuck on that prompt.
+  registers before that. Checked on 2026-10-09 with Claude Code 2.1.294: the
+  handshake finishes while the development-channels prompt is still
+  unanswered, so a session stuck on that prompt shows as `ready` and drops
+  tasks. A session stuck on the earlier folder-trust prompt hasn't started the
+  server, so it isn't listed at all.
 - `test/channel.test.js`: 8 tests that drive the server over stdio the way
   Claude Code does, including two tasks answered out of order and a late reply
   to an abandoned task. They prove the plumbing only. No fake can show that a
