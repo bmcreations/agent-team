@@ -8,6 +8,9 @@ import { renderOrg } from '../src/org.js';
 import { readRuns, renderReport } from '../src/report.js';
 import { spawnSync } from 'node:child_process';
 import { runMcpServer } from '../src/mcp.js';
+import { runThroughSupervisor, isLiveMember } from '../src/client.js';
+import { openStore } from '../src/store.js';
+import { Supervisor, defaultSocketPath, defaultStorePath } from '../src/supervisor.js';
 import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -30,6 +33,7 @@ const USAGE =
   '       agent-team org [--project <dir>]\n' +
   '       agent-team report [--project <dir>] [--all] [--json]\n' +
   '       agent-team mcp\n' +
+  '       agent-team serve\n' +
   '       agent-team channel enable|disable [--project <dir>]\n' +
   '       agent-team channel list [--json]\n' +
   '       agent-team channel ask --task <text> [--session <id>] [--project <dir>] [--timeout <sec>]\n';
@@ -48,6 +52,26 @@ if (positionals[0] === 'mcp') {
   await runMcpServer();
   await new Promise((resolve) => process.stdout.write('', resolve));   // let queued replies flush
   process.exit(0);
+}
+
+// The machine's supervisor, in the foreground until SIGINT/SIGTERM.
+if (positionals[0] === 'serve') {
+  const store = openStore(defaultStorePath());
+  const sup = new Supervisor({
+    store, adapterDir: join(ROOT, 'adapters'), skillsDir: join(ROOT, 'skills'),
+    socketPath: defaultSocketPath()
+  });
+  try {
+    await sup.start();
+  } catch (err) {
+    store.close();
+    fail(err);
+  }
+  process.stderr.write(`agent-team: supervisor listening on ${defaultSocketPath()}\n`);
+  const shutdown = async () => { await sup.close(); store.close(); process.exit(0); };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise(() => {});   // the listening socket keeps the process alive; signals exit it
 }
 
 if (positionals[0] === 'org') {
@@ -126,14 +150,17 @@ if (!values.member || !values.task) {
 }
 
 try {
-  const result = await dispatch({
+  const opts = {
     projectRoot: values.project,
     member: values.member,
     task: values.task,
     adapterDir: join(ROOT, 'adapters'),
     skillsDir: join(ROOT, 'skills'),
     timeoutMs: Number(values.timeout) * 1000
-  });
+  };
+  const result = await isLiveMember(opts)
+    ? await runThroughSupervisor(opts)
+    : await dispatch(opts);
 
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   process.exit(result.status === 'ok' ? 0 : 1);
