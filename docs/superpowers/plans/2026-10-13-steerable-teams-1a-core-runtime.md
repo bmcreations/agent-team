@@ -18,9 +18,11 @@
 - Error messages name the member: `member "x": …` or `"x" is not a direct report of "lead"`.
 - Every adapter output line is untrusted: shape-check it in `parseAdapterLine` before use; drop anything that fails.
 - Every team tool schema declares `annotations: { readOnlyHint: true }`. Without it, a member in `--permission-mode plan` is denied the call even when the tool is in `--allowedTools`.
-- `ack` means the harness consumed the message, not that it was written. A message offered but not acked when the turn ends (`idle`) or the process exits goes back to `queued`.
+- `ack` means the harness consumed the message, not that it was written. Each message is delivered once, either as a `wait_for` result or by an ack. A member blocked in `wait_for` has provably not consumed anything still `offered`, so `wait_for` reclaims offered messages too; the stdin copy may later also surface in the harness context, and its ack is then a no-op. An offered message is requeued only when the process exits, or when it is still unacked at a second `idle` (the first may race the ack). A member is not stopped while it has unacked offers.
 - Messages are rendered to members as `[from: <name> (<kind>)] <text>`, kind one of `human`, `manager`, `report`.
 - Existing tests must pass unchanged: `npm test` is green before and after every task. `src/dispatch.js`'s `dispatch()` keeps its signature and behaviour; the `mock` adapter is not modified.
+- `Supervisor.close()` stops the socket only; spawned adapters keep running until they exit. Plan 1b adds stopping live members on shutdown and restart recovery.
+- Shared test helpers live in `test/helpers/live.js`; test files import them rather than copying (importing a test file would re-register its tests).
 - Test runner: `node --test 'test/**/*.test.js'`; a single file: `node --test test/<name>.test.js`.
 
 ## Review Focus
@@ -28,7 +30,8 @@
 - A member that calls a tool after it has finished, or with a token the supervisor never issued, gets a tool error; the supervisor does not throw. Test in Task 6.
 - A human message sent to a member that is still `queued` (not launched) is delivered once, after launch. Test in Task 6.
 - An adapter that exits without a `result` line, or prints garbage, fails that member with its stderr tail, and the manager hears `finished failed: …`. Test in Task 5.
-- A message offered mid-turn but never acked is re-queued at `idle` and offered again, never delivered twice. Test in Task 1 (store) and Task 5 (supervisor).
+- A message pushed to a member's stdin just before it calls `wait_for` is returned by that `wait_for`, not stranded for the full timeout. Test in Task 1 (store `claimForWait`) and Task 6 (the steer test exercises both orders).
+- A leaf member's `wait_for` blocks for its manager; only a member that has delegated and has no open reports gets the immediate `no open reports` reply. Test in Task 6.
 - A delegate to a non-report, past `max_depth`, or past `max_delegations` returns a tool error to the caller and the run carries on. Test in Task 6.
 
 ---
@@ -60,7 +63,7 @@
 - Test: `test/store.test.js`
 
 **Interfaces:**
-- Produces: `openStore(path) → store` where `store` has: `close()`, `createRun({project, task}) → runId`, `run(id)`, `setRunRoot(runId, memberId)`, `finishRun(runId, status)`, `addMember({runId, parentId, name, task, depth}) → {id, token}`, `member(id)`, `memberByToken(token)`, `members(runId)`, `children(memberId)`, `setState(id, state)`, `setHarness(id, harnessId)`, `setWorkspace(id, dir)`, `setResult(id, resultObject)`, `addEvent(memberId, kind, body)`, `events(memberId)`, `enqueue({to, fromKind, fromName, reportId?, text}) → messageId`, `takeQueued(memberId, reportIds?) → rows`, `offerQueued(memberId) → rows`, `ackMessage(id)`, `requeue(id)`, `message(id)`, `addQuestion({memberId, question, options}) → questionId`, `question(id)`, `answerQuestion(id, answer, by)`, `openQuestions()`.
+- Produces: `openStore(path) → store` where `store` has: `close()`, `createRun({project, task}) → runId`, `run(id)`, `setRunRoot(runId, memberId)`, `finishRun(runId, status)`, `addMember({runId, parentId, name, task, depth}) → {id, token}`, `member(id)`, `memberByToken(token)`, `members(runId)`, `children(memberId)`, `setState(id, state)`, `setHarness(id, harnessId)`, `setWorkspace(id, dir)`, `setResult(id, resultObject)`, `addEvent(memberId, kind, body)`, `events(memberId)`, `enqueue({to, fromKind, fromName, reportId?, text}) → messageId`, `takeQueued(memberId, reportIds?) → rows`, `claimForWait(memberId, reportIds?) → rows`, `offerQueued(memberId) → rows`, `ackMessage(id)`, `requeue(id)`, `message(id)`, `addQuestion({memberId, question, options}) → questionId`, `question(id)`, `answerQuestion(id, answer, by)`, `openQuestions()`.
 - Member rows: `{id, run_id, parent_id, name, task, depth, state, token, harness_id, workspace, result, created_at, updated_at}` with `result` parsed from JSON. Message rows: `{id, to_member, from_kind, from_name, report_id, text, state, at}`; `state` ∈ `queued | offered | delivered`.
 
 - [ ] **Step 1: Raise the Node floor**
@@ -123,6 +126,17 @@ test('takeQueued with report ids leaves other reports\' messages queued', () => 
   store.enqueue({ to: lead.id, fromKind: 'human', fromName: 'brandon', text: 'h' });
   assert.deepEqual(store.takeQueued(lead.id, [11]).map((m) => m.text), ['b', 'h']);
   assert.deepEqual(store.takeQueued(lead.id).map((m) => m.text), ['a']);
+});
+
+test('claimForWait takes offered messages as well as queued ones', () => {
+  const { store, lead } = seeded();
+  const offered = store.enqueue({ to: lead.id, fromKind: 'manager', fromName: 'boss', text: 'one' });
+  store.offerQueued(lead.id);
+  const queued = store.enqueue({ to: lead.id, fromKind: 'human', fromName: 'brandon', text: 'two' });
+  assert.deepEqual(store.claimForWait(lead.id).map((m) => m.id), [offered, queued]);
+  store.ackMessage(offered);               // the stdin copy's late ack changes nothing
+  assert.equal(store.message(offered).state, 'delivered');
+  assert.deepEqual(store.claimForWait(lead.id), []);
 });
 
 test('questions open, then close with who answered', () => {
@@ -250,6 +264,14 @@ export function openStore(path) {
       for (const m of rows) setMessageState(m.id, 'queued', 'offered');
       return rows.map((m) => ({ ...m, state: 'offered' }));
     },
+    // A member blocked in wait_for cannot be consuming its stdin, so messages already offered
+    // to it are as undelivered as queued ones; the tool result delivers both.
+    claimForWait(memberId, reportIds = null) {
+      const rows = q("SELECT * FROM messages WHERE to_member = ? AND state IN ('queued', 'offered') ORDER BY id")
+        .all(memberId).filter((m) => reportIds == null || m.report_id == null || reportIds.includes(m.report_id));
+      for (const m of rows) q("UPDATE messages SET state = 'delivered' WHERE id = ?").run(m.id);
+      return rows.map((m) => ({ ...m, state: 'delivered' }));
+    },
     ackMessage: (id) => setMessageState(id, 'offered', 'delivered'),
     requeue: (id) => setMessageState(id, 'offered', 'queued'),
     message: (id) => q('SELECT * FROM messages WHERE id = ?').get(id),
@@ -268,7 +290,7 @@ export function openStore(path) {
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `node --test test/store.test.js`
-Expected: PASS, 6 tests.
+Expected: PASS, 7 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -621,6 +643,7 @@ git commit -m "feat(rpc): add the supervisor socket"
 
 **Interfaces:**
 - Produces: `export async function resolveCaps(ctx) → {resolved, caps}`; `export function prepareMember(ctx, {resolved, caps}) → {dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks}`; `export async function runMember(ctx)` (unchanged behaviour). `ctx` is `{config, projectRoot, member, task, adapterDir, assignments, skillsDir, env, timeoutMs, budget, depth}` as today.
+- Produces: `export function teamKeys(root)` (today private at `src/dispatch.js:124`); the supervisor passes `teams: teamKeys(projectRoot), originRoot: projectRoot` in every `ctx`, as `dispatch()` does at line 43, so cross-team members keep working.
 - Produces: `config.defaults.max_parallel` (integer ≥ 1, default 3).
 
 - [ ] **Step 1: Write the failing config test**
@@ -656,7 +679,7 @@ In `src/config.js`, add `max_parallel: 3,` to the `defaults` object after `max_d
 
 In `src/dispatch.js`:
 
-1. Add `export` to `async function runMember(ctx)`.
+1. Add `export` to `async function runMember(ctx)` and to `function teamKeys(root)`.
 2. Add a new exported function above `runMember`, holding the first part of its body (the probe, `resolveMember`, the `assignments` write, and `readCapabilities`):
 
 ```js
@@ -709,6 +732,7 @@ git commit -m "refactor(dispatch): expose member preparation for the supervisor"
 **Files:**
 - Create: `src/team-tools.js`, `src/supervisor.js`, `adapters/mock-live` (executable)
 - Create: `test/fixtures/session-crash` (executable)
+- Create: `test/helpers/live.js` (exports `adapterDir`, `project`, `supervise`, `LIVE`)
 - Test: `test/supervisor.test.js`
 
 **Interfaces:**
@@ -938,7 +962,7 @@ else if (sub === 'capabilities') {
 
 - [ ] **Step 4: Write the failing supervisor tests**
 
-Create `test/supervisor.test.js`:
+Create `test/helpers/live.js` with everything below from the `node:fs` import through `const LIVE = …` (export `adapterDir`, `project`, `supervise` and `LIVE`), and `test/supervisor.test.js` with the four tests, importing `{ project, supervise, LIVE }` from `./helpers/live.js`. Shown together here:
 
 ```js
 import { test } from 'node:test';
@@ -956,7 +980,7 @@ const repoAdapters = new URL('../adapters/', import.meta.url).pathname;
 const fixtures = new URL('./fixtures/', import.meta.url).pathname;
 
 // An adapter directory with the real adapters plus the crash fixture under the name "crash".
-function adapterDir() {
+export function adapterDir() {
   const dir = mkdtempSync(join(tmpdir(), 'at-sup-adapters-'));
   for (const name of readdirSync(repoAdapters)) {
     copyFileSync(join(repoAdapters, name), join(dir, name));
@@ -998,7 +1022,7 @@ export async function supervise(script, opts = {}) {
   return { sup, store };
 }
 
-const LIVE = (extra = {}) => ({ agent: 'mock-live', isolation: 'none', ...extra });
+export const LIVE = (extra = {}) => ({ agent: 'mock-live', isolation: 'none', ...extra });
 
 test('a v2 member with no reports runs to its result and the run finishes', async () => {
   const { root, script } = project({ solo: LIVE() }, {
@@ -1072,7 +1096,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from './config.js';
 import { buildBrief } from './brief.js';
-import { resolveCaps, prepareMember, runMember } from './dispatch.js';
+import { resolveCaps, prepareMember, runMember, teamKeys } from './dispatch.js';
 import { pruneWorkspace } from './workspace.js';
 import { MemberSession } from './sessions.js';
 import { serveRpc } from './rpc.js';
@@ -1180,7 +1204,7 @@ export class Supervisor {
     const run = this.#runs.get(m.run_id);
     // Registered before any await, so #drain counts this member against the caps at once.
     const rt = { member: m, session: null, resolved: null, workspace: null, result: null,
-                 offered: new Set(), idle: false, stopping: false, waiter: null, question: null };
+                 offered: new Set(), staleOffers: new Set(), idle: false, stopping: false, waiter: null, question: null };
     this.#live.set(id, rt);
     this.store.setState(id, 'running');
     this.store.addEvent(id, 'started', {});
@@ -1188,7 +1212,8 @@ export class Supervisor {
     const ctx = {
       config: run.config, projectRoot: run.projectRoot, member: m.name, task: m.task,
       adapterDir: this.adapterDir, assignments: {}, skillsDir: this.skillsDir, env: this.env,
-      timeoutMs: this.timeoutMs, budget: run.budget, depth: m.depth
+      timeoutMs: this.timeoutMs, budget: run.budget, depth: m.depth,
+      teams: teamKeys(run.projectRoot), originRoot: run.projectRoot
     };
     // Teams in other projects and v1 adapters keep today's one-shot loop.
     if (run.config.members[m.name].team) return this.#finish(id, await runMember(ctx));
@@ -1224,10 +1249,15 @@ export class Supervisor {
     else if (msg.type === 'event') this.store.addEvent(id, msg.kind, msg);
     else if (msg.type === 'ack') {
       if (rt.offered.delete(msg.message_id)) this.store.ackMessage(msg.message_id);
+      rt.staleOffers.delete(msg.message_id);
+      if (rt.idle) this.#pump(id);
     } else if (msg.type === 'idle') {
-      // Written but not consumed before the turn ended: back to the queue, offered again below.
-      for (const mid of rt.offered) this.store.requeue(mid);
-      rt.offered.clear();
+      // An offer can still be in flight when the turn ends, so requeueing it now would write it
+      // twice. Only an offer that is still unacked at a second idle is treated as lost.
+      for (const mid of rt.staleOffers) {
+        if (rt.offered.delete(mid)) this.store.requeue(mid);
+      }
+      rt.staleOffers = new Set(rt.offered);
       rt.idle = true;
       this.#pump(id);
     } else if (msg.type === 'result') rt.result = msg;
@@ -1283,7 +1313,7 @@ export class Supervisor {
     const rt = this.#live.get(id);
     if (!rt || !rt.session) return;    // queued, finished, or a v1 member: messages wait
     if (rt.waiter) {
-      const msgs = this.store.takeQueued(id, rt.waiter.reportIds);
+      const msgs = this.#claim(rt, id, rt.waiter.reportIds);
       if (msgs.length) this.#resolveWaiter(id, { messages: msgs.map(render), timed_out: false });
       return;
     }
@@ -1294,10 +1324,16 @@ export class Supervisor {
       rt.session.send({ type: 'message', id: m.id, from: label(m), text: m.text });
     }
     if (msgs.length) { rt.idle = false; return; }
-    if (rt.idle && this.#openReports(id) === 0) {
+    if (rt.idle && rt.offered.size === 0 && this.#openReports(id) === 0) {
       rt.stopping = true;
       rt.session.send({ type: 'stop' });
     }
+  }
+
+  #claim(rt, id, reportIds) {
+    const msgs = this.store.claimForWait(id, reportIds);
+    for (const m of msgs) { rt.offered.delete(m.id); rt.staleOffers.delete(m.id); }
+    return msgs;
   }
 
   #resolveWaiter(id, value) {
@@ -1376,7 +1412,7 @@ Expected: PASS. `test/manifest.test.js` or `test/conformance.test.js` may enumer
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/team-tools.js src/supervisor.js adapters/mock-live test/fixtures/session-crash test/supervisor.test.js
+git add src/team-tools.js src/supervisor.js adapters/mock-live test/fixtures/session-crash test/helpers/live.js test/supervisor.test.js
 git commit -m "feat(supervisor): run v2 members live with inbox delivery"
 ```
 
@@ -1394,7 +1430,7 @@ git commit -m "feat(supervisor): run v2 members live with inbox delivery"
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `test/team-tools.test.js`. It repeats the `project`, `supervise`, `adapterDir` and `LIVE` helpers from `test/supervisor.test.js` verbatim (copy the block from `process.env.AGENT_TEAM_WORKSPACE_ROOT = …` through `const LIVE = …`, keeping the imports it needs), then adds:
+Create `test/team-tools.test.js`, importing `test`, `assert`, and `{ project, supervise, LIVE }` from `./helpers/live.js`, then:
 
 ```js
 const TEAM = {
@@ -1440,6 +1476,27 @@ test('a manager steers a report that is running in parallel', async () => {
     const at = (m, kind) => store.events(m.id).find((e) => e.kind === kind).at;
     assert.ok(at(b, 'started') <= at(a, 'finished'));
     assert.deepEqual(members.map((m) => m.state), ['done', 'done', 'done']);
+  } finally { await sup.close(); }
+});
+
+test('wait_for with no open reports returns at once only for a member that delegated', async () => {
+  const { root, script } = project(TEAM, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'a', task: 'one' }, save: 'ra' },
+        { tool: 'wait_for', args: {}, until_finished: ['$ra.report_id'] },
+        { tool: 'wait_for', args: {} }
+      ] },
+      a: { steps: [{ tool: 'wait_for', args: { timeout_s: 1 } }] }
+    }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    const result = await sup.waitRun(runId);
+    assert.equal(result.tool_results.at(-1).result.note, 'no open reports');
+    const a = store.members(runId).find((m) => m.name === 'a');
+    assert.equal(a.result.tool_results[0].result.timed_out, true, 'the leaf blocked until its timeout');
   } finally { await sup.close(); }
 });
 
@@ -1615,9 +1672,11 @@ and replace the four placeholder methods at the end of the class with:
   #waitFor(id, { report_ids = null, timeout_s } = {}) {
     const rt = this.#live.get(id);
     const reportIds = Array.isArray(report_ids) ? report_ids.filter(Number.isInteger) : null;
-    const msgs = this.store.takeQueued(id, reportIds);
+    const msgs = this.#claim(rt, id, reportIds);
     if (msgs.length) return { messages: msgs.map(render), timed_out: false };
-    if (reportIds == null && this.#openReports(id) === 0) {
+    // Only a member that has delegated can have nothing left to wait for; a leaf calling
+    // wait_for is waiting on its manager and blocks.
+    if (reportIds == null && this.store.children(id).length > 0 && this.#openReports(id) === 0) {
       return { messages: [], timed_out: false, note: 'no open reports' };
     }
     const seconds = clampSeconds(timeout_s, WAIT_DEFAULT_S, WAIT_MAX_S);
@@ -1645,7 +1704,7 @@ and replace the four placeholder methods at the end of the class with:
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run: `node --test test/team-tools.test.js test/supervisor.test.js`
-Expected: PASS, 11 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1832,7 +1891,7 @@ git commit -m "feat(mcp): serve the team tools to a harness"
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `test/client.test.js`. Copy `project` from `test/supervisor.test.js` (the same helper; `isolation: 'none'` members), then:
+Create `test/client.test.js`, importing `test`, `assert`, `mkdtempSync`, `tmpdir`, `join`, and `{ project, LIVE }` from `./helpers/live.js`, then:
 
 ```js
 import { runThroughSupervisor, isLiveMember } from '../src/client.js';
@@ -1840,7 +1899,6 @@ import { openStore } from '../src/store.js';
 import { Supervisor } from '../src/supervisor.js';
 
 const adapterDir = new URL('../adapters/', import.meta.url).pathname;
-const LIVE = (extra = {}) => ({ agent: 'mock-live', isolation: 'none', ...extra });
 
 function env(script) {
   const dir = mkdtempSync(join(tmpdir(), 'at-cl-'));
@@ -1880,7 +1938,7 @@ test('with a supervisor running, a run is submitted to it', async () => {
 });
 ```
 
-(Keep the imports the copied `project` helper needs: `test`, `assert`, `mkdtempSync`, `mkdirSync`, `writeFileSync`, `tmpdir`, `join`, `execFileSync`. Set `process.env.AGENT_TEAM_WORKSPACE_ROOT` to a temp directory at the top, as the other suites do.)
+(`test/helpers/live.js` sets `process.env.AGENT_TEAM_WORKSPACE_ROOT` on import.)
 
 - [ ] **Step 2: Run the tests to see them fail**
 
