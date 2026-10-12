@@ -208,13 +208,24 @@ GitHub-named teams run as a single cloud session and stay one-shot.
 One page served by `serve`, in plain HTML and JavaScript with no build step, driven by the JSON
 API and server-sent events.
 
-- **Run list**: live status, cost, and elapsed time, with a project switcher and an "All
-  projects" view.
-- **Run page**: the org tree with live member states and any open questions pinned at the top,
-  next to a merged timeline of messages between members and humans. Members are shown by name
-  and role, so the run reads as a team conversation rather than a list of processes.
-- **Member panel**: the live transcript (text, collapsed tool calls, authored messages), a
-  message box, and controls for pause, pause now, resume, cancel, take over, and answer.
+The layout borrows from Agent Picnic's activity screen, as shown in Shane Mac's launch demo on
+2026-10-12. That screen has a sidebar of agents, each tagged with its harness and state, and a
+main column with a "Needs you" section above a history feed that groups each agent's tool
+calls under its task and collapses repeats ("12 times").
+
+- **Sidebar**: a search box, then projects, each listing its members by name, role, harness
+  tag (`claude`, `codex`), and live state. Running runs sit under their project.
+- **Needs you**: pinned above everything else, across all projects. It holds open `ask_human`
+  questions, stalled members, and members paused by the cost cap, each answerable in place.
+- **Activity**: the default view. Filters for member and project, a count of today's actions,
+  and a history feed: one entry per member task, with its tool calls nested under it and
+  identical consecutive calls collapsed into a count.
+- **Run page**: the org tree with live member states, next to a merged timeline of messages
+  between members and humans, so the run reads as a team conversation rather than a list of
+  processes.
+- **Member panel**: the live transcript (text, collapsed tool calls, authored messages), what
+  the member can reach (workspace, `read_only`, `deny_paths`), a message box, and controls for
+  pause, pause now, resume, cancel, take over, and answer.
 
 ## Errors and recovery
 
