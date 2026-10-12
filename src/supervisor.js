@@ -66,7 +66,8 @@ export class Supervisor {
   send({ member_id, text, from = 'local' }) {
     const m = this.store.member(member_id);
     if (!m) throw new Error(`unknown member ${member_id}`);
-    if (TERMINAL.has(m.state)) throw new Error(`"${m.name}" has finished — delegate a new task`);
+    // A stopping member has been told to stop and will not read another message.
+    if (TERMINAL.has(m.state) || this.#live.get(member_id)?.stopping) throw new Error(`"${m.name}" has finished — delegate a new task`);
     if (typeof text !== 'string' || !text.trim()) throw new Error('a message needs text');
     const id = this.store.enqueue({ to: member_id, fromKind: 'human', fromName: from, text });
     this.#pump(member_id);

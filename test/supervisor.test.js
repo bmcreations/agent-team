@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { project, supervise, LIVE } from './helpers/live.js';
+import { copyFileSync, chmodSync } from 'node:fs';
+import { join } from 'node:path';
+import { project, adapterDir, supervise, LIVE } from './helpers/live.js';
 
 test('a v2 member with no reports runs to its result and the run finishes', async () => {
   const { root, script } = project({ solo: LIVE() }, {
@@ -56,5 +58,25 @@ test('report_progress from a root member is recorded as an event', async () => {
     const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
     await sup.waitRun(runId);
     assert.ok(store.events(memberId).some((e) => e.kind === 'progress' && e.body.text === 'half way'));
+  } finally { await sup.close(); }
+});
+
+test('a message to a member that is stopping is refused and nothing is left queued', async () => {
+  const { root, script } = project({ solo: { agent: 'slow', isolation: 'none' } }, {});
+  const dir = adapterDir();
+  copyFileSync(new URL('./fixtures/session-slow-stop', import.meta.url).pathname, join(dir, 'slow'));
+  chmodSync(join(dir, 'slow'), 0o755);
+  const { sup, store } = await supervise(script, { adapterDir: dir });
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    const deadline = Date.now() + 10_000;
+    while (!store.events(memberId).some((e) => e.body.text === 'stop-received')) {
+      assert.ok(Date.now() < deadline, 'member never received stop');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(store.member(memberId).state, 'running');
+    assert.throws(() => sup.send({ member_id: memberId, text: 'too late', from: 'brandon' }), /"solo" has finished/);
+    assert.deepEqual(store.offerQueued(memberId), []);
+    assert.equal((await sup.waitRun(runId)).status, 'ok');
   } finally { await sup.close(); }
 });
