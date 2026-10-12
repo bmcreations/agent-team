@@ -16,7 +16,9 @@ project. One dispatch does the following for the named member:
 `agent-team serve` runs the supervisor in the foreground until SIGINT or SIGTERM. When the
 root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol-2),
 `agent-team --member ...` runs it through the supervisor: it submits to a running one, or
-starts an in-process one if none is listening. `--timeout` applies either way. Its reports are
+starts an in-process one if none is listening. An in-process supervisor listens on a
+private `inproc-<pid>-<n>.sock` beside the shared socket, so another CLI never submits to it;
+only `serve` listens on the shared path. `--timeout` applies either way. Its reports are
 started with the `delegate` tool and run in parallel, each in its own workspace. A v1 member
 keeps the `{"status":"delegating"}` loop described under [Delegation](#delegation).
 

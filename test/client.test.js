@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, chmodSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { project, LIVE } from './helpers/live.js';
@@ -71,4 +71,20 @@ test('a directory the user named for the socket keeps its mode', async () => {
   chmodSync(dir, 0o755);
   await runThroughSupervisor({ projectRoot: root, member: 'solo', task: 'go', adapterDir, env: e });
   assert.equal(statSync(dir).mode & 0o777, 0o755);
+});
+
+test('two in-process runs each keep a private socket and both finish', async () => {
+  const sleepy = (ms, summary) => ({ steps: [{ sleep_ms: ms }], result: { status: 'ok', summary } });
+  const { root, script } = project({ a: LIVE(), b: LIVE() }, { by_member: { a: sleepy(400, 'a'), b: sleepy(1200, 'b') } });
+  const e = env(script);
+  const { isListening } = await import('../src/rpc.js');
+  const first = runThroughSupervisor({ projectRoot: root, member: 'a', task: 'go', adapterDir, env: e });
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(await isListening(e.AGENT_TEAM_SUPERVISOR_SOCK), false, 'an in-process run must not take the shared socket');
+  const second = runThroughSupervisor({ projectRoot: root, member: 'b', task: 'go', adapterDir, env: e });
+  const [ra, rb] = await Promise.all([first, second]);
+  assert.equal(ra.summary, 'a');
+  assert.equal(rb.summary, 'b');
+  const left = readdirSync(dirname(e.AGENT_TEAM_SUPERVISOR_SOCK)).filter((f) => f.endsWith('.sock'));
+  assert.deepEqual(left, [], 'each run removes its socket');
 });

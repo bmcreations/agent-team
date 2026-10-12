@@ -91,7 +91,9 @@ machine. It is made of four units:
 
 The existing CLI becomes a client. `agent-team --member X --task T` submits to a running
 supervisor and follows the run. With no supervisor running, it starts one in-process for the
-duration of the dispatch, so the `/delegate` skill and one-shot use keep working unchanged.
+duration of the dispatch, so the `/delegate` skill and one-shot use keep working unchanged. That
+in-process supervisor listens on a private per-process socket that other CLIs never discover,
+so a second CLI does not submit to it and lose its run when the first one exits.
 
 Chosen over building the fleet coordinator first. That order delivers multi-machine scheduling
 sooner, but it redesigns the adapter contract twice and puts agents steering agents last. Here
