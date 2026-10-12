@@ -85,6 +85,11 @@ export class Supervisor {
     return { ok: true };
   }
 
+  // Re-check the queue, e.g. after raising maxRunning.
+  kick() {
+    this.#drain();
+  }
+
   // ---- scheduling ----
 
   #schedule(id) {
@@ -298,9 +303,80 @@ export class Supervisor {
     return { ok: true };
   }
 
-  // Filled in by Task 6.
-  #delegate() { throw new Error('delegate is not implemented yet'); }
-  #sendTo() { throw new Error('send_to is not implemented yet'); }
-  #waitFor() { throw new Error('wait_for is not implemented yet'); }
-  #askHuman() { throw new Error('ask_human is not implemented yet'); }
+  #delegate(id, { to, task } = {}) {
+    const rt = this.#live.get(id);
+    const m = rt.member;
+    const { config, budget } = this.#runs.get(m.run_id);
+    if (typeof to !== 'string' || typeof task !== 'string' || !task.trim()) {
+      throw new Error('delegate needs "to" (a report\'s name) and "task"');
+    }
+    if (!rt.resolved.reports.includes(to)) throw new Error(`"${to}" is not a direct report of "${m.name}"`);
+    if (m.depth >= config.defaults.max_depth) {
+      throw new Error(`delegation refused: already at max_depth ${config.defaults.max_depth}`);
+    }
+    if (budget.runs <= 0) throw new Error('delegation budget exhausted (max_delegations)');
+    budget.runs -= 1;
+    const child = this.store.addMember({ runId: m.run_id, parentId: id, name: to, task, depth: m.depth + 1 });
+    this.store.addEvent(id, 'delegated', { to, report_id: child.id });
+    this.#schedule(child.id);
+    return { report_id: child.id };
+  }
+
+  // Along the reporting line only: the caller's manager, or one of its own reports.
+  #sendTo(id, { to, text } = {}) {
+    if (typeof text !== 'string' || !text.trim()) throw new Error('send_to needs "text"');
+    const m = this.#live.get(id).member;
+    const parent = m.parent_id != null ? this.store.member(m.parent_id) : null;
+    let target;
+    let fromKind;
+    if (parent && (to === parent.name || to === parent.id)) {
+      target = parent;
+      fromKind = 'report';
+    } else {
+      const matches = this.store.children(id).filter((c) => c.id === to || c.name === to);
+      target = matches.find((c) => !TERMINAL.has(c.state)) ?? matches.at(-1);
+      fromKind = 'manager';
+    }
+    if (!target) throw new Error(`"${to}" is not your manager or one of your reports`);
+    // Same guard as send(): a stopping member will not read another message.
+    if (TERMINAL.has(target.state) || this.#live.get(target.id)?.stopping) {
+      throw new Error(`"${target.name}" has finished — delegate a new task`);
+    }
+    const messageId = this.store.enqueue({
+      to: target.id, fromKind, fromName: m.name, reportId: fromKind === 'report' ? id : null, text
+    });
+    this.#pump(target.id);
+    return { message_id: messageId };
+  }
+
+  #waitFor(id, { report_ids = null, timeout_s } = {}) {
+    const rt = this.#live.get(id);
+    const reportIds = Array.isArray(report_ids) ? report_ids.filter(Number.isInteger) : null;
+    const msgs = this.#claim(rt, id, reportIds);
+    if (msgs.length) return { messages: msgs.map(render), timed_out: false };
+    // Only a member that has delegated can have nothing left to wait for; a leaf calling
+    // wait_for is waiting on its manager and blocks.
+    if (reportIds == null && this.store.children(id).length > 0 && this.#openReports(id) === 0) {
+      return { messages: [], timed_out: false, note: 'no open reports' };
+    }
+    const seconds = clampSeconds(timeout_s, WAIT_DEFAULT_S, WAIT_MAX_S);
+    this.store.setState(id, 'waiting');
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => this.#resolveWaiter(id, { messages: [], timed_out: true }), seconds * 1000);
+      rt.waiter = { resolve, timer, reportIds };
+    });
+  }
+
+  #askHuman(id, { question, options = null, timeout_s } = {}) {
+    if (typeof question !== 'string' || !question.trim()) throw new Error('ask_human needs "question"');
+    const rt = this.#live.get(id);
+    const opts = Array.isArray(options) ? options.filter((o) => typeof o === 'string') : null;
+    const questionId = this.store.addQuestion({ memberId: id, question, options: opts });
+    const seconds = clampSeconds(timeout_s, ASK_DEFAULT_S, ASK_MAX_S);
+    this.store.setState(id, 'waiting');
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => this.#resolveQuestion(id, { answer: null, timed_out: true }), seconds * 1000);
+      rt.question = { id: questionId, resolve, timer };
+    });
+  }
 }
