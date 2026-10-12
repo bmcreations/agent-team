@@ -1,5 +1,4 @@
 import { createServer, connect } from 'node:net';
-import { createInterface } from 'node:readline';
 import { mkdirSync, chmodSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -13,20 +12,56 @@ export async function serveRpc(path, handler) {
   chmodSync(dirname(path), 0o700);
   const server = createServer((sock) => {
     sock.on('error', () => {});
-    createInterface({ input: sock }).on('line', async (line) => {
-      let req;
-      try { req = JSON.parse(line); } catch { return; }
-      let reply;
-      try {
-        reply = { id: req.id, result: await handler({ token: req.token ?? null, method: req.method, params: req.params ?? {} }) };
-      } catch (err) {
-        reply = { id: req.id, error: err.message };
-      }
-      if (!sock.destroyed) sock.write(JSON.stringify(reply) + '\n');
+    onLines(sock, (line) => {
+      // answer() handles its own failures; this catch only stops a bug there from becoming
+      // an unhandled rejection that takes the supervisor down.
+      answer(sock, line, handler).catch(() => {});
     });
   });
   await listenExclusive(server, path);
   return { path, close: () => new Promise((resolve) => server.close(() => resolve())) };
+}
+
+// Splits the socket into lines with our own listener. readline left the socket's error path
+// unhandled when the peer closed first, so the client could crash on a dropped connection.
+function onLines(sock, onLine) {
+  sock.setEncoding('utf8');
+  let buf = '';
+  sock.on('data', (chunk) => {
+    buf += chunk;
+    for (let i = buf.indexOf('\n'); i !== -1; i = buf.indexOf('\n')) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      onLine(line);
+    }
+  });
+}
+
+function errorMessage(err) {
+  return err?.message ?? String(err);
+}
+
+async function answer(sock, line, handler) {
+  let req;
+  try { req = JSON.parse(line); } catch { return; }
+  // A line that is not an object has no id to reply to, so it is dropped.
+  if (req === null || typeof req !== 'object' || Array.isArray(req)) return;
+  const id = req.id;
+  let reply;
+  try {
+    reply = { id, result: await handler({ token: req.token ?? null, method: req.method, params: req.params ?? {} }) };
+  } catch (err) {
+    reply = { id, error: errorMessage(err) };
+  }
+  let text;
+  try {
+    text = JSON.stringify(reply);
+  } catch (err) {
+    text = JSON.stringify({ id, error: `unserializable result: ${errorMessage(err)}` });
+  }
+  try {
+    if (!sock.destroyed) sock.write(text + '\n');
+  } catch { /* the peer is gone; nothing to answer */ }
 }
 
 function listen(server, path) {
@@ -62,11 +97,22 @@ export function isListening(path) {
   });
 }
 
+// No default timeout: wait_for legitimately blocks for minutes. A connection that closes
+// before a reply rejects the call.
 export function callRpc(path, { token = null, method, params = {} }) {
   return new Promise((resolve, reject) => {
     const sock = connect(path);
-    sock.once('error', reject);
-    createInterface({ input: sock }).once('line', (line) => {
+    // Node emits 'close' after any 'error', so the call settles on close. "No supervisor at
+    // this path" is reported as such; a connection that drops mid-call is a plain close.
+    let noSupervisor = null;
+    sock.on('error', (err) => {
+      if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') noSupervisor = err;
+    });
+    sock.once('close', () => reject(noSupervisor ?? new Error('supervisor closed the connection')));
+    let answered = false;
+    onLines(sock, (line) => {
+      if (answered) return;
+      answered = true;
       sock.destroy();
       let reply;
       try { reply = JSON.parse(line); } catch { return reject(new Error('unreadable reply from the supervisor')); }
