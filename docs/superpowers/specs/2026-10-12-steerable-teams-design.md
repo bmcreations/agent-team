@@ -61,8 +61,17 @@ These were checked on 2026-10-12 before committing to the design.
   `annotations: {readOnlyHint: true}`. With the hint, the call goes through.
 - An MCP tool call that blocked for 150 seconds returned normally. `wait_for` relies on this;
   the adapter also sets `MCP_TOOL_TIMEOUT` so a longer wait is not cut off.
-- Not yet verified: interrupting a turn through a stream-json control message, and opening a
-  `-p` session interactively with `claude --resume`.
+- Writing `{"type":"control_request","request_id":…,"request":{"subtype":"interrupt"}}` to
+  stdin stops the turn at once, including a running Bash tool (its process is killed). The
+  harness answers with a `control_response` of subtype `success`, then emits
+  `result` with subtype `error_during_execution` and `is_error: true`. The process and session
+  stay open: the next user message starts a new turn in the same session. The model may wrongly
+  believe an interrupted command never ran, so the resume note must say partial side effects
+  are possible.
+- `claude --resume <id>` (interactive) in a directory not yet trusted shows the folder-trust
+  prompt first, defaulting to "No, exit"; `-p` skips it. Every member workspace is a new
+  directory, so take-over hits this prompt and the human must accept it. Whether the
+  interactive TUI then loads the `-p` session's history is not yet verified.
 
 **Codex** is not installed on this machine, so these come from the documentation
 (learn.chatgpt.com/docs/app-server, /docs/non-interactive-mode, /docs/cli/reference):
