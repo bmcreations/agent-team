@@ -35,6 +35,9 @@ export function openStore(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   if (path !== ':memory:') chmodSync(path, 0o600);   // it holds member tokens in plaintext
+  // Several in-process supervisors (one per CLI run) can share this file; wait for a write lock
+  // instead of failing with SQLITE_BUSY.
+  db.exec('PRAGMA busy_timeout = 5000');
   db.exec(SCHEMA);
   const q = (sql) => db.prepare(sql);
   const memberRow = (row) => row && { ...row, result: parse(row.result) };
