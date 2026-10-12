@@ -34,8 +34,9 @@ mode `0700` on every start, and the store file to `0600`, since it holds member 
 socket directory named through `AGENT_TEAM_SUPERVISOR_SOCK` keeps its mode unless the
 supervisor created it. Socket paths longer than 103 bytes are refused.
 
-`defaults.max_parallel` (default 3) caps how many members of one run work at once; the rest
-queue. `serve` also caps running members across all runs at 6.
+`defaults.max_parallel` (default 3) caps how many of one manager's reports run at once; the
+rest queue. It is per manager, not per run, so a run with several managers can have more
+members running. `serve` also caps running members across all runs at 6.
 
 ## Resolving the agent
 
