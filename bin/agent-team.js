@@ -7,6 +7,7 @@ import { loadConfig } from '../src/config.js';
 import { renderOrg } from '../src/org.js';
 import { readRuns, renderReport } from '../src/report.js';
 import { spawnSync } from 'node:child_process';
+import { runMcpServer } from '../src/mcp.js';
 import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,6 +29,7 @@ const USAGE =
   'usage: agent-team --member <member> --task <text> [--project <dir>] [--timeout <sec>]\n' +
   '       agent-team org [--project <dir>]\n' +
   '       agent-team report [--project <dir>] [--all] [--json]\n' +
+  '       agent-team mcp\n' +
   '       agent-team channel enable|disable [--project <dir>]\n' +
   '       agent-team channel list [--json]\n' +
   '       agent-team channel ask --task <text> [--session <id>] [--project <dir>] [--timeout <sec>]\n';
@@ -39,6 +41,12 @@ const USAGE =
 function fail(err) {
   process.stdout.write(JSON.stringify({ status: 'failed', summary: err.message }, null, 2) + '\n');
   process.exit(1);
+}
+
+// Spawned by a harness, one per live member; runs until the harness closes stdin.
+if (positionals[0] === 'mcp') {
+  await runMcpServer();
+  process.exit(0);
 }
 
 if (positionals[0] === 'org') {
