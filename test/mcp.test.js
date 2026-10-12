@@ -16,6 +16,7 @@ async function withMcp(handler, fn, { socketPath } = {}) {
     env: { ...process.env, AGENT_TEAM_TEAM_SOCKET: socketPath ?? socket, AGENT_TEAM_TEAM_TOKEN: 'tok' }
   });
   const replies = new Map();
+  const sendRaw = (text) => child.stdin.write(text + '\n');
   createInterface({ input: child.stdout }).on('line', (l) => {
     const m = JSON.parse(l);
     replies.get(m.id)?.(m);
@@ -26,7 +27,7 @@ async function withMcp(handler, fn, { socketPath } = {}) {
     replies.set(id, resolve);
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
   });
-  try { await fn(rpc); } finally { child.kill(); await server.close(); }
+  try { await fn(rpc, sendRaw); } finally { child.kill(); await server.close(); }
 }
 
 test('lists the five team tools, each read-only', async () => {
@@ -77,5 +78,44 @@ test('unknown methods get -32601', async () => {
   await withMcp(() => null, async (rpc) => {
     const r = await rpc('resources/list', {});
     assert.equal(r.error.code, -32601);
+  });
+});
+
+test('only team tools are forwarded; supervisor admin methods are refused without an RPC', async () => {
+  const seen = [];
+  await withMcp((req) => { seen.push(req.method); return {}; }, async (rpc) => {
+    for (const name of ['answer', 'send', 'submit', 'wait_run', undefined, 7]) {
+      const r = await rpc('tools/call', { name, arguments: {} });
+      assert.equal(r.result.isError, true);
+      assert.match(r.result.content[0].text, /unknown tool/);
+    }
+  });
+  assert.deepEqual(seen, []);
+});
+
+test('non-object lines are ignored and the server keeps answering', async () => {
+  await withMcp(() => null, async (rpc, sendRaw) => {
+    sendRaw('null');
+    sendRaw('[1]');
+    sendRaw('"x"');
+    assert.deepEqual((await rpc('ping', {})).result, {});
+  });
+});
+
+test('a null supervisor result is returned as JSON null', async () => {
+  await withMcp(() => null, async (rpc) => {
+    const r = await rpc('tools/call', { name: 'report_progress', arguments: { text: 'x' } });
+    assert.equal(r.result.content[0].text, 'null');
+  });
+});
+
+test('a ping is answered while a wait_for is still blocked', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  await withMcp(async ({ method }) => { if (method === 'wait_for') await gate; return { ok: true }; }, async (rpc) => {
+    const blocked = rpc('tools/call', { name: 'wait_for', arguments: { member: 'a' } });
+    assert.deepEqual((await rpc('ping', {})).result, {});
+    release();
+    assert.equal((await blocked).result.isError, undefined);
   });
 });

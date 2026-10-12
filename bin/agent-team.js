@@ -46,6 +46,7 @@ function fail(err) {
 // Spawned by a harness, one per live member; runs until the harness closes stdin.
 if (positionals[0] === 'mcp') {
   await runMcpServer();
+  await new Promise((resolve) => process.stdout.write('', resolve));   // let queued replies flush
   process.exit(0);
 }
 
