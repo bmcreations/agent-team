@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -33,8 +33,8 @@ const BROKEN = {
 
 // Runs the real CLI as a subprocess (not an in-process import) so a raw, unhandled stack
 // trace on stdout/stderr is actually observable the way an operator would see it.
-function runCli(args) {
-  return execFileAsync(process.execPath, [BIN, ...args]).then(
+function runCli(args, env = process.env) {
+  return execFileAsync(process.execPath, [BIN, ...args], { env }).then(
     (r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }),
     (e) => ({ code: e.code, stdout: e.stdout ?? '', stderr: e.stderr ?? '' })
   );
@@ -95,4 +95,20 @@ test('`agent-team report` prints a plain message, not JSON, when nothing has bee
     if (prev === undefined) delete process.env.AGENT_TEAM_WORKSPACE_ROOT;
     else process.env.AGENT_TEAM_WORKSPACE_ROOT = prev;
   }
+});
+
+test('a v1 member whose agent cannot be resolved is still recorded in the run log', async () => {
+  const root = project({ members: { old: { agent: 'nope', isolation: 'none' } }, deny_paths: ['x/**'],
+    defaults: { on_unavailable: 'nope' } });
+  const ws = mkdtempSync(join(tmpdir(), 'at-cli-log-'));
+  const { code, stdout } = await runCli(['--member', 'old', '--task', 'go', '--project', root],
+    { ...process.env, AGENT_TEAM_WORKSPACE_ROOT: ws });
+  assert.equal(code, 1);
+  assert.equal(JSON.parse(stdout).status, 'failed');
+  const runs = join(ws, 'agent-team', 'runs');
+  const [file] = readdirSync(runs);
+  const entry = JSON.parse(readFileSync(join(runs, file), 'utf8').trim());
+  assert.equal(entry.tree.member, 'old');
+  assert.equal(entry.tree.status, 'failed');
+  assert.match(entry.tree.summary, /unavailable/);
 });

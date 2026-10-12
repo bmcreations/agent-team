@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, chmodSync, statSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, chmodSync, statSync, readdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { project, LIVE } from './helpers/live.js';
-import { runThroughSupervisor, isLiveMember } from '../src/client.js';
+import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
+import { dispatch } from '../src/dispatch.js';
 import { openStore } from '../src/store.js';
 import { Supervisor } from '../src/supervisor.js';
 
@@ -16,10 +17,32 @@ function env(script) {
            AGENT_TEAM_SUPERVISOR_DB: join(dir, 's.db') };
 }
 
-test('isLiveMember is true only for protocol 2 adapters', async () => {
+test('resolveRootMember marks only protocol 2 adapters live', async () => {
   const { root, script } = project({ live: LIVE(), old: { agent: 'mock', isolation: 'none' } }, {});
-  assert.equal(await isLiveMember({ projectRoot: root, member: 'live', adapterDir, env: env(script) }), true);
-  assert.equal(await isLiveMember({ projectRoot: root, member: 'old', adapterDir, env: env(script) }), false);
+  assert.equal((await resolveRootMember({ projectRoot: root, member: 'live', adapterDir, env: env(script) })).live, true);
+  assert.equal((await resolveRootMember({ projectRoot: root, member: 'old', adapterDir, env: env(script) })).live, false);
+});
+
+test('a member that cannot be resolved is treated as v1, so dispatch records its failure', async () => {
+  const { root, script } = project({ old: { agent: 'nope', isolation: 'none' } }, {}, { on_unavailable: 'nope' });
+  const r = await resolveRootMember({ projectRoot: root, member: 'old', adapterDir, env: env(script) });
+  assert.deepEqual(r, { live: false, preresolved: null });
+});
+
+test('a v1 member is probed once when dispatch reuses the root resolution', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-cl-ad-'));
+  const calls = join(dir, 'calls');
+  writeFileSync(join(dir, 'counted'), `#!/bin/sh\necho "$1" >> "${calls}"\nexec "${join(adapterDir, 'mock')}" "$@"\n`);
+  chmodSync(join(dir, 'counted'), 0o755);
+  const { root, script } = project({ old: { agent: 'counted', isolation: 'none' } }, { status: 'ok', summary: 'v1' });
+  const opts = { projectRoot: root, member: 'old', task: 'go', adapterDir: dir, env: { AGENT_TEAM_MOCK_SCRIPT: script } };
+  const { live, preresolved } = await resolveRootMember(opts);
+  assert.equal(live, false);
+  const result = await dispatch({ ...opts, preresolved });
+  assert.equal(result.summary, 'v1');
+  const lines = readFileSync(calls, 'utf8').trim().split('\n');
+  assert.equal(lines.filter((l) => l === 'probe').length, 1);
+  assert.equal(lines.filter((l) => l === 'capabilities').length, 1);
 });
 
 test('with no supervisor running, a run starts one in-process and leaves no socket behind', async () => {

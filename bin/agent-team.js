@@ -8,7 +8,7 @@ import { renderOrg } from '../src/org.js';
 import { readRuns, renderReport } from '../src/report.js';
 import { spawnSync } from 'node:child_process';
 import { runMcpServer } from '../src/mcp.js';
-import { runThroughSupervisor, isLiveMember } from '../src/client.js';
+import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
 import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
@@ -164,9 +164,10 @@ try {
     skillsDir: join(ROOT, 'skills'),
     timeoutMs: Number(values.timeout) * 1000
   };
-  const result = await isLiveMember(opts)
+  const { live, preresolved } = await resolveRootMember(opts);
+  const result = live
     ? await runThroughSupervisor(opts)
-    : await dispatch(opts);
+    : await dispatch({ ...opts, preresolved });
 
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   process.exit(result.status === 'ok' ? 0 : 1);

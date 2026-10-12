@@ -31,7 +31,7 @@ async function readCapabilities(adapterDir, agent, env) {
 
 export async function dispatch({
   projectRoot, member, task, adapterDir, assignments = {},
-  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS
+  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, preresolved = null
 }) {
   const config = loadConfig(projectRoot);
   const budget = { runs: config.defaults.max_delegations };
@@ -40,7 +40,7 @@ export async function dispatch({
     const result = await runMember({
       config, projectRoot, member, task, adapterDir,
       assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0,
-      teams: teamKeys(projectRoot), originRoot: projectRoot
+      teams: teamKeys(projectRoot), originRoot: projectRoot, preresolved
     });
     recordRun(projectRoot, startedAt, task, runNode(result));
     return result;
@@ -369,14 +369,17 @@ export function prepareMember(ctx, { resolved, caps }) {
   return { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks };
 }
 
-export async function runMember(ctx) {
+// `preresolved` is the caller's resolveCaps() result for this member; it is taken out of ctx
+// so reports and team entries, which spread ctx, resolve their own.
+export async function runMember({ preresolved = null, ...ctx }) {
   const { config, projectRoot, member, task, adapterDir, assignments,
           skillsDir, env, timeoutMs, budget, depth } = ctx;
 
   const spec = config.members[member];
   if (spec?.team) return runTeam(ctx, spec);
 
-  const { resolved, caps } = await resolveCaps(ctx);
+  if (preresolved) assignments[member] = preresolved.resolved.agent;
+  const { resolved, caps } = preresolved ?? await resolveCaps(ctx);
   const { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks } =
     prepareMember(ctx, { resolved, caps });
   const maxDepth = config.defaults.max_depth;

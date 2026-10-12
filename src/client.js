@@ -5,11 +5,18 @@ import { openStore } from './store.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from './supervisor.js';
 import { isListening, callRpc } from './rpc.js';
 
-export async function isLiveMember({ projectRoot, member, adapterDir, env = {} }) {
-  const config = loadConfig(projectRoot);
-  if (config.members[member]?.team) return false;
-  const { caps } = await resolveCaps({ config, member, adapterDir, assignments: {}, env });
-  return caps.protocol === 2;
+// Resolves the root member once: whether it runs live, and the resolution dispatch() reuses
+// for a v1 member so its adapter is not probed twice. A member that cannot be resolved is
+// reported as v1 with nothing to reuse, so dispatch() fails it and records the run.
+export async function resolveRootMember({ projectRoot, member, adapterDir, env = {} }) {
+  try {
+    const config = loadConfig(projectRoot);
+    if (config.members[member]?.team) return { live: false, preresolved: null };
+    const preresolved = await resolveCaps({ config, member, adapterDir, assignments: {}, env });
+    return { live: preresolved.caps.protocol === 2, preresolved };
+  } catch {
+    return { live: false, preresolved: null };
+  }
 }
 
 async function submitRemote(socketPath, { projectRoot, member, task, timeoutMs }) {
