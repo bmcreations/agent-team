@@ -1,4 +1,4 @@
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { loadConfig } from './config.js';
 import { resolveCaps } from './dispatch.js';
 import { openStore } from './store.js';
@@ -32,6 +32,7 @@ let inprocCount = 0;
 // its members are told about: another CLI that found it would submit there and lose its run
 // when this one closes.
 export async function runThroughSupervisor({ projectRoot, member, task, adapterDir, skillsDir = null, env = {}, timeoutMs }) {
+  projectRoot = resolve(projectRoot);   // a running `serve` has its own cwd
   const merged = { ...process.env, ...env };
   const sharedPath = defaultSocketPath(merged);
   if (await isListening(sharedPath)) return submitRemote(sharedPath, { projectRoot, member, task, timeoutMs });

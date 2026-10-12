@@ -82,15 +82,18 @@ function session() {
           const ids = subst(step.until_finished);
           const done = new Set();
           const messages = [];
+          let error = null;
           while (!ids.every((id) => done.has(id))) {
-            const r = await call('wait_for', args);
+            // A tool error, or {error} when the supervisor ends the call, is a result to report.
+            const r = await call('wait_for', args).catch((err) => ({ error: err.message }));
+            if (r.error) { error = r.error; break; }
             for (const m of r.messages) {
               messages.push(m);
               if (m.text.startsWith('finished ')) done.add(m.report_id);
             }
             if (r.messages.length === 0 && !r.timed_out) break;   // nothing left to wait on
           }
-          res = { messages };
+          res = error ? { messages, error } : { messages };
         } else {
           res = await call(step.tool, args).catch((err) => ({ error: err.message }));
         }

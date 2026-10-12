@@ -140,10 +140,17 @@ export class Supervisor {
       timeoutMs: run.timeoutMs, budget: run.budget, depth: m.depth,
       teams: teamKeys(run.projectRoot), originRoot: run.projectRoot
     };
-    // Teams in other projects and v1 adapters keep today's one-shot loop.
-    if (run.config.members[m.name].team) return this.#finish(id, await runMember(ctx));
+    // Teams in other projects and v1 adapters keep today's one-shot loop, with no session
+    // for send_to to deliver to.
+    if (run.config.members[m.name].team) {
+      rt.oneShot = true;
+      return this.#finish(id, await runMember(ctx));
+    }
     const { resolved, caps } = await resolveCaps(ctx);
-    if (caps.protocol !== 2) return this.#finish(id, await runMember(ctx));
+    if (caps.protocol !== 2) {
+      rt.oneShot = true;
+      return this.#finish(id, await runMember(ctx));
+    }
 
     rt.resolved = resolved;
     const prep = prepareMember(ctx, { resolved, caps });
@@ -363,6 +370,9 @@ export class Supervisor {
     if (TERMINAL.has(target.state) || this.#live.get(target.id)?.stopping) {
       throw new Error(`"${target.name}" has finished — delegate a new task`);
     }
+    if (this.#live.get(target.id)?.oneShot) {
+      throw new Error(`"${target.name}" runs one-shot and cannot receive messages — wait for its result`);
+    }
     const messageId = this.store.enqueue({
       to: target.id, fromKind, fromName: m.name, reportId: fromKind === 'report' ? id : null, text
     });
@@ -373,7 +383,8 @@ export class Supervisor {
   #waitFor(id, { report_ids = null, timeout_s } = {}) {
     const rt = this.#live.get(id);
     this.#assertNotBlocked(rt);
-    const reportIds = Array.isArray(report_ids) ? report_ids.filter(Number.isInteger) : null;
+    // Models often send ids as strings.
+    const reportIds = Array.isArray(report_ids) ? report_ids.map(Number).filter(Number.isInteger) : null;
     const msgs = this.#claim(rt, id, reportIds);
     if (msgs.length) return { messages: msgs.map(render), timed_out: false };
     // Every listed report is already finished and its messages are read: nothing can arrive.

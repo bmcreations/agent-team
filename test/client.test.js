@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, chmodSync, statSync, readdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { project, LIVE } from './helpers/live.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { dispatch } from '../src/dispatch.js';
@@ -110,4 +110,16 @@ test('two in-process runs each keep a private socket and both finish', async () 
   assert.equal(rb.summary, 'b');
   const left = readdirSync(dirname(e.AGENT_TEAM_SUPERVISOR_SOCK)).filter((f) => f.endsWith('.sock'));
   assert.deepEqual(left, [], 'each run removes its socket');
+});
+
+test('a relative project root is submitted to a running supervisor as an absolute path', async () => {
+  const { root, script } = project({ solo: LIVE() }, { by_member: { solo: { steps: [], result: { status: 'ok', summary: 'rel' } } } });
+  const e = env(script);
+  const store = openStore(':memory:');
+  const sup = new Supervisor({ store, adapterDir, socketPath: e.AGENT_TEAM_SUPERVISOR_SOCK, env: { AGENT_TEAM_MOCK_SCRIPT: script } });
+  await sup.start();
+  try {
+    await runThroughSupervisor({ projectRoot: relative(process.cwd(), root), member: 'solo', task: 'go', adapterDir, env: e });
+    assert.equal(store.run(1).project, root);
+  } finally { await sup.close(); }
 });

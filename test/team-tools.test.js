@@ -254,3 +254,46 @@ test('wait_for on reports that are all finished and already read returns at once
     assert.ok(Date.now() - t0 < 10000);
   } finally { await sup.close(); }
 });
+
+test('wait_for accepts report ids sent as strings', async () => {
+  const { root, script } = project(TEAM, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'a', task: 'one' }, save: 'ra' },
+        { tool: 'wait_for', args: { report_ids: ['2'], timeout_s: 5 } },
+        { tool: 'wait_for', args: {}, until_finished: ['$ra.report_id'] }
+      ] },
+      a: { steps: [{ tool: 'report_progress', args: { text: 'half' } }] }
+    }
+  });
+  const { sup } = await supervise(script);
+  try {
+    const { runId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    const result = await sup.waitRun(runId);
+    const w = result.tool_results[1].result;
+    assert.equal(w.timed_out, false);
+    assert.deepEqual(w.messages.map((m) => [m.report_id, m.text]), [[2, 'progress: half']]);
+  } finally { await sup.close(); }
+});
+
+test('send_to a v1 report is refused: it has no session to deliver to', async () => {
+  const { root, script } = project({ lead: LIVE(), old: { agent: 'mock', reports_to: 'lead', isolation: 'none' } }, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'old', task: 'one' }, save: 'ro' },
+        { sleep_ms: 500 },
+        { tool: 'send_to', args: { to: 'old', text: 'hi' } },
+        { tool: 'wait_for', args: {}, until_finished: ['$ro.report_id'] }
+      ] },
+      old: { hang: true }
+    }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go', timeoutMs: 2000 });
+    const result = await sup.waitRun(runId);
+    const sent = result.tool_results.find((t) => t.tool === 'send_to').result;
+    assert.match(sent.error ?? '', /"old" runs one-shot and cannot receive messages/);
+    assert.equal(store.members(runId).find((m) => m.name === 'old').state, 'failed', 'the hung v1 report timed out');
+  } finally { await sup.close(); }
+});
