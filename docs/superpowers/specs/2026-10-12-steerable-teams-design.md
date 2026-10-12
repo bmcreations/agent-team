@@ -1,7 +1,7 @@
 # Steerable teams: live runs that members and humans can steer
 
 Date: 2026-10-12
-Status: draft, in review
+Status: draft, in review (peer teams and auth added)
 
 ## The problem
 
@@ -18,14 +18,13 @@ until the report is finished, and a human cannot correct, pause, or take over a 
 mid-run. The run log is one JSONL line per top-level dispatch, so there is nothing live to
 watch either.
 
-This spec is the first of three:
+This spec is the first of two:
 
-1. **Steerable runs** (this spec): one machine, live members with inboxes, managers that stay
-   alive while their reports work, human intervention, and a local web view.
-2. **Peer teams**: teams that are not in each other's reporting tree talk, request work from
-   each other, and share in-progress artifacts.
-3. **Fleet**: `agent-team worker` on other machines, with the supervisor reachable over a
-   tailnet.
+1. **Steerable teams** (this spec): one machine runs every member. Members have inboxes,
+   managers stay alive while their reports work, and humans can intervene. Teams outside each
+   other's reporting tree talk, request work, and share in-progress artifacts. Teammates reach
+   the web view and API over a tailnet, signed in with Tailscale or GitHub.
+2. **Fleet**: `agent-team worker` runs members on other machines.
 
 Steering comes first because it forces the adapter contract to carry input as well as output.
 Designing that contract once, in both directions, is the main reason for this order.
@@ -36,6 +35,11 @@ On one Mac, a manager delegates to two reports that run concurrently. The manage
 their checkpoints and sends one of them a correction mid-run. A human watches the run live in
 the browser and can message any member, pause and resume it, answer a question it escalates,
 and take it over in a terminal and hand it back.
+
+A teammate signed in with GitHub opens the same run from another machine on the tailnet and
+can steer the members below them in the org tree. Separately, the Android team hits a bug in
+loupe, opens a thread with loupe's team, keeps working while loupe's lead accepts and fixes
+it, and picks up the fix when the thread closes.
 
 ## Harness behaviour this design relies on
 
@@ -75,10 +79,10 @@ machine. It is made of four units:
 
 | Unit | Responsibility |
 |---|---|
-| `src/store.js` | SQLite store: runs, members, events, messages, questions. Replaces the JSONL run log. |
+| `src/store.js` | SQLite store: runs, members, events, messages, questions, threads, published versions, people. Replaces the JSONL run log. |
 | `src/sessions.js` | Spawns adapters, holds their processes, delivers inbox messages, records events. |
 | `agent-team mcp` | The team MCP server each member gets. Connects back to the supervisor over a Unix socket. Generalizes `channel/server.js`. |
-| `src/http.js` | JSON API, server-sent event streams, and the web page. Binds to localhost, `--port` defaulting to 4747. |
+| `src/http.js` | JSON API, server-sent event streams, and the web page. Binds to localhost, `--port` defaulting to 4747; teammates reach it through `tailscale serve` or a GitHub sign-in. |
 
 The existing CLI becomes a client. `agent-team --member X --task T` submits to a running
 supervisor and follows the run. With no supervisor running, it starts one in-process for the
@@ -227,6 +231,84 @@ calls under its task and collapses repeats ("12 times").
   the member can reach (workspace, `read_only`, `deny_paths`), a message box, and controls for
   pause, pause now, resume, cancel, take over, and answer.
 
+### Peer teams talk in threads
+
+Any team can open a thread with any other team the supervisor knows about. This is open by
+default, as in a workplace: there is no allowlist, and the receiving team decides what to do
+with the request. Each thread is about one thing, has an owner on each side, and moves through
+`open → accepted | declined → done`. A thread opened with a task runs as a separate run owned
+by the receiving team, under that team's config, budgets, and `deny_paths`. A thread opened
+with a question may close with a reply and no run.
+
+Known teams are the supervisor's projects plus any `peers` a config lists, so a team can find
+`~/dev/loupe` before anyone has run a job there.
+
+New member tools:
+
+| Tool | Behaviour |
+|---|---|
+| `request(team, text, task?)` | Opens a thread with the team's entry member and returns its id. Non-blocking. |
+| `reply(thread, text)` | Posts to the thread. The receiving lead uses it to accept, decline with a reason, or ask a question. |
+| `team_status(team)` | Returns the team's active runs, member states, and latest checkpoints. No transcripts. |
+| `publish(name, path)` | Snapshots a file or directory from the member's workspace as a new read-only version. |
+| `use(team, name, version?)` | Copies a published version into the caller's workspace and returns where. Defaults to the latest. |
+
+`wait_for` also returns on thread events: a reply, a state change, the linked run finishing,
+or a newer version of something the caller uses. The receiving lead sees new threads the same
+way, through `wait_for`, or at the start of its next run if none is live.
+
+A thread whose chain of requests returns to a team already in it is refused, so A asking B
+asking A cannot loop. The web view groups threads by team pair, which gives a channel-like
+history without a standing channel nobody owns.
+
+### Auth and roles
+
+The supervisor accepts two identity sources and links them into one person record:
+
+- **Tailscale.** Requests through `tailscale serve` carry the verified login in
+  `Tailscale-User-Login`. The supervisor trusts that header only on the `tailscale serve`
+  listener, never on its other ports.
+- **GitHub.** Sign in with GitHub's OAuth flow for anyone not on the tailnet. Sessions are
+  signed cookies.
+- **Local CLI.** The OS user who runs `serve` is the owner, as today.
+
+A person's GitHub login and Tailscale login map to the same record in the supervisor config.
+
+**Project roles come from GitHub.** The supervisor reads the person's effective permission on
+the project's repo, which already includes org team grants and base permissions, and caches it
+for five minutes:
+
+| Repo permission | Role |
+|---|---|
+| admin | `owner`: everything in the project, including its settings |
+| write, maintain | `steer`: start runs, message, pause, answer, take over |
+| read, triage | `watch`: read only |
+| none | project hidden |
+
+Projects without a GitHub remote, and people known only by Tailscale, use roles set in the
+supervisor config, which can also override the GitHub-derived ones.
+
+**Inside a project, roles come from the team config.** People can be members of the org tree,
+and agents can report to them:
+
+```json
+"brandon":      { "human": true, "github": "bmcreations", "tailscale": "brandon@example.com" },
+"orchestrator": { "agent": "claude", "reports_to": "brandon" }
+```
+
+- A person steers the members in their own subtree, the same reporting-line rule `send_to`
+  and `delegate` apply to agents. An `owner` can act anywhere in the project.
+- `ask_human` goes to the nearest person above the asking member, and their "Needs you" lists
+  it first.
+- The project role is a ceiling: a `watch` person never steers, even in their own subtree.
+- A team that lists no people treats every `steer` person as the top of the tree, which is how
+  it works today.
+- A thread from another team is triaged by the receiving entry member. A person above that
+  member sees the thread and can override the decision.
+
+Take-over stays on the supervisor's machine. Teammates elsewhere can steer through the web view
+but cannot `attach` until the fleet spec adds a browser terminal.
+
 ## Errors and recovery
 
 - **Supervisor restart.** The store survives and member processes exit with the supervisor. On
@@ -245,6 +327,8 @@ calls under its task and collapses repeats ("12 times").
 - **Author spoofing.** Each member's MCP server receives a per-member token in its environment.
   The supervisor sets a message's author from that token, never from what the member claims.
   The socket directory stays mode 0700, as `channel/server.js` does now.
+- **Expired or revoked access.** A cached GitHub role that comes back lower on refresh takes
+  effect at once, and open web sessions drop to the new role.
 - **Cost.** An optional run-level `max_cost_usd` sums the per-turn cost the harnesses report
   and pauses the run when reached, so the human can raise it and resume.
 
@@ -260,15 +344,14 @@ calls under its task and collapses repeats ("12 times").
 - HTTP and SSE tests run under `node --test` with the rest of the suite.
 - An opt-in live smoke test, behind an environment flag, runs real `claude` on Haiku and turns
   the steering probe into an assertion. Codex gets the same once it is installed.
+- Thread tests cover open, accept, decline, question-only threads, the loop guard, and
+  `wait_for` waking on thread events and new published versions.
+- Auth tests use fake Tailscale headers and a fake GitHub API: role mapping, the cache and its
+  downgrade, linked identities, subtree steering, and the `watch` ceiling.
 - The demo scenario is checked end to end in the browser.
 
 ## Out of scope
 
-- Peer teams: talking to, requesting work from, and observing teams outside the reporting
-  tree, and publishing artifacts between them. The direction agreed for that spec is open by
-  default, like a workplace: any team can ask any team, the receiving team's lead triages, and
-  request chains that loop back to a team already in them are refused.
-- Fleet: workers on other machines, tailnet binding, repo mirrors, and a browser terminal for
-  take-over.
-- Authentication and roles. The supervisor binds to localhost and trusts the local user.
+- Fleet: workers on other machines, repo mirrors, and a browser terminal for take-over.
+- Threads with teams on another supervisor.
 - Steering `grok`, `claude-cloud`, `claude-session`, and GitHub-named teams.
