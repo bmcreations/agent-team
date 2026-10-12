@@ -114,3 +114,8 @@ test('a connection dropped without a reply rejects the call', async () => {
     await assert.rejects(callRpc(path, { method: 'x' }), /closed the connection/);
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
+
+test('a socket path past the platform limit fails with a clear error', async () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-rpc-')), 'x'.repeat(110), 'sup.sock');
+  await assert.rejects(serveRpc(path, async () => null), /socket path is too long \(\d+ bytes, the limit is 103\)/);
+});

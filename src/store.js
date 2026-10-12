@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -34,6 +34,7 @@ const parse = (s) => (s == null ? null : JSON.parse(s));
 export function openStore(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
+  if (path !== ':memory:') chmodSync(path, 0o600);   // it holds member tokens in plaintext
   db.exec(SCHEMA);
   const q = (sql) => db.prepare(sql);
   const memberRow = (row) => row && { ...row, result: parse(row.result) };

@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { mkdirSync, chmodSync } from 'node:fs';
 import { loadConfig } from './config.js';
 import { buildBrief } from './brief.js';
 import { resolveCaps, prepareMember, runMember, teamKeys } from './dispatch.js';
@@ -16,10 +17,21 @@ const ASK_DEFAULT_S = 1800;
 const ASK_MAX_S = 7200;
 
 const cacheRoot = (env) => env.XDG_CACHE_HOME || join(homedir(), '.cache');
+// A directory of its own: ~/.cache/agent-team predates the supervisor and may be 0755.
+const supervisorDir = (env) => join(cacheRoot(env), 'agent-team', 'supervisor');
 export const defaultSocketPath = (env = process.env) =>
-  env.AGENT_TEAM_SUPERVISOR_SOCK || join(cacheRoot(env), 'agent-team', 'supervisor.sock');
+  env.AGENT_TEAM_SUPERVISOR_SOCK || join(supervisorDir(env), 'supervisor.sock');
 export const defaultStorePath = (env = process.env) =>
-  env.AGENT_TEAM_SUPERVISOR_DB || join(cacheRoot(env), 'agent-team', 'supervisor.db');
+  env.AGENT_TEAM_SUPERVISOR_DB || join(supervisorDir(env), 'supervisor.db');
+
+// The socket's only access control is its directory, so the default one is locked to this
+// user on every start, as channel/server.js does. A path the user named is left alone.
+export function lockSupervisorDir(env = process.env) {
+  if (env.AGENT_TEAM_SUPERVISOR_SOCK && env.AGENT_TEAM_SUPERVISOR_DB) return;
+  const dir = supervisorDir(env);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+}
 
 const label = (m) => `${m.from_name} (${m.from_kind})`;
 const render = (m) => ({ id: m.id, from: label(m), text: m.text, report_id: m.report_id });

@@ -1,7 +1,7 @@
 import { loadConfig } from './config.js';
 import { resolveCaps } from './dispatch.js';
 import { openStore } from './store.js';
-import { Supervisor, defaultSocketPath, defaultStorePath } from './supervisor.js';
+import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from './supervisor.js';
 import { isListening, callRpc, SupervisorRunning } from './rpc.js';
 
 export async function isLiveMember({ projectRoot, member, adapterDir, env = {} }) {
@@ -23,6 +23,7 @@ export async function runThroughSupervisor({ projectRoot, member, task, adapterD
   const socketPath = defaultSocketPath(merged);
   if (await isListening(socketPath)) return submitRemote(socketPath, { projectRoot, member, task, timeoutMs });
 
+  lockSupervisorDir(merged);
   const store = openStore(defaultStorePath(merged));
   const sup = new Supervisor({ store, adapterDir, skillsDir, socketPath, env, ...(timeoutMs ? { timeoutMs } : {}) });
   try {

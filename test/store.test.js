@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openStore } from '../src/store.js';
 
 function seeded() {
@@ -90,4 +93,12 @@ test('events keep their order and body', () => {
   store.addEvent(lead.id, 'text', { text: 'one' });
   store.addEvent(lead.id, 'text', { text: 'two' });
   assert.deepEqual(store.events(lead.id).map((e) => e.body.text), ['one', 'two']);
+});
+
+test('a store file is readable by its owner only: it holds member tokens', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-store-'));
+  const path = join(dir, 's.db');
+  const store = openStore(path);
+  store.close();
+  assert.equal(statSync(path).mode & 0o777, 0o600);
 });

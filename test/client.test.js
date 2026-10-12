@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { project, LIVE } from './helpers/live.js';
 import { runThroughSupervisor, isLiveMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
@@ -45,4 +45,30 @@ test('with a supervisor running, a run is submitted to it', async () => {
     assert.equal(result.summary, 'remote');
     assert.equal(store.run(1).status, 'done', 'the running supervisor recorded the run');
   } finally { await sup.close(); }
+});
+
+// Short base: macOS caps Unix socket paths at 104 bytes and tmpdir() there is ~50 already.
+const shortCache = () => mkdtempSync('/tmp/at-c-');
+
+test('the default socket and store sit in a supervisor directory locked to this user', async () => {
+  const { root, script } = project({ solo: LIVE() }, { by_member: { solo: { steps: [], result: { status: 'ok', summary: 'hi' } } } });
+  const cache = shortCache();
+  const dir = join(cache, 'agent-team', 'supervisor');
+  mkdirSync(dir, { recursive: true, mode: 0o755 });   // as an older install might have left it
+  chmodSync(dir, 0o755);
+  const e = { AGENT_TEAM_MOCK_SCRIPT: script, XDG_CACHE_HOME: cache,
+              AGENT_TEAM_SUPERVISOR_SOCK: '', AGENT_TEAM_SUPERVISOR_DB: '' };
+  const result = await runThroughSupervisor({ projectRoot: root, member: 'solo', task: 'go', adapterDir, env: e });
+  assert.equal(result.summary, 'hi');
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.equal(statSync(join(dir, 'supervisor.db')).mode & 0o777, 0o600);
+});
+
+test('a directory the user named for the socket keeps its mode', async () => {
+  const { root, script } = project({ solo: LIVE() }, { by_member: { solo: { steps: [], result: { status: 'ok', summary: 'hi' } } } });
+  const e = env(script);
+  const dir = dirname(e.AGENT_TEAM_SUPERVISOR_SOCK);
+  chmodSync(dir, 0o755);
+  await runThroughSupervisor({ projectRoot: root, member: 'solo', task: 'go', adapterDir, env: e });
+  assert.equal(statSync(dir).mode & 0o777, 0o755);
 });

@@ -7,7 +7,14 @@ import { dirname } from 'node:path';
 // the channel sockets; member tokens identify the caller, they do not authenticate a user.
 export class SupervisorRunning extends Error {}
 
+// sun_path is 104 bytes on macOS (108 on Linux), including the terminating NUL.
+const MAX_SOCKET_PATH = 103;
+
 export async function serveRpc(path, handler) {
+  const bytes = Buffer.byteLength(path);
+  if (bytes > MAX_SOCKET_PATH) {
+    throw new Error(`socket path is too long (${bytes} bytes, the limit is ${MAX_SOCKET_PATH}): ${path}`);
+  }
   // Only a directory we created is ours to lock down; a user-supplied socket path may sit in
   // a shared directory such as /tmp.
   if (mkdirSync(dirname(path), { recursive: true, mode: 0o700 }) !== undefined) chmodSync(dirname(path), 0o700);

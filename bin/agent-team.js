@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, isLiveMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
-import { Supervisor, defaultSocketPath, defaultStorePath } from '../src/supervisor.js';
+import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
 import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -56,6 +56,7 @@ if (positionals[0] === 'mcp') {
 
 // The machine's supervisor, in the foreground until SIGINT/SIGTERM.
 if (positionals[0] === 'serve') {
+  lockSupervisorDir();
   const store = openStore(defaultStorePath());
   const sup = new Supervisor({
     store, adapterDir: join(ROOT, 'adapters'), skillsDir: join(ROOT, 'skills'),

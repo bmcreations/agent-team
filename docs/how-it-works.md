@@ -22,11 +22,13 @@ keeps the `{"status":"delegating"}` loop described under [Delegation](#delegatio
 
 | What | Where | Override |
 |---|---|---|
-| Store | `~/.cache/agent-team/supervisor.db` | `AGENT_TEAM_SUPERVISOR_DB` |
-| Socket | `~/.cache/agent-team/supervisor.sock` | `AGENT_TEAM_SUPERVISOR_SOCK` |
+| Store | `~/.cache/agent-team/supervisor/supervisor.db` | `AGENT_TEAM_SUPERVISOR_DB` |
+| Socket | `~/.cache/agent-team/supervisor/supervisor.sock` | `AGENT_TEAM_SUPERVISOR_SOCK` |
 
-The cache root is `$XDG_CACHE_HOME` when set. The socket's directory is created with mode
-`0700`.
+The cache root is `$XDG_CACHE_HOME` when set. The default `supervisor/` directory is set to
+mode `0700` on every start, and the store file to `0600`, since it holds member tokens. A
+socket directory named through `AGENT_TEAM_SUPERVISOR_SOCK` keeps its mode unless the
+supervisor created it. Socket paths longer than 103 bytes are refused.
 
 `defaults.max_parallel` (default 3) caps how many members of one run work at once; the rest
 queue. `serve` also caps running members across all runs at 6.
