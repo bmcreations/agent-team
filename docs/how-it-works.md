@@ -11,6 +11,26 @@ project. One dispatch does the following for the named member:
    call the member again with their results.
 6. Return one JSON result, and delete the workspace if the run succeeded.
 
+## Live runs
+
+`agent-team serve` runs the supervisor in the foreground until SIGINT or SIGTERM. When the
+root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol-2),
+`agent-team --member ...` runs it through the supervisor: it submits to a running one, or
+starts an in-process one if none is listening. `--timeout` applies either way. Its reports are
+started with the `delegate` tool and run in parallel, each in its own workspace. A v1 member
+keeps the `{"status":"delegating"}` loop described under [Delegation](#delegation).
+
+| What | Where | Override |
+|---|---|---|
+| Store | `~/.cache/agent-team/supervisor.db` | `AGENT_TEAM_SUPERVISOR_DB` |
+| Socket | `~/.cache/agent-team/supervisor.sock` | `AGENT_TEAM_SUPERVISOR_SOCK` |
+
+The cache root is `$XDG_CACHE_HOME` when set. The socket's directory is created with mode
+`0700`.
+
+`defaults.max_parallel` (default 3) caps how many members of one run work at once; the rest
+queue. `serve` also caps running members across all runs at 6.
+
 ## Resolving the agent
 
 The dispatcher runs `adapters/<agent> probe`. A zero exit within 30 seconds means the agent is

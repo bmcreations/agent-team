@@ -156,9 +156,11 @@ A manager sees checkpoints, messages, and results, not its reports' transcripts.
 event streams into the manager's context would spend tokens on detail it rarely needs; the
 full stream still goes to the store and the web view.
 
-Every inbox message is delivered exactly once, by one of two paths. If the member is blocked
-in `wait_for` or `ask_human`, the tool returns with it. Otherwise the adapter writes it into
-the session, where it is picked up at the next tool boundary. Messages carry their author,
+Every inbox message is delivered once, by one of two paths. If the member is blocked in
+`wait_for` or `ask_human`, the tool reclaims it and returns it as the result; the harness may
+also surface it in its own context. Otherwise the adapter writes it into the session, where it
+is picked up at the next tool boundary, and `ack` marks it delivered. An offered message that
+is not acked goes back to the queue at the second `idle` or when the process exits. Messages carry their author,
 rendered as `[from: brandon (human)]` or `[from: lead (manager)]`, and each member's brief
 states that human messages outrank agent messages.
 

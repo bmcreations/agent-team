@@ -33,6 +33,101 @@ puts it at the top of the brief. `claude` means no dialect file.
 The adapter runs in its own process group. When the dispatch timeout expires, the whole group
 is sent `SIGKILL` and the result is `status: "timeout"`.
 
+## Session adapters (protocol 2)
+
+A v1 adapter is called once per `run`. A v2 adapter is a long-lived process that a human or
+another member can steer while it works. An adapter opts in by reporting `"protocol": 2` from
+`capabilities`, and implements `<adapter> session`. Its working directory is the member's
+workspace, as for `run`. `probe` and `capabilities` are unchanged. An adapter that reports
+anything else, or nothing, stays v1.
+
+`session` speaks newline-delimited JSON on stdin and stdout.
+
+| Direction | Message | Meaning |
+|---|---|---|
+| in | `start {brief}` | Begin, with the brief composed as for `run`. |
+| in | `message {id, from, text}` | Inbox delivery. |
+| in | `stop` | Finish after the current turn. |
+| in | `interrupt` | Finish now. |
+| out | `session {harness_id, resume}` | The harness session id and how to resume it. Sent first. |
+| out | `event {kind, ...}` | Text, tool call, tool result, or turn end, normalized across harnesses. |
+| out | `ack {message_id}` | The harness consumed the message. For `claude`, that is the user message echoed back by `--replay-user-messages`. Writing it to stdin is not enough. |
+| out | `idle` | The turn ended. |
+| out | `result {status, summary, usage}` | Final outcome. |
+
+Adapter output is untrusted, and the supervisor shape-checks every line.
+
+### Message delivery
+
+A message is delivered once, by one of two paths:
+
+- If the member is blocked in `wait_for` or `ask_human`, the supervisor reclaims the message
+  and returns it as the tool result. The harness may also surface it in its own context.
+- Otherwise the supervisor sends it as a `message` and counts it delivered when the adapter
+  sends `ack`. Ack means consumed, not written.
+
+A message that was offered and not acked is put back in the queue at the second `idle`, or
+when the process exits. A single `idle` does not requeue it, because the offer can still be in
+flight when the turn ends.
+
+A member is done when a turn ends (`idle`) with nothing offered and no reports open. The
+supervisor then sends `stop`. A member that has been sent `stop` counts as finished, and
+`send` to it is rejected.
+
+### Environment
+
+The supervisor sets two variables for the session process:
+
+| Variable | Value |
+|---|---|
+| `AGENT_TEAM_TEAM_SOCKET` | The supervisor's socket path. |
+| `AGENT_TEAM_TEAM_TOKEN` | A token that identifies the member to the supervisor. |
+
+A real harness is configured with `agent-team mcp` as an MCP server and passes both variables
+through to it. `agent-team mcp` serves the five team tools (`delegate`, `send_to`, `wait_for`,
+`report_progress`, `ask_human`) over stdio and forwards each call to the socket. It forwards
+only those tool names. The socket also serves admin methods (`submit`, `wait_run`, `send`,
+`answer`), which the bridge refuses. They are reachable by anything that can open the socket,
+which is a directory created with mode `0700`. The token identifies a member; it does not
+authenticate a user, and the socket is not an authentication boundary until the auth phase.
+
+### Blocking calls
+
+A member can have one blocking call (`wait_for` or `ask_human`) at a time. A second one is a
+tool error. A question that times out, or whose member finishes, is closed, and `answer`
+refuses it.
+
+### Tool annotations
+
+Every team tool declares `readOnlyHint: true`. None of them touch the member's workspace, and
+`claude` in `--permission-mode plan`, which read-only members use, denies any MCP tool without
+the hint, even one listed in `--allowedTools`.
+
+### mock-live
+
+`adapters/mock-live` is the reference implementation. It plays a harness: it runs a script,
+calls the team tools over the socket the way `agent-team mcp` would, and accepts inbox messages
+only between steps, which is where `claude` picks one up. It reads the script from
+`AGENT_TEAM_MOCK_SCRIPT`, as the `mock` adapter does. A script with `by_member` picks the entry
+by `brief.member`; otherwise the script is the entry.
+
+| Entry field | Meaning |
+|---|---|
+| `steps` | Run in order. |
+| `result` | `{status, summary}` for the final `result`. Defaults to `ok` and `done`. |
+
+| Step field | Meaning |
+|---|---|
+| `say` | Emit a `text` event. |
+| `sleep_ms` | Wait. |
+| `tool`, `args` | Call a team tool. A tool error becomes `{error}` in the result instead of failing the run. |
+| `save` | Keep the tool's result under this name. Later strings of the form `$name.field` are replaced by that field. |
+| `until_finished` | With `tool: "wait_for"`: call it repeatedly until every listed report id has reported `finished`. |
+
+Before each step it acks and records any queued message. After the last step it sends `idle`,
+then keeps accepting messages until `stop` or `interrupt`, and ends with a `result` that also
+carries `received` (the messages it saw) and `tool_results`.
+
 ## Shipped adapters
 
 The three vendor adapters share a shape. They run the CLI once with the brief's `task` as
@@ -154,7 +249,8 @@ AGENT_TEAM_CONFORMANCE=codex,grok npm test
 
 ## Adding an adapter
 
-1. Add an executable `adapters/<name>` that handles `probe`, `capabilities` and `run` as above.
+1. Add an executable `adapters/<name>` that handles `probe`, `capabilities` and `run` as above,
+   or `session` as well if it reports protocol 2.
 2. Map `read_only` to the CLI's strongest read-only mode, and set the write mode explicitly
    rather than relying on the CLI's default.
 3. If the CLI's tool names differ from Claude Code's, add `references/<name>-tools.md` and
