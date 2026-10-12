@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+const sub = process.argv[2];
+if (sub === 'probe') process.stdout.write('crash 0.1.0\n', () => process.exit(0));
+else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({ write: true, workspace: true, tool_dialect: 'claude', protocol: 2 }) + '\n',
+    () => process.exit(0));
+} else {
+  process.stdout.write('{"type":"session","harness_id":"c"}\nthis is not json\n');
+  process.stderr.write('boom: harness exploded\n', () => process.exit(3));
+}

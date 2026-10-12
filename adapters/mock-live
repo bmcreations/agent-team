@@ -1,0 +1,117 @@
+#!/usr/bin/env node
+// A scripted v2 (session) adapter for tests. It plays a harness: it runs the member's steps,
+// calls the team tools over the supervisor socket the way `agent-team mcp` would for a real
+// harness, and accepts inbox messages only at step boundaries, which is where claude picks
+// up a mid-run message (at the next tool result).
+import { readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { callRpc } from '../src/rpc.js';
+
+const sub = process.argv[2];
+const out = (m) => process.stdout.write(JSON.stringify(m) + '\n');
+
+if (sub === 'probe') {
+  process.stdout.write('mock-live 0.1.0\n', () => process.exit(0));
+} else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({
+    write: true, workspace: true, structured_output: true, tool_dialect: 'claude', protocol: 2
+  }) + '\n', () => process.exit(0));
+} else if (sub === 'session') {
+  session();
+} else {
+  process.stderr.write(`mock-live: unknown subcommand "${sub}"\n`);
+  process.exit(2);
+}
+
+function session() {
+  const queue = [];
+  let wake = null;
+  const rl = createInterface({ input: process.stdin });
+  rl.on('line', (line) => { queue.push(JSON.parse(line)); wake?.(); wake = null; });
+  rl.on('close', () => { queue.push({ type: 'stop' }); wake?.(); wake = null; });
+  const next = async () => {
+    while (queue.length === 0) await new Promise((r) => { wake = r; });
+    return queue.shift();
+  };
+
+  const received = [];
+  const toolResults = [];
+  const accept = (m) => {
+    out({ type: 'ack', message_id: m.id });
+    const text = `[from: ${m.from}] ${m.text}`;
+    received.push(text);
+    out({ type: 'event', kind: 'user', text });
+  };
+  const drainMessages = () => {
+    for (let i = 0; i < queue.length;) {
+      if (queue[i].type === 'message') accept(queue.splice(i, 1)[0]);
+      else i++;
+    }
+  };
+  const call = (method, params) => callRpc(process.env.AGENT_TEAM_TEAM_SOCKET, {
+    token: process.env.AGENT_TEAM_TEAM_TOKEN, method, params
+  });
+
+  (async () => {
+    const start = await next();
+    const brief = start.brief;
+    const script = JSON.parse(readFileSync(process.env.AGENT_TEAM_MOCK_SCRIPT, 'utf8'));
+    const entry = script.by_member?.[brief.member] ?? script;
+    out({ type: 'session', harness_id: `mock-live-${brief.member}-${process.pid}`, resume: null });
+
+    const vars = {};
+    const subst = (v) => {
+      if (typeof v === 'string') {
+        const m = /^\$(\w+)\.(\w+)$/.exec(v);
+        return m ? vars[m[1]]?.[m[2]] : v;
+      }
+      if (Array.isArray(v)) return v.map(subst);
+      if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, subst(x)]));
+      return v;
+    };
+
+    for (const step of entry.steps ?? []) {
+      drainMessages();
+      if (step.say) out({ type: 'event', kind: 'text', text: step.say });
+      if (step.sleep_ms) await new Promise((r) => setTimeout(r, step.sleep_ms));
+      if (step.tool) {
+        const args = subst(step.args ?? {});
+        out({ type: 'event', kind: 'tool_call', name: step.tool, args });
+        let res;
+        if (step.until_finished) {
+          const ids = subst(step.until_finished);
+          const done = new Set();
+          const messages = [];
+          while (!ids.every((id) => done.has(id))) {
+            const r = await call('wait_for', args);
+            for (const m of r.messages) {
+              messages.push(m);
+              if (m.text.startsWith('finished ')) done.add(m.report_id);
+            }
+            if (r.messages.length === 0 && !r.timed_out) break;   // nothing left to wait on
+          }
+          res = { messages };
+        } else {
+          res = await call(step.tool, args).catch((err) => ({ error: err.message }));
+        }
+        out({ type: 'event', kind: 'tool_result', name: step.tool, result: res });
+        if (step.save) vars[step.save] = res;
+        toolResults.push({ tool: step.tool, result: res });
+      }
+    }
+    drainMessages();
+    out({ type: 'idle' });
+    for (;;) {
+      const m = await next();
+      if (m.type === 'message') { accept(m); out({ type: 'idle' }); continue; }
+      if (m.type === 'stop' || m.type === 'interrupt') break;
+    }
+    out({
+      type: 'result',
+      status: entry.result?.status ?? 'ok',
+      summary: entry.result?.summary ?? 'done',
+      received, tool_results: toolResults
+    });
+    process.stdout.write('', () => process.exit(0));
+  })();
+}
