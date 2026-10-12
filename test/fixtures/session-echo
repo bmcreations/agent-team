@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+// Answers start with a session line, a garbage line, and an event echoing the member; acks
+// every message; on stop prints a result and exits. Used to test MemberSession framing.
+import { createInterface } from 'node:readline';
+const out = (m) => process.stdout.write(JSON.stringify(m) + '\n');
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const m = JSON.parse(line);
+  if (m.type === 'start') {
+    out({ type: 'session', harness_id: 'h-1', resume: null });
+    process.stdout.write('not json\n');
+    out({ type: 'event', kind: 'text', text: m.brief.member });
+  } else if (m.type === 'message') {
+    out({ type: 'ack', message_id: m.id });
+  } else if (m.type === 'stop') {
+    process.stderr.write('bye\n');
+    out({ type: 'result', status: 'ok', summary: 'stopped' });
+    process.exit(0);
+  }
+});
