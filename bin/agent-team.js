@@ -68,7 +68,12 @@ if (positionals[0] === 'serve') {
     fail(err);
   }
   process.stderr.write(`agent-team: supervisor listening on ${defaultSocketPath()}\n`);
-  const shutdown = async () => { await sup.close(); store.close(); process.exit(0); };
+  let stopping = false;
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    sup.close().catch(() => {}).finally(() => { store.close(); process.exit(0); });
+  };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   await new Promise(() => {});   // the listening socket keeps the process alive; signals exit it

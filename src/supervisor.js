@@ -43,11 +43,12 @@ export class Supervisor {
     await this.server?.close();
   }
 
-  submit({ projectRoot, member, task }) {
+  submit({ projectRoot, member, task, timeoutMs }) {
     const config = loadConfig(projectRoot);
     if (!Object.hasOwn(config.members, member)) throw new Error(`unknown member "${member}"`);
     const runId = this.store.createRun({ project: projectRoot, task });
-    this.#runs.set(runId, { projectRoot, config, budget: { runs: config.defaults.max_delegations } });
+    this.#runs.set(runId, { projectRoot, config, budget: { runs: config.defaults.max_delegations },
+                         timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : this.timeoutMs });
     const { id } = this.store.addMember({ runId, parentId: null, name: member, task, depth: 0 });
     this.store.setRunRoot(runId, id);
     this.#schedule(id);
@@ -124,7 +125,7 @@ export class Supervisor {
     const ctx = {
       config: run.config, projectRoot: run.projectRoot, member: m.name, task: m.task,
       adapterDir: this.adapterDir, assignments: {}, skillsDir: this.skillsDir, env: this.env,
-      timeoutMs: this.timeoutMs, budget: run.budget, depth: m.depth,
+      timeoutMs: run.timeoutMs, budget: run.budget, depth: m.depth,
       teams: teamKeys(run.projectRoot), originRoot: run.projectRoot
     };
     // Teams in other projects and v1 adapters keep today's one-shot loop.
@@ -139,7 +140,7 @@ export class Supervisor {
     const brief = buildBrief({
       resolved, task: m.task, cwd: prep.workspace.dir, denyPaths: run.config.deny_paths,
       skillText: prep.skillText, dialectText: prep.dialectText,
-      timeoutSec: Math.floor(this.timeoutMs / 1000), depth: m.depth, maxDepth: run.config.defaults.max_depth
+      timeoutSec: Math.floor(run.timeoutMs / 1000), depth: m.depth, maxDepth: run.config.defaults.max_depth
     });
     brief.task += TEAM_NOTE;
     rt.session = new MemberSession({

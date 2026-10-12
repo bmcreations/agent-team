@@ -8,9 +8,13 @@ import { dirname } from 'node:path';
 export class SupervisorRunning extends Error {}
 
 export async function serveRpc(path, handler) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  chmodSync(dirname(path), 0o700);
+  // Only a directory we created is ours to lock down; a user-supplied socket path may sit in
+  // a shared directory such as /tmp.
+  if (mkdirSync(dirname(path), { recursive: true, mode: 0o700 }) !== undefined) chmodSync(dirname(path), 0o700);
+  const sockets = new Set();
   const server = createServer((sock) => {
+    sockets.add(sock);
+    sock.once('close', () => sockets.delete(sock));
     sock.on('error', () => {});
     onLines(sock, (line) => {
       // answer() handles its own failures; this catch only stops a bug there from becoming
@@ -19,7 +23,15 @@ export async function serveRpc(path, handler) {
     });
   });
   await listenExclusive(server, path);
-  return { path, close: () => new Promise((resolve) => server.close(() => resolve())) };
+  // Open connections (a client blocked in wait_run, a member's bridge) would otherwise hold
+  // server.close() open indefinitely.
+  return {
+    path,
+    close: () => new Promise((resolve) => {
+      server.close(() => resolve());
+      for (const sock of sockets) sock.destroy();
+    })
+  };
 }
 
 // Splits the socket into lines with our own listener. readline left the socket's error path

@@ -11,8 +11,8 @@ export async function isLiveMember({ projectRoot, member, adapterDir, env = {} }
   return caps.protocol === 2;
 }
 
-async function submitRemote(socketPath, { projectRoot, member, task }) {
-  const { runId } = await callRpc(socketPath, { method: 'submit', params: { projectRoot, member, task } });
+async function submitRemote(socketPath, { projectRoot, member, task, timeoutMs }) {
+  const { runId } = await callRpc(socketPath, { method: 'submit', params: { projectRoot, member, task, ...(timeoutMs ? { timeoutMs } : {}) } });
   return callRpc(socketPath, { method: 'wait_run', params: { run_id: runId } });
 }
 
@@ -21,7 +21,7 @@ async function submitRemote(socketPath, { projectRoot, member, task }) {
 export async function runThroughSupervisor({ projectRoot, member, task, adapterDir, skillsDir = null, env = {}, timeoutMs }) {
   const merged = { ...process.env, ...env };
   const socketPath = defaultSocketPath(merged);
-  if (await isListening(socketPath)) return submitRemote(socketPath, { projectRoot, member, task });
+  if (await isListening(socketPath)) return submitRemote(socketPath, { projectRoot, member, task, timeoutMs });
 
   const store = openStore(defaultStorePath(merged));
   const sup = new Supervisor({ store, adapterDir, skillsDir, socketPath, env, ...(timeoutMs ? { timeoutMs } : {}) });
@@ -29,7 +29,7 @@ export async function runThroughSupervisor({ projectRoot, member, task, adapterD
     await sup.start();
   } catch (err) {
     store.close();
-    if (err instanceof SupervisorRunning) return submitRemote(socketPath, { projectRoot, member, task });
+    if (err instanceof SupervisorRunning) return submitRemote(socketPath, { projectRoot, member, task, timeoutMs });
     throw err;
   }
   try {
