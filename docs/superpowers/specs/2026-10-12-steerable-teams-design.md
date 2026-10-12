@@ -56,6 +56,11 @@ These were checked on 2026-10-12 before committing to the design.
 - `claude -p --resume <session_id>`, run from the same directory, recalled the earlier turns.
   Sessions are stored per working directory under `~/.claude/projects` on the machine that ran
   them, so resume and take-over must run on the same machine and path.
+- In `--permission-mode plan`, which read-only members use, an MCP tool call is denied even
+  with `--allowedTools 'mcp__agent-team__*'`, unless the tool declares
+  `annotations: {readOnlyHint: true}`. With the hint, the call goes through.
+- An MCP tool call that blocked for 150 seconds returned normally. `wait_for` relies on this;
+  the adapter also sets `MCP_TOOL_TIMEOUT` so a longer wait is not cut off.
 - Not yet verified: interrupting a turn through a stream-json control message, and opening a
   `-p` session interactively with `claude --resume`.
 
@@ -109,7 +114,7 @@ A v2 adapter is a long-lived process speaking newline-delimited JSON in both dir
 | in | `interrupt` | Finish now. |
 | out | `session {harness_id, resume}` | The harness session id and how to resume it. Sent first. |
 | out | `event {kind, …}` | Text, tool call, tool result, or turn end, normalized across harnesses. |
-| out | `ack {message_id}` | The message reached the harness. |
+| out | `ack {message_id}` | The harness consumed the message: for `claude`, the user message echoed back by `--replay-user-messages`. Writing it to stdin is not enough. A message written but not acked by the end of the turn goes back to the queue. |
 | out | `idle` | The turn ended. |
 | out | `result {status, summary, usage}` | Final outcome. |
 
@@ -135,7 +140,9 @@ parser does today.
 
 ### Members steer each other through tools, not transcripts
 
-Every member gets the team MCP server with five tools.
+Every member gets the team MCP server with five tools. Each declares `readOnlyHint: true`:
+none of them touch the member's workspace, and without the hint a read-only member in plan
+mode cannot call them.
 
 | Tool | Behaviour |
 |---|---|
