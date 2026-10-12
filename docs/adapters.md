@@ -41,6 +41,10 @@ another member can steer while it works. An adapter opts in by reporting `"proto
 workspace, as for `run`. `probe` and `capabilities` are unchanged. An adapter that reports
 anything else, or nothing, stays v1.
 
+The dispatch timeout does not apply to a session yet. It reaches the brief, but the supervisor
+neither interrupts nor kills a session when it expires. Enforcement comes with `interrupt` and
+cancel in plan 1b.
+
 `session` speaks newline-delimited JSON on stdin and stdout.
 
 | Direction | Message | Meaning |

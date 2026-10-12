@@ -18,7 +18,9 @@ root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol
 `agent-team --member ...` runs it through the supervisor: it submits to a running one, or
 starts an in-process one if none is listening. An in-process supervisor listens on a
 private `inproc-<pid>-<n>.sock` beside the shared socket, so another CLI never submits to it;
-only `serve` listens on the shared path. `--timeout` applies either way. Its reports are
+only `serve` listens on the shared path. For a v2 member, `--timeout` only reaches the
+brief: the supervisor does not enforce it yet, so a session that never finishes keeps running.
+Enforcement comes with interrupt and cancel in plan 1b. Its reports are
 started with the `delegate` tool and run in parallel, each in its own workspace. A v1 member
 keeps the `{"status":"delegating"}` loop described under [Delegation](#delegation).
 
@@ -198,8 +200,9 @@ Config errors and dispatcher refusals come back in the same shape,
 | `elapsed_ms` | dispatcher | Wall time for the member, including the reports it waited on. |
 | `delegated` | dispatcher | Full results of every report that ran, in order. |
 
-The adapter is killed, with its whole process group, when `--timeout` expires (900 seconds by
-default), and the result is `status: "timeout"`.
+A v1 adapter is killed, with its whole process group, when `--timeout` expires (900 seconds by
+default), and the result is `status: "timeout"`. A v2 session is not killed yet; see
+[Live runs](#live-runs).
 
 ## The run log
 
