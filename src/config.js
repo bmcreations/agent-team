@@ -432,6 +432,7 @@ export function parseConfig(raw, path) {
     on_unavailable: 'claude',
     max_depth: 3,
     max_delegations: 20,
+    max_parallel: 3,
     cloud_max_cost_usd: 5,
     ...(raw.defaults ?? {})
   };
@@ -443,6 +444,8 @@ export function parseConfig(raw, path) {
   // member's first call, which is never a usable configuration.
   validateBoundedInteger(defaults.max_depth, 'max_depth', 0, path);
   validateBoundedInteger(defaults.max_delegations, 'max_delegations', 1, path);
+  // How many of one manager's reports run at once under the supervisor; the rest queue.
+  validateBoundedInteger(defaults.max_parallel, 'max_parallel', 1, path);
   validateFallbackAgent(defaults.on_unavailable, path);
   // Every cloud session is created with this as its hard spend cap (the Managed Agents
   // session budget), so a run left going cannot keep billing past it.

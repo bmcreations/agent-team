@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, CONFIG_RELPATH } from '../src/config.js';
+import { loadConfig, parseConfig, CONFIG_RELPATH } from '../src/config.js';
 
 function project(config) {
   const root = mkdtempSync(join(tmpdir(), 'at-cfg-'));
@@ -723,4 +723,13 @@ test('distinct_from may not name a team member', () => {
     members: { ...OK.members, ios: { team: '../ios' }, reviewer: { agent: 'codex', distinct_from: ['ios'] } }
   });
   assert.throws(() => loadConfig(root), /"distinct_from" names "ios", which is another team/);
+});
+
+test('defaults.max_parallel defaults to 3 and must be a positive integer', () => {
+  const base = { members: { a: { agent: 'mock' } }, deny_paths: ['x'] };
+  assert.equal(parseConfig(base, 'c.json').defaults.max_parallel, 3);
+  assert.throws(
+    () => parseConfig({ ...base, defaults: { max_parallel: 0 } }, 'c.json'),
+    /"defaults.max_parallel" must be an integer >= 1/
+  );
 });

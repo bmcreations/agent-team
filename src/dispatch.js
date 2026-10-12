@@ -121,7 +121,7 @@ function teamRoot(projectRoot, team) {
 
 // What identifies a project in the cycle check: its real path, and the GitHub repository it
 // pushes to, so a local team cannot reach itself again through its own GitHub name.
-function teamKeys(root) {
+export function teamKeys(root) {
   return [realpathSync(root), localRepoKey(root)].filter(Boolean);
 }
 
@@ -278,18 +278,19 @@ function prepareCloud(ctx, resolved) {
   };
 }
 
-async function runMember(ctx) {
-  const { config, projectRoot, member, task, adapterDir, assignments,
-          skillsDir, env, timeoutMs, budget, depth } = ctx;
-
-  const spec = config.members[member];
-  if (spec?.team) return runTeam(ctx, spec);
-
+// The supervisor needs to know whether a member speaks the v2 session protocol before it
+// builds a workspace, so resolution and capabilities are split from preparation.
+export async function resolveCaps(ctx) {
+  const { config, member, adapterDir, assignments, env } = ctx;
   const probe = makeProbe(adapterDir, env);
   const resolved = resolveMember(config, member, { probe, assignments });  // throws before side effects
   assignments[member] = resolved.agent;
-
   const caps = await readCapabilities(adapterDir, resolved.agent, env);
+  return { resolved, caps };
+}
+
+export function prepareMember(ctx, { resolved, caps }) {
+  const { config, projectRoot, member, skillsDir } = ctx;
   const dialectText = loadDialect(caps.tool_dialect ?? resolved.agent);
 
   let skillText = null;
@@ -365,6 +366,19 @@ async function runMember(ctx) {
       );
     }
   }
+  return { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks };
+}
+
+export async function runMember(ctx) {
+  const { config, projectRoot, member, task, adapterDir, assignments,
+          skillsDir, env, timeoutMs, budget, depth } = ctx;
+
+  const spec = config.members[member];
+  if (spec?.team) return runTeam(ctx, spec);
+
+  const { resolved, caps } = await resolveCaps(ctx);
+  const { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks } =
+    prepareMember(ctx, { resolved, caps });
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;
