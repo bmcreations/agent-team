@@ -65,10 +65,14 @@ Adapter output is untrusted, and the supervisor shape-checks every line.
 
 A message is delivered once, by one of two paths:
 
-- If the member is blocked in `wait_for` or `ask_human`, the supervisor reclaims the message
-  and returns it as the tool result. The harness may also surface it in its own context.
+- If the member is blocked in `wait_for`, the supervisor reclaims the message and returns it
+  as the tool result. The harness may also surface it in its own context.
 - Otherwise the supervisor sends it as a `message` and counts it delivered when the adapter
   sends `ack`. Ack means consumed, not written.
+
+`ask_human` does not reclaim messages. A message sent to a member blocked in `ask_human` is
+offered on stdin and waits there until the human answers and the harness reaches its next tool
+boundary.
 
 A message that was offered and not acked is put back in the queue at the second `idle`, or
 when the process exits. A single `idle` does not requeue it, because the offer can still be in
