@@ -72,6 +72,19 @@ test('questions open, then close with who answered', () => {
   assert.deepEqual(store.openQuestions(), []);
 });
 
+test('a closed question is no longer open or answerable', () => {
+  const { store, lead } = seeded();
+  const q = store.addQuestion({ memberId: lead.id, question: 'which?' });
+  store.closeQuestion(q);
+  assert.deepEqual(store.openQuestions(), []);
+  assert.equal(store.answerQuestion(q, 'a', 'brandon'), false);
+  assert.equal(store.question(q).answer, null);
+  const q2 = store.addQuestion({ memberId: lead.id, question: 'again?' });
+  assert.equal(store.answerQuestion(q2, 'a', 'brandon'), true);
+  assert.equal(store.answerQuestion(q2, 'b', 'other'), false, 'the first answer stands');
+  assert.equal(store.question(q2).answer, 'a');
+});
+
 test('events keep their order and body', () => {
   const { store, lead } = seeded();
   store.addEvent(lead.id, 'text', { text: 'one' });

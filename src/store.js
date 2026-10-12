@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS messages (
   text TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS questions (
   id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL REFERENCES members(id),
-  question TEXT NOT NULL, options TEXT, answer TEXT, answered_by TEXT, at INTEGER NOT NULL);
+  question TEXT NOT NULL, options TEXT, answer TEXT, answered_by TEXT, closed INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);
 `;
 
 const now = () => Date.now();
@@ -111,8 +111,12 @@ export function openStore(path) {
       q('INSERT INTO questions (member_id, question, options, at) VALUES (?, ?, ?, ?)')
         .run(memberId, question, options == null ? null : JSON.stringify(options), now()).lastInsertRowid),
     question: (id) => questionRow(q('SELECT * FROM questions WHERE id = ?').get(id)),
-    answerQuestion: (id, answer, by) =>
-      q('UPDATE questions SET answer = ?, answered_by = ? WHERE id = ?').run(answer, by, id),
-    openQuestions: () => q('SELECT * FROM questions WHERE answer IS NULL ORDER BY id').all().map(questionRow)
+    // False when the question was already answered or closed.
+    answerQuestion: (id, answer, by) => q(
+      'UPDATE questions SET answer = ?, answered_by = ? WHERE id = ? AND answer IS NULL AND closed = 0'
+    ).run(answer, by, id).changes > 0,
+    // Timed out, or its asker finished: no longer answerable.
+    closeQuestion: (id) => q('UPDATE questions SET closed = 1 WHERE id = ? AND answer IS NULL').run(id),
+    openQuestions: () => q('SELECT * FROM questions WHERE answer IS NULL AND closed = 0 ORDER BY id').all().map(questionRow)
   };
 }

@@ -174,3 +174,83 @@ test('a tool call from a finished or unknown member is an error, not a crash', a
     assert.throws(() => sup.send({ member_id: memberId, text: 'late' }), /has finished/);
   } finally { await sup.close(); }
 });
+
+const blocked = async (store, memberId) => {
+  while (store.member(memberId).state !== 'waiting') await new Promise((r) => setTimeout(r, 20));
+};
+
+test('a second blocking call from a blocked member is rejected and the first still resolves', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ tool: 'wait_for', args: { timeout_s: 30 } }] } }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    await blocked(store, memberId);
+    const { callRpc } = await import('../src/rpc.js');
+    const token = store.member(memberId).token;
+    await assert.rejects(callRpc(sup.socketPath, { token, method: 'wait_for', params: {} }),
+      /member "solo" is already blocked in wait_for — one blocking call at a time/);
+    await assert.rejects(callRpc(sup.socketPath, { token, method: 'ask_human', params: { question: 'q?' } }),
+      /already blocked in wait_for/);
+    sup.send({ member_id: memberId, text: 'wake', from: 'brandon' });
+    const result = await sup.waitRun(runId);
+    assert.deepEqual(result.tool_results[0].result.messages.map((m) => m.text), ['wake']);
+    assert.equal(result.tool_results[0].result.timed_out, false);
+  } finally { await sup.close(); }
+});
+
+test('wait_for is refused while the member has a question pending', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ tool: 'ask_human', args: { question: 'q?' } }] } }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    await blocked(store, memberId);
+    const { callRpc } = await import('../src/rpc.js');
+    const token = store.member(memberId).token;
+    await assert.rejects(callRpc(sup.socketPath, { token, method: 'wait_for', params: {} }), /already blocked in ask_human/);
+    sup.answer({ question_id: store.openQuestions()[0].id, answer: 'yes' });
+    const result = await sup.waitRun(runId);
+    assert.equal(result.tool_results[0].result.answer, 'yes');
+  } finally { await sup.close(); }
+});
+
+test('a timed-out question is closed and a late answer is refused', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ tool: 'ask_human', args: { question: 'q?', timeout_s: 1 } }] } }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    let open;
+    while (!(open = store.openQuestions()).length) await new Promise((r) => setTimeout(r, 20));
+    const qid = open[0].id;
+    const result = await sup.waitRun(runId);
+    assert.equal(result.tool_results[0].result.timed_out, true);
+    assert.deepEqual(store.openQuestions(), []);
+    assert.throws(() => sup.answer({ question_id: qid, answer: 'late' }), /no longer open/);
+  } finally { await sup.close(); }
+});
+
+test('wait_for on reports that are all finished and already read returns at once', async () => {
+  const { root, script } = project(TEAM, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'a', task: 'one' }, save: 'ra' },
+        { tool: 'wait_for', args: {}, until_finished: ['$ra.report_id'] },
+        { tool: 'wait_for', args: { report_ids: ['$ra.report_id'], timeout_s: 30 } }
+      ] },
+      a: { steps: [] }
+    }
+  });
+  const { sup } = await supervise(script);
+  try {
+    const t0 = Date.now();
+    const { runId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    const result = await sup.waitRun(runId);
+    assert.equal(result.tool_results.at(-1).result.note, 'no open reports');
+    assert.ok(Date.now() - t0 < 10000);
+  } finally { await sup.close(); }
+});

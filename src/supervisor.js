@@ -76,8 +76,8 @@ export class Supervisor {
 
   answer({ question_id, answer, by = 'local' }) {
     const q = this.store.question(question_id);
-    if (!q || q.answer != null) throw new Error(`question ${question_id} is not open`);
-    this.store.answerQuestion(question_id, answer, by);
+    if (!q || q.answer != null || q.closed) throw new Error(`question ${question_id} is no longer open`);
+    if (!this.store.answerQuestion(question_id, answer, by)) throw new Error(`question ${question_id} is no longer open`);
     const rt = this.#live.get(q.member_id);
     if (rt?.question?.id === question_id) {
       this.#resolveQuestion(q.member_id, { answer, answered_by: by, timed_out: false });
@@ -189,8 +189,16 @@ export class Supervisor {
     if (!rt) return;
     this.#live.delete(id);
     for (const mid of rt.offered) this.store.requeue(mid);
-    if (rt.waiter) clearTimeout(rt.waiter.timer);
-    if (rt.question) clearTimeout(rt.question.timer);
+    // A blocked call must settle, or its RPC connection hangs.
+    if (rt.waiter) {
+      clearTimeout(rt.waiter.timer);
+      rt.waiter.resolve({ error: 'member finished' });
+    }
+    if (rt.question) {
+      clearTimeout(rt.question.timer);
+      this.store.closeQuestion(rt.question.id);
+      rt.question.resolve({ error: 'member finished' });
+    }
     const state = result.status === 'ok' ? 'done' : 'failed';
     this.store.setState(id, state);
     this.store.setResult(id, result);
@@ -351,9 +359,17 @@ export class Supervisor {
 
   #waitFor(id, { report_ids = null, timeout_s } = {}) {
     const rt = this.#live.get(id);
+    this.#assertNotBlocked(rt);
     const reportIds = Array.isArray(report_ids) ? report_ids.filter(Number.isInteger) : null;
     const msgs = this.#claim(rt, id, reportIds);
     if (msgs.length) return { messages: msgs.map(render), timed_out: false };
+    // Every listed report is already finished and its messages are read: nothing can arrive.
+    if (reportIds?.length && reportIds.every((rid) => {
+      const r = this.store.member(rid);
+      return r && TERMINAL.has(r.state);
+    })) {
+      return { messages: [], timed_out: false, note: 'no open reports' };
+    }
     // Only a member that has delegated can have nothing left to wait for; a leaf calling
     // wait_for is waiting on its manager and blocks.
     if (reportIds == null && this.store.children(id).length > 0 && this.#openReports(id) === 0) {
@@ -367,15 +383,26 @@ export class Supervisor {
     });
   }
 
+  #assertNotBlocked(rt) {
+    if (rt.waiter || rt.question) {
+      const inCall = rt.waiter ? 'wait_for' : 'ask_human';
+      throw new Error(`member "${rt.member.name}" is already blocked in ${inCall} — one blocking call at a time`);
+    }
+  }
+
   #askHuman(id, { question, options = null, timeout_s } = {}) {
     if (typeof question !== 'string' || !question.trim()) throw new Error('ask_human needs "question"');
     const rt = this.#live.get(id);
+    this.#assertNotBlocked(rt);
     const opts = Array.isArray(options) ? options.filter((o) => typeof o === 'string') : null;
     const questionId = this.store.addQuestion({ memberId: id, question, options: opts });
     const seconds = clampSeconds(timeout_s, ASK_DEFAULT_S, ASK_MAX_S);
     this.store.setState(id, 'waiting');
     return new Promise((resolve) => {
-      const timer = setTimeout(() => this.#resolveQuestion(id, { answer: null, timed_out: true }), seconds * 1000);
+      const timer = setTimeout(() => {
+        this.store.closeQuestion(questionId);
+        this.#resolveQuestion(id, { answer: null, timed_out: true });
+      }, seconds * 1000);
       rt.question = { id: questionId, resolve, timer };
     });
   }
