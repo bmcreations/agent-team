@@ -70,19 +70,30 @@ These were checked on 2026-10-12 before committing to the design.
   are possible.
 - `claude --resume <id>` (interactive) in a directory not yet trusted shows the folder-trust
   prompt first, defaulting to "No, exit"; `-p` skips it. Every member workspace is a new
-  directory, so take-over hits this prompt and the human must accept it. Whether the
-  interactive TUI then loads the `-p` session's history is not yet verified.
+  directory, so take-over hits this prompt and the human must accept it. After accepting, the
+  interactive TUI loads the `-p` session's full history, and a later `-p --resume` sees the
+  turns the human added. Take-over and hand-back both work.
 
-**Codex** is not installed on this machine, so these come from the documentation
-(learn.chatgpt.com/docs/app-server, /docs/non-interactive-mode, /docs/cli/reference):
+**Codex** 0.162.1 (ChatGPT login), probed with a script driving `codex app-server`:
 
-- `codex app-server` speaks newline-delimited JSON-RPC over stdio. It has `thread/start`,
-  `turn/start`, `turn/steer` (input during a running turn, needs `expectedTurnId`),
-  `turn/interrupt`, and `thread/resume`, with `item/*` and `turn/*` events.
-- `codex exec` reads stdin once and has no input mid-run, so it cannot back a steerable member.
-- `codex resume <id>` opens a session interactively, and `codex --remote` attaches the TUI to a
-  running app-server.
-- Both `exec` and `app-server` use the saved CLI login.
+- `codex app-server` speaks newline-delimited JSON-RPC over stdio: `thread/start`,
+  `turn/start`, `turn/steer` (needs `expectedTurnId`), `turn/interrupt`, `thread/resume`, with
+  `item/*` and `turn/*` events. `codex exec` has no input mid-run and cannot back a member.
+- `turn/steer` during a running turn is taken into that turn, and is saved in the thread.
+- `turn/interrupt` ends the turn at once, but a shell command the turn started keeps running
+  until the app-server process exits. Pause-now for Codex must therefore also end the process.
+- `thread/resume` in a fresh app-server process recalls the whole thread, steer included.
+- `codex resume <id>` (interactive) shows the full history and accepts new turns.
+- Hand-back caveat: the interactive TUI starts Codex's managed daemon
+  (`codex app-server --listen unix:// --managed-daemon`), which keeps the thread's writer lock
+  after the TUI exits. A headless `thread/resume` then fails with "thread … already has an
+  active writer" until `codex app-server daemon stop`; after that, hand-back works and recalls
+  the human's turns. Stopping the daemon would also cut off the user's other Codex sessions, so
+  plan 1b should instead run take-over as `codex --remote` against the app-server the adapter
+  already owns, so the thread never changes writer. That path is not yet tested.
+- `codex app-server proxy` (stdio to the daemon's control socket) answered nothing, not even
+  `initialize`, in the probe.
+- `app-server` uses the saved CLI login.
 
 ## Decisions
 
@@ -188,9 +199,9 @@ Pause, resume, take-over, and hand-back are one mechanism: stop the harness afte
 its session id, and resume that session either headless or interactively.
 
 - **Pause** sends `stop`. The process exits after its turn and the workspace stays. *Pause
-  now* sends `interrupt`. For `claude`, if a stream-json interrupt turns out not to work, the
-  fallback is to kill the process and resume from the last completed turn, losing that turn's
-  partial work. Codex has `turn/interrupt`.
+  now* sends `interrupt`. `claude` honours a stream-json interrupt control request and keeps the
+  session open. Codex's `turn/interrupt` leaves started shell commands running, so the Codex
+  adapter also ends its app-server process.
 - **Resume** starts `claude -p --resume <sid>` or `thread/resume` in the same workspace, then
   delivers anything that queued while paused.
 - **Cancel** stops the member and keeps its workspace for inspection, matching today's rule
