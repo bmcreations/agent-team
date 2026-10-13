@@ -138,7 +138,7 @@ test('real codex: a session is steered, interrupted, resumed and taken over', { 
 
     // 5. The team tool works after resume.
     b.send({ type: 'message', id: 2, from: 'ana (human)',
-             text: 'Call the report_progress tool with the text "live check", then reply with the single word DONE.' });
+             text: 'Call the agent-team report_progress tool with the text "live check", then reply with the single word DONE.' });
     await b.next('ack');
     await b.next('idle');
     const progress = calls.find((r) => r.method === 'report_progress');
@@ -157,8 +157,10 @@ test('real codex: a session is steered, interrupted, resumed and taken over', { 
 
     // 6. Take-over: the human drives the thread in the TUI, then the member resumes headless.
     const inner = `stty rows 50 cols 160; exec ${shq(ADAPTER)} attach ${shq(resume)}`;
-    const args = platform() === 'darwin' ? ['-q', '/dev/null', 'sh', '-c', inner] : ['-qc', `sh -c ${shq(inner)}`, '/dev/null'];
-    pty = spawn('script', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, TERM: 'xterm-256color' } });
+    const scriptCmd = platform() === 'darwin' ? `script -q /dev/null sh -c ${shq(inner)}` : `script -qc ${shq(`sh -c ${shq(inner)}`)} /dev/null`;
+    // Node's stdin pipe is a socket, which macOS `script` rejects ("tcgetattr/ioctl: Operation not
+    // supported on socket"); `cat` hands it a real pipe. Closing our stdin after /quit lets cat exit.
+    pty = spawn('sh', ['-c', `cat | ${scriptCmd}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, TERM: 'xterm-256color' } });
     let screen = '';
     pty.stdout.on('data', (d) => { screen += d; });
     pty.stderr.on('data', (d) => { screen += d; });
@@ -176,6 +178,7 @@ test('real codex: a session is steered, interrupted, resumed and taken over', { 
     });
     await sleep(2000);
     await submit('/quit');
+    pty.stdin.end();
     const code = await Promise.race([ptyExit, sleep(30_000).then(() => 'hung')]);
     assert.notEqual(code, 'hung', `the TUI did not quit; screen tail: ${JSON.stringify(text().slice(-1500))}`);
     pty = null;
