@@ -206,3 +206,15 @@ test('take-over of a queued member fails without pausing it', async () => {
     assert.equal(store.member(memberId).state, 'queued');
   } finally { await sup.close(); }
 });
+
+test('take-over of a member paused before its session started points to resume and leaves it paused', async () => {
+  const { root, script } = project({ solo: { agent: 'claude', isolation: 'workspace' } }, {});
+  const { sup, store } = await supervise(script, { env: { PATH } });
+  try {
+    const { memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    sup.pause({ member_id: memberId });   // still launching: paused before claude starts
+    await until(() => store.member(memberId).state === 'paused');
+    await assert.rejects(sup.takeover({ member_id: memberId }), /has no claude session yet — resume it instead/);
+    assert.equal(store.member(memberId).state, 'paused');
+  } finally { await sup.close(); }
+});

@@ -206,7 +206,7 @@ export class Supervisor {
     if (m.state === 'taken_over') return this.#takeoverPayload(m);
     // Checked before pausing, so a member with no session to hand over is left as it was.
     if (m.state === 'queued') throw new Error(`"${m.name}" has not started yet — there is no session to take over`);
-    if (!TERMINAL.has(m.state) && !m.resume) throw new Error(`"${m.name}" has no claude session yet — try again in a moment`);
+    if (!TERMINAL.has(m.state) && m.state !== 'paused' && !m.resume) throw new Error(`"${m.name}" has no claude session yet — try again in a moment`);
     if (m.state !== 'paused') {
       const rt = this.#live.get(m.id);
       this.#halt(m, 'pause', { now: true, by });
@@ -954,6 +954,8 @@ export class Supervisor {
       fromKind = 'manager';
     }
     if (!target) throw new Error(`"${to}" is not your manager or one of your reports`);
+    // Before resolving: a finished member's resolution is forgotten.
+    if (TERMINAL.has(target.state)) throw new Error(`"${target.name}" has finished — delegate a new task`);
     // A queued report may still be resolving; a v1 or team report has no session to read it.
     if (fromKind === 'manager') {
       const r = await this.#resolve(target);

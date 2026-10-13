@@ -79,7 +79,8 @@ and delivers anything sent to it while paused. `cancel` keeps the workspace. `--
 applies the verb to the member and every report under it. Cancelling a manager also cancels
 its unfinished reports, and a root member that finishes, fails, or is cancelled cancels every
 unfinished member of its run, queued ones included. Pausing a manager alone leaves its reports
-working. A one-shot (v1) report cannot be cancelled and runs until it finishes. Each verb is signed with your OS
+working. A one-shot (v1) report that is already running cannot be cancelled and runs until it
+finishes. Each verb is signed with your OS
 user name, which is what the member and its manager are told.
 
 `attach` hands a claude member to you: its turn is interrupted, and once its process has
