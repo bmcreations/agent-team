@@ -152,6 +152,10 @@ test('a human reply from the page reaches both sides and leaves the thread state
 
     assert.equal((await post(v.base, '/api/threads/1/reply', { text: '   ' })).status, 400);
     assert.equal((await post(v.base, '/api/threads/1/reply', {})).status, 400);
+    const withState = await post(v.base, '/api/threads/1/reply', { text: 'decline it', state: 'declined' });
+    assert.equal(withState.status, 400);
+    assert.match(withState.json.error, /humans cannot change a thread's state/);
+    assert.equal(v.store.thread(1).state, 'open');
     assert.equal((await post(v.base, '/api/threads/99/reply', { text: 'hi' })).status, 404);
     assert.equal((await post(v.base, '/api/threads/1/reply', { text: 'hi' }, { Origin: 'https://evil.example' })).status, 403);
     assert.equal((await post(v.base, '/api/threads/1/reply', { text: 'hi' }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
