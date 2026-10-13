@@ -586,3 +586,60 @@ test('a question delivered to a live lead is declined when that run ends unanswe
     assert.ok(!got.some((x) => x.includes('unrelated work')));
   } finally { await sup.close(); store.close(); }
 });
+
+// ---- the receiving side asks back and waits ----
+
+test('a lead with a finished report asks the requester a question and waits for the answer', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    'b-dev': { steps: [{ say: 'did it' }] },
+    'b-lead': { steps: [
+      { tool: 'delegate', args: { to: 'b-dev', task: 'x' }, save: 'd' },
+      { tool: 'wait_for', args: { report_ids: ['$d.report_id'] }, until_finished: ['$d.report_id'] },
+      { sleep_ms: 1200 },
+      { tool: 'reply', args: { thread: 1, text: 'which screen?' } },
+      { tool: 'wait_for', args: { timeout_s: 8 }, save: 'w' },
+      { tool: 'reply', args: { thread: 1, state: 'done', text: '$w.messages.0.text' } }
+    ] },
+    manager: { steps: [
+      { sleep_ms: 600 },
+      { tool: 'request', args: { team: b, text: 'does rotate crash?' }, save: 't' },
+      { tool: 'wait_for', args: { timeout_s: 10 }, save: 'q' },
+      { tool: 'reply', args: { thread: '$t.thread_id', text: 'login' } },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] }
+  } }));
+  const { sup, store } = await supervise(t.a.script, { shared: true, stopMs: 500 });
+  try {
+    const live = sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own work' });
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(mgr.runId);
+    await sup.waitRun(live.runId);
+    const waits = results(store, live.memberId, 'wait_for');
+    assert.ok(!waits.some((w) => w.note === 'no open reports' && w.messages.length === 0 && !w.timed_out && w === waits.at(-1)),
+      JSON.stringify(waits.at(-1)));
+    const th = store.thread(1);
+    assert.equal(th.state, 'done');
+    assert.match(th.result.summary, /login/);
+    assert.ok(!store.threadPosts(1).some((p) => /without answering/.test(p.text)));
+  } finally { await sup.close(); store.close(); }
+});
+
+test('a thread run that asks back and goes idle stays until the answer arrives', async () => {
+  await withTeams(({ b }) => ({ by_member: {
+    manager: { steps: [
+      { tool: 'request', args: { team: b, text: 'what now?' }, save: 't' },
+      { tool: 'wait_for', args: { timeout_s: 10 }, save: 'q' },
+      { sleep_ms: 700 },   // long enough for an idle lead to be stopped, if nothing keeps it
+      { tool: 'reply', args: { thread: '$t.thread_id', text: 'pixel 8' } },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] },
+    ...lead([replyTo({ text: 'which device?' })], { result: { status: 'ok', summary: 'pixel 8 it is' } })
+  } }), {}, ({ store, mgr }) => {
+    const th = store.thread(1);
+    assert.equal(th.state, 'done');
+    assert.deepEqual(store.threadPosts(1).map((p) => [p.side, p.text]).slice(0, 3),
+      [['requester', 'what now?'], ['receiver', 'which device?'], ['requester', 'pixel 8']]);
+    assert.equal(th.result.summary, 'pixel 8 it is');
+    assert.ok(messagesOf(store, mgr.memberId).some((m) => /done ok: pixel 8 it is/.test(m.text)));
+  });
+});

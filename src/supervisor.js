@@ -950,12 +950,28 @@ export class Supervisor {
 
   // ---- inbox delivery ----
 
-  // What keeps a member working: reports still running, and threads it (or a finished report
-  // it now stands in for) opened that are not closed.
+  // What keeps a member working: reports still running, threads it (or a finished report it
+  // now stands in for) opened that are not closed, and threads it owns where its own post is
+  // the newest: it asked the requester something and is waiting. A thread it owns that the
+  // requester spoke last is not work, or a lead that ignores one would hold its requester forever.
   #openWork(id) {
     const reports = this.store.children(id).filter((c) => !TERMINAL.has(c.state)).length;
-    const threads = this.store.threadsInState(['open', 'accepted']).filter((t) => this.#holder(t) === id).length;
+    let threads = 0;
+    for (const t of this.store.threadsInState(['open', 'accepted'])) {
+      if (this.#holder(t) === id) threads++;
+      else if (t.owner_member === id && this.#ownerAsked(t)) threads++;
+    }
     return reports + threads;
+  }
+
+  // The owner's latest post is a plain one, not an accept or a close.
+  #ownerAsked(t) {
+    const last = this.store.threadPosts(t.id).at(-1);
+    return last?.side === 'receiver' && last.state == null;
+  }
+
+  #ownsOpenThread(id) {
+    return this.store.threadsInState(['open', 'accepted']).some((t) => t.owner_member === id);
   }
 
   // Exactly one path delivers each message: a blocked wait_for takes it as its tool result;
@@ -1458,7 +1474,7 @@ export class Supervisor {
     // Only a member that has delegated can have nothing left to wait for; a leaf calling
     // wait_for is waiting on its manager and blocks.
     if (reportIds == null && (this.store.children(id).length > 0 || this.store.threadsFrom(id).length > 0) &&
-        this.#openWork(id) === 0) {
+        this.#openWork(id) === 0 && !this.#ownsOpenThread(id)) {
       return { messages: [], timed_out: false, note: 'no open reports' };
     }
     const seconds = clampSeconds(timeout_s, WAIT_DEFAULT_S, WAIT_MAX_S);
