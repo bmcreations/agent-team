@@ -41,7 +41,8 @@ function session() {
   const exit = new Promise((r) => child.on('close', r));
   const send = (m) => child.stdin.write(JSON.stringify(m) + '\n');
   const starts = () => readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  return { send, next, lines, exit, starts };
+  const close = () => child.stdin.end();
+  return { send, next, lines, exit, starts, close };
 }
 
 const brief = (extra = {}) => ({ task: 'build it', cwd: mkdtempSync(join(tmpdir(), 'at-cw-')), read_only: false, ...extra });
@@ -167,4 +168,41 @@ test('the supervisor runs a claude member as a session and steers it', { timeout
     assert.equal(store.message(message_id).state, 'delivered');
     assert.equal(store.run(runId).cost_usd, 0.25);
   } finally { await sup.close(); }
+});
+
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const goneWithin = async (pid, ms) => {
+  const deadline = Date.now() + ms;
+  while (alive(pid)) {
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return true;
+};
+
+// The supervisor dying closes the adapter's stdin. claude must not run on into a session that
+// a recovering supervisor resumes in a second claude.
+test('stdin closing mid-turn interrupts claude, and it exits promptly', { timeout: 10_000 }, async () => {
+  const s = session();
+  s.send({ type: 'start', brief: brief({ task: 'HOLD LINGER' }), resume: null, note: null });
+  await s.next('event');
+  const [{ pid }] = s.starts();
+  s.close();
+  const gone = await goneWithin(pid, 1500);
+  if (!gone) process.kill(pid, 'SIGKILL');
+  await s.exit;
+  assert.ok(gone, 'claude ran on after the adapter lost its supervisor');
+});
+
+test('stdin closing after a stop mid-turn kills claude after a short grace', { timeout: 10_000 }, async () => {
+  const s = session();
+  s.send({ type: 'start', brief: brief({ task: 'HOLD LINGER' }), resume: null, note: null });
+  await s.next('event');
+  const [{ pid }] = s.starts();
+  s.send({ type: 'stop' });   // closes claude's stdin: the turn can no longer be interrupted
+  s.close();
+  const gone = await goneWithin(pid, 5000);
+  if (!gone) process.kill(pid, 'SIGKILL');
+  await s.exit;
+  assert.ok(gone, 'claude ran on after the adapter lost its supervisor');
 });

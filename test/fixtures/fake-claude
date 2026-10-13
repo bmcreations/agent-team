@@ -3,8 +3,10 @@
 // from Claude Code 2.1.296: a user line whose content is a plain string is dropped, an accepted
 // one is echoed with isReplay when --replay-user-messages is set, and an interrupt
 // control_request ends a held turn with an error result. A turn whose text contains HOLD stays
-// open until an interrupt or a message containing RELEASE; CRASH exits 3. total_cost_usd is
-// cumulative, 0.25 per turn. Every start appends {argv, cwd, mcp_tool_timeout, mcp} to
+// open until an interrupt or a message containing RELEASE; CRASH exits 3. Like claude, a turn
+// whose text contains LINGER runs on after stdin closes (until a signal ends it); otherwise
+// stdin closing ends the process. total_cost_usd is
+// cumulative, 0.25 per turn. Every start appends {argv, cwd, pid, mcp_tool_timeout, mcp} to
 // $FAKE_CLAUDE_LOG. Without -p it is a take-over: it records and exits $FAKE_CLAUDE_EXIT.
 import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -15,7 +17,7 @@ const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 
 if (process.env.FAKE_CLAUDE_LOG) {
   const mcpPath = flag('--mcp-config');
   appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({
-    argv, cwd: process.cwd(), mcp_tool_timeout: process.env.MCP_TOOL_TIMEOUT ?? null,
+    argv, cwd: process.cwd(), pid: process.pid, mcp_tool_timeout: process.env.MCP_TOOL_TIMEOUT ?? null,
     mcp: mcpPath ? JSON.parse(readFileSync(mcpPath, 'utf8')) : null
   }) + '\n');
 }
@@ -35,7 +37,9 @@ const endTurn = (error) => {
   turn = null;
 };
 
-createInterface({ input: process.stdin }).on('line', (line) => {
+const rl = createInterface({ input: process.stdin });
+rl.on('close', () => { if (turn?.includes('LINGER')) setInterval(() => {}, 1000); });
+rl.on('line', (line) => {
   const m = JSON.parse(line);
   if (m.type === 'control_request' && m.request?.subtype === 'interrupt') {
     out({ type: 'control_response', response: { subtype: 'success', request_id: m.request_id, response: {} } });

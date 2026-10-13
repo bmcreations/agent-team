@@ -13,6 +13,8 @@ const BIN = fileURLToPath(new URL('../bin/agent-team.js', import.meta.url));
 // claude's own MCP tool timeout must outlast the longest blocking team tool (ask_human, 7200 s).
 export const MCP_TOOL_TIMEOUT_MS = 7_260_000;
 const STDERR_TAIL = 2000;
+// How long claude gets to exit after the supervisor has gone before it is killed.
+const ORPHAN_GRACE_MS = 2000;
 
 export function claudeSessionArgs(brief, { resume, mcpConfig }) {
   const args = [
@@ -165,7 +167,20 @@ export function runClaudeSession({ artifacts }) {
       if (inTurn) write({ type: 'control_request', request_id: `int-${randomUUID()}`, request: { subtype: 'interrupt' } });
       else { out({ type: 'idle', interrupted: true }); endClaude(); }
     }
-  }).on('close', () => { if (claude && !stopping) endClaude(); });
+  }).on('close', () => {
+    // The supervisor closed our stdin or died. claude would finish its turn first, writing the
+    // session that a recovering supervisor resumes in a second claude, so the turn is
+    // interrupted and claude killed if it is still there after a short grace.
+    if (!claude || claude.exitCode !== null || claude.signalCode !== null) return;
+    if (inTurn && !interrupting && !stopping) {
+      interrupting = true;
+      write({ type: 'control_request', request_id: `int-${randomUUID()}`, request: { subtype: 'interrupt' } });
+    } else if (!stopping) endClaude();
+    setTimeout(() => claude.kill('SIGTERM'), ORPHAN_GRACE_MS).unref();
+    setTimeout(() => claude.kill('SIGKILL'), ORPHAN_GRACE_MS * 2).unref();
+  });
+  // With the supervisor gone, writing to stdout fails; the exit path must still run.
+  process.stdout.on('error', () => {});
 
   // The supervisor's last resort after an interrupt is SIGTERM; claude goes with us.
   process.on('SIGTERM', () => { claude?.kill('SIGTERM'); process.exit(143); });
