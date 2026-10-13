@@ -93,8 +93,10 @@ session; your turns are in its history. While you have it, `pause` refuses it an
 supervisor restart leaves it alone. If `attach` dies before it can hand back (a closed
 terminal, a stopped supervisor), the member stays taken over: run `attach` again to reopen the
 same session, or `agent-team handback <run> <member>` to resume it headless. If the run is
-at its `max_cost_usd` cap when you hand back (your turns cost too), the member stays paused
-and `attach` or `handback` says so; resume it with `--max-cost-usd`. Taking over a codex member comes in a later plan.
+at its `max_cost_usd` cap when you hand back, the member stays paused and `attach` or
+`handback` says so; resume it with `--max-cost-usd`. Your own turns count toward the cap
+too, but only from the member's next turn after it resumes, when its claude session reports
+what it has cost since the member last reported. Taking over a codex member comes in a later plan.
 
 ## Resolving the agent
 

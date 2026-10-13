@@ -178,7 +178,7 @@ test('handback leaves a member paused when its run is at its cost cap, and says 
     await until(() => store.member(memberId).state === 'waiting');
     sup.pause({ member_id: memberId });
     await until(() => store.member(memberId).state === 'paused');
-    // Stands in for a human's claude session spending past the cap while it was taken over.
+    // Stands in for other members spending past the cap while this one was taken over.
     const call = async (method, params) => {
       if (method === 'handback') return sup.handback(params);
       store.setState(memberId, 'taken_over');

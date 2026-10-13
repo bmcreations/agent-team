@@ -231,8 +231,10 @@ export class Supervisor {
 
   // The human's terminal session has ended: run the member headless again from that session.
   // drove is false when the human's claude never started, so there is nothing to tell it.
-  // A run at its cost cap (the human's turns cost too) leaves the member paused until a
-  // resume raises the cap; `skipped` says why.
+  // A run at its cost cap leaves the member paused until a resume raises the cap; `skipped`
+  // says why. The cap is met here by what other members spent while this one was taken over:
+  // the human's own turns are not seen until the member's next turn after it resumes, when the
+  // adapter reports the session's cost since the member's recorded spend.
   handback({ by = 'local', drove = true, ...who } = {}) {
     const m = this.#target(who);
     if (m.state !== 'taken_over') throw new Error(`"${m.name}" is not taken over (${m.state})`);
