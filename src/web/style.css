@@ -238,6 +238,7 @@ time { font-variant-numeric: tabular-nums; }
           background: var(--amber-soft); color: var(--amber); font-size: 14px; }
 .banner.info { background: var(--sunk); color: var(--muted); }
 .banner .icon { margin-top: 2px; }
+.banner > span { min-width: 0; overflow-wrap: anywhere; }
 .run { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 440px); gap: 18px; align-items: start; }
 .run-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; min-width: 0; }
 .run-side { position: sticky; top: 80px; min-width: 0; max-height: calc(100vh - 100px); overflow: auto; }
