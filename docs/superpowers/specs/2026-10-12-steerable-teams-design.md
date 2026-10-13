@@ -54,6 +54,7 @@ These were checked on 2026-10-12 before committing to the design.
   message sent as a plain string mid-run was silently dropped.
 - After `result`, writing another message starts a new turn in the same process and session.
 - `claude -p --resume <session_id>`, run from the same directory, recalled the earlier turns.
+  It keeps the same session id (`test/live/claude.test.js`, run 2026-10-13).
   Sessions are stored per working directory under `~/.claude/projects` on the machine that ran
   them, so resume and take-over must run on the same machine and path.
 - In `--permission-mode plan`, which read-only members use, an MCP tool call is denied even

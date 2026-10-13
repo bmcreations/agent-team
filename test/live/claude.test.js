@@ -1,4 +1,4 @@
-// Opt-in: runs the real `claude` on Haiku and costs a few cents. `npm run test:live`.
+// Opt-in: runs the real `claude` on Haiku and costs about $0.30. `npm run test:live`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -44,8 +44,8 @@ test('real claude: a session is steered between turns, interrupted, and resumed'
   assert.equal(await a.exit, 0);
 
   const b = run({ type: 'start', brief, resume, note: 'What word did you reply with first? Answer with that word only.' });
-  // Whether `-p --resume` keeps the session id is not pinned; the adapter reports what init says.
-  assert.equal(typeof (await b.next('session')).resume, 'string');
+  // Claude Code 2.1.296: `-p --resume <id>` keeps the session id.
+  assert.equal((await b.next('session')).resume, resume);
   await b.next('idle');
   b.send({ type: 'stop' });
   const result = await b.next('result');
