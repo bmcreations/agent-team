@@ -326,7 +326,9 @@ const threadTitle = (t) => snippet(t.task || (t.kind === 'question' ? 'A questio
 const runLink = (id, label) => (id == null ? null : h('a', { href: `#/run/${id}` }, label));
 const sides = (t) => `${t.from_member?.name ?? 'someone'} → ${t.owner?.name ?? 'waiting for a lead'}`;
 function threadLinks(t) {
-  const links = present(runLink(t.from_run, `Requester run #${t.from_run}`), runLink(t.run_id, `Thread run #${t.run_id}`));
+  const lead = t.owner?.run_id;
+  const links = present(runLink(t.from_run, `Requester run #${t.from_run}`), runLink(t.run_id, `Thread run #${t.run_id}`),
+    lead != null && lead !== t.run_id ? runLink(lead, `Lead run #${lead}`) : null);
   return links.length ? h('div', { class: 'thread-links' }, links.flatMap((l, i) => (i ? [' · ', l] : [l]))) : null;
 }
 
@@ -401,9 +403,8 @@ function drawThread() {
   else S.panel.talk.replaceChildren(h('li', { class: 'empty' }, 'Nothing has been posted yet.'));
   if (atEnd) S.panel.talk.scrollTop = S.panel.talk.scrollHeight;
   // Posting needs the serve process that owns a live run on one side of the thread.
-  const runs = [t.from_run, t.run_id].filter((r) => r != null).map((r) => S.state?.runs.find((x) => x.id === r)).filter(Boolean);
   const closed = t.state === 'declined' || t.state === 'done';
-  const canPost = canPostToThread(t, runs);
+  const canPost = canPostToThread(t, S.state?.runs ?? []);
   S.panel.composer.el.hidden = !canPost;
   S.panel.note.hidden = canPost;
   S.panel.note.textContent = closed ? `This thread is ${t.state}, so it takes no more posts.` : 'No run on either side is live under `agent-team serve`, so this page can read the thread but not post to it.';
