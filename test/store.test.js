@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { openStore } from '../src/store.js';
 
 function seeded() {
@@ -101,4 +102,60 @@ test('a store file is readable by its owner only: it holds member tokens', () =>
   const store = openStore(path);
   store.close();
   assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test('a 1a database is migrated in place and keeps its rows', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig-')), 's.db');
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY, project TEXT NOT NULL, task TEXT NOT NULL,
+              root_member INTEGER, status TEXT NOT NULL, created_at INTEGER NOT NULL);
+            CREATE TABLE members (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, parent_id INTEGER,
+              name TEXT NOT NULL, task TEXT NOT NULL, depth INTEGER NOT NULL, state TEXT NOT NULL,
+              token TEXT NOT NULL UNIQUE, harness_id TEXT, workspace TEXT, result TEXT,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            INSERT INTO runs VALUES (1, '/p', 'old run', NULL, 'running', 0);`);
+  old.close();
+  const store = openStore(path);
+  assert.equal(store.run(1).task, 'old run');
+  assert.equal(store.run(1).cost_usd, 0);
+  const lead = store.addMember({ runId: 1, parentId: null, name: 'lead', task: 't', depth: 0 });
+  store.setResume(lead.id, 'sid-1');
+  assert.equal(store.member(lead.id).resume, 'sid-1');
+  store.close();
+  openStore(path).close();   // a second open finds the migrations applied and does nothing
+});
+
+test('run cost accumulates and run limits are stored', () => {
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project: '/p', task: 't', timeoutMs: 5000, budget: 7, maxCostUsd: 2 });
+  assert.equal(store.run(runId).timeout_ms, 5000);
+  assert.equal(store.run(runId).budget, 7);
+  assert.equal(store.run(runId).max_cost_usd, 2);
+  store.setBudget(runId, 6);
+  assert.equal(store.run(runId).budget, 6);
+  store.setRunCap(runId, 3.5);
+  assert.equal(store.run(runId).max_cost_usd, 3.5);
+  assert.equal(store.addRunCost(runId, 0.25), 0.25);
+  assert.equal(store.addRunCost(runId, 0.5), 0.75);
+});
+
+test('membersInStates finds members across runs', () => {
+  const store = openStore(':memory:');
+  const r1 = store.createRun({ project: '/a', task: 't' });
+  const r2 = store.createRun({ project: '/b', task: 't' });
+  const a = store.addMember({ runId: r1, parentId: null, name: 'a', task: 't', depth: 0 });
+  const b = store.addMember({ runId: r2, parentId: null, name: 'b', task: 't', depth: 0 });
+  store.setState(a.id, 'running');
+  store.setState(b.id, 'waiting');
+  assert.deepEqual(store.membersInStates(['running', 'waiting']).map((m) => m.name), ['a', 'b']);
+  assert.deepEqual(store.membersInStates(['paused']), []);
+});
+
+test('claimForQuestion takes human and manager messages and leaves report messages queued', () => {
+  const { store, lead } = seeded();
+  const human = store.enqueue({ to: lead.id, fromKind: 'human', fromName: 'b', text: 'h' });
+  const report = store.enqueue({ to: lead.id, fromKind: 'report', fromName: 'r', reportId: 99, text: 'progress: x' });
+  assert.deepEqual(store.claimForQuestion(lead.id).map((m) => m.id), [human]);
+  assert.equal(store.message(human).state, 'delivered');
+  assert.equal(store.message(report).state, 'queued');
 });

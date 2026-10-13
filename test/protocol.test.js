@@ -45,3 +45,15 @@ test('MemberSession frames lines both ways and reports the exit', async () => {
   assert.match(stderr, /bye/);
   assert.deepEqual(seen.map((m) => m.type), ['session', 'event', 'ack', 'result']);
 });
+
+test('session.resume and the idle fields are shape-checked', () => {
+  const ok = (m) => assert.ok(parseAdapterLine(JSON.stringify(m)), JSON.stringify(m));
+  const bad = (m) => assert.equal(parseAdapterLine(JSON.stringify(m)), null, JSON.stringify(m));
+  ok({ type: 'session', harness_id: 'h', resume: 'sid' });
+  ok({ type: 'session', harness_id: 'h' });
+  bad({ type: 'session', harness_id: 'h', resume: 42 });
+  ok({ type: 'idle', interrupted: true, cost_usd: 0.01 });
+  bad({ type: 'idle', interrupted: 'yes' });
+  bad({ type: 'idle', cost_usd: -1 });
+  bad({ type: 'idle', cost_usd: 'NaN' });
+});

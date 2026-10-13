@@ -28,6 +28,33 @@ CREATE TABLE IF NOT EXISTS questions (
   question TEXT NOT NULL, options TEXT, answer TEXT, answered_by TEXT, closed INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);
 `;
 
+// Each entry upgrades the schema by one version. SCHEMA stays the 1a shape, so a fresh
+// database and a 1a one take the same path. BEGIN IMMEDIATE serializes two CLIs opening the
+// same file; the version is re-read inside the lock so the loser applies nothing twice.
+const MIGRATIONS = [
+  `ALTER TABLE members ADD COLUMN resume TEXT;
+   ALTER TABLE runs ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
+   ALTER TABLE runs ADD COLUMN timeout_ms INTEGER;
+   ALTER TABLE runs ADD COLUMN budget INTEGER;
+   ALTER TABLE runs ADD COLUMN max_cost_usd REAL;`
+];
+
+function migrate(db) {
+  const version = () => db.prepare('PRAGMA user_version').get().user_version;
+  if (version() >= MIGRATIONS.length) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (let v = version(); v < MIGRATIONS.length; v++) {
+      db.exec(MIGRATIONS[v]);
+      db.exec(`PRAGMA user_version = ${v + 1}`);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
 const now = () => Date.now();
 const parse = (s) => (s == null ? null : JSON.parse(s));
 
@@ -39,6 +66,7 @@ export function openStore(path) {
   // instead of failing with SQLITE_BUSY.
   db.exec('PRAGMA busy_timeout = 5000');
   db.exec(SCHEMA);
+  migrate(db);
   const q = (sql) => db.prepare(sql);
   const memberRow = (row) => row && { ...row, result: parse(row.result) };
   const questionRow = (row) => row && { ...row, options: parse(row.options) };
@@ -50,9 +78,15 @@ export function openStore(path) {
   return {
     close: () => db.close(),
 
-    createRun: ({ project, task }) => Number(
-      q("INSERT INTO runs (project, task, status, created_at) VALUES (?, ?, 'running', ?)")
-        .run(project, task, now()).lastInsertRowid),
+    createRun: ({ project, task, timeoutMs = null, budget = null, maxCostUsd = null }) => Number(
+      q("INSERT INTO runs (project, task, status, created_at, timeout_ms, budget, max_cost_usd) VALUES (?, ?, 'running', ?, ?, ?, ?)")
+        .run(project, task, now(), timeoutMs, budget, maxCostUsd).lastInsertRowid),
+    setBudget: (id, left) => q('UPDATE runs SET budget = ? WHERE id = ?').run(left, id),
+    setRunCap: (id, usd) => q('UPDATE runs SET max_cost_usd = ? WHERE id = ?').run(usd, id),
+    addRunCost(id, usd) {
+      q('UPDATE runs SET cost_usd = cost_usd + ? WHERE id = ?').run(usd, id);
+      return q('SELECT cost_usd FROM runs WHERE id = ?').get(id).cost_usd;
+    },
     run: (id) => q('SELECT * FROM runs WHERE id = ?').get(id),
     setRunRoot: (id, memberId) => q('UPDATE runs SET root_member = ? WHERE id = ?').run(memberId, id),
     finishRun: (id, status) => q('UPDATE runs SET status = ? WHERE id = ?').run(status, id),
@@ -72,6 +106,10 @@ export function openStore(path) {
     children: (id) => q('SELECT * FROM members WHERE parent_id = ? ORDER BY id').all(id).map(memberRow),
     setState: (id, state) => q('UPDATE members SET state = ?, updated_at = ? WHERE id = ?').run(state, now(), id),
     setHarness: (id, harnessId) => q('UPDATE members SET harness_id = ? WHERE id = ?').run(harnessId, id),
+    setResume: (id, resume) => q('UPDATE members SET resume = ? WHERE id = ?').run(resume, id),
+    membersInStates: (states) => q(
+      `SELECT * FROM members WHERE state IN (${states.map(() => '?').join(', ')}) ORDER BY id`
+    ).all(...states).map(memberRow),
     setWorkspace: (id, dir) => q('UPDATE members SET workspace = ? WHERE id = ?').run(dir, id),
     setResult: (id, result) => q('UPDATE members SET result = ? WHERE id = ?').run(JSON.stringify(result), id),
 
@@ -104,6 +142,14 @@ export function openStore(path) {
     claimForWait(memberId, reportIds = null) {
       const rows = q("SELECT * FROM messages WHERE to_member = ? AND state IN ('queued', 'offered') ORDER BY id")
         .all(memberId).filter((m) => reportIds == null || m.report_id == null || reportIds.includes(m.report_id));
+      for (const m of rows) q("UPDATE messages SET state = 'delivered' WHERE id = ?").run(m.id);
+      return rows.map((m) => ({ ...m, state: 'delivered' }));
+    },
+    // The ask_human path: only a human or the member's manager can cut a question short; a
+    // report's progress waits for the member's next wait_for.
+    claimForQuestion(memberId) {
+      const rows = q("SELECT * FROM messages WHERE to_member = ? AND state IN ('queued', 'offered') " +
+                     "AND from_kind IN ('human', 'manager') ORDER BY id").all(memberId);
       for (const m of rows) q("UPDATE messages SET state = 'delivered' WHERE id = ?").run(m.id);
       return rows.map((m) => ({ ...m, state: 'delivered' }));
     },
