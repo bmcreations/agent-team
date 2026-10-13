@@ -43,6 +43,7 @@ export class Supervisor {
   #runs = new Map();          // runId -> { projectRoot, config, budget }
   #runWaiters = new Map();    // runId -> [resolve]
   #closing = false;
+  #resolutions = new Map();   // memberId -> Promise of { resolved, caps } | { team: true } | { error }
 
   constructor({ store, adapterDir, skillsDir = null, socketPath, env = {}, maxRunning = 6,
                 timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000 }) {
@@ -71,6 +72,7 @@ export class Supervisor {
                          timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : this.timeoutMs });
     const { id } = this.store.addMember({ runId, parentId: null, name: member, task, depth: 0 });
     this.store.setRunRoot(runId, id);
+    this.#resolve(this.store.member(id));
     this.#schedule(id);
     return { runId, memberId: id };
   }
@@ -118,9 +120,18 @@ export class Supervisor {
     this.#drain();
   }
 
+  // A member blocked in wait_for or ask_human holds no slot, or a manager waiting on its
+  // reports would starve them. When it wakes the count can pass maxRunning until members
+  // finish; that overshoot is the price of never deadlocking.
+  #running() {
+    let n = 0;
+    for (const rt of this.#live.values()) if (!rt.waiter && !rt.question) n++;
+    return n;
+  }
+
   #drain() {
     for (const id of [...this.#pending]) {
-      if (this.#live.size >= this.maxRunning) return;
+      if (this.#running() >= this.maxRunning) return;
       const m = this.store.member(id);
       if (m.parent_id != null) {
         const { config } = this.#runs.get(m.run_id);
@@ -132,35 +143,53 @@ export class Supervisor {
     }
   }
 
-  async #launch(id) {
-    const m = this.store.member(id);
+  #ctx(m) {
     const run = this.#runs.get(m.run_id);
-    // Registered before any await, so #drain counts this member against the caps at once.
-    const rt = { member: m, session: null, resolved: null, workspace: null, result: null,
-                 offered: new Set(), staleOffers: new Set(), idle: false, stopping: false, waiter: null, question: null };
-    this.#live.set(id, rt);
-    this.store.setState(id, 'running');
-    this.store.addEvent(id, 'started', {});
-
-    const ctx = {
+    return {
       config: run.config, projectRoot: run.projectRoot, member: m.name, task: m.task,
       adapterDir: this.adapterDir, assignments: {}, skillsDir: this.skillsDir, env: this.env,
       timeoutMs: run.timeoutMs, budget: run.budget, depth: m.depth,
       teams: teamKeys(run.projectRoot), originRoot: run.projectRoot
     };
+  }
+
+  // Each member is resolved once, starting when it is created; #launch and #sendTo share the
+  // answer. A failure is kept as { error } so it fails the launch, not the delegate call.
+  #resolve(m) {
+    let p = this.#resolutions.get(m.id);
+    if (!p) {
+      const { config } = this.#runs.get(m.run_id);
+      p = config.members[m.name].team
+        ? Promise.resolve({ team: true })
+        : resolveCaps(this.#ctx(m)).catch((error) => ({ error }));
+      this.#resolutions.set(m.id, p);
+    }
+    return p;
+  }
+
+  async #launch(id) {
+    const m = this.store.member(id);
+    const run = this.#runs.get(m.run_id);
+    // Registered before any await, so #drain counts this member against the caps at once.
+    const rt = { member: m, session: null, resolved: null, caps: null, workspace: null, result: null,
+                 offered: new Set(), staleOffers: new Set(), idle: false, stopping: false, waiter: null, question: null };
+    this.#live.set(id, rt);
+    this.store.setState(id, 'running');
+    this.store.addEvent(id, 'started', {});
+
+    const ctx = this.#ctx(m);
+    const r = await this.#resolve(m);
+    if (r.error) throw r.error;
     // Teams in other projects and v1 adapters keep today's one-shot loop, with no session
     // for send_to to deliver to.
-    if (run.config.members[m.name].team) {
+    if (r.team || r.caps.protocol !== 2) {
       rt.oneShot = true;
-      return this.#finish(id, await runMember(ctx));
-    }
-    const { resolved, caps } = await resolveCaps(ctx);
-    if (caps.protocol !== 2) {
-      rt.oneShot = true;
-      return this.#finish(id, await runMember(ctx));
+      return this.#finish(id, await runMember(r.team ? ctx : { ...ctx, preresolved: r }));
     }
 
+    const { resolved, caps } = r;
     rt.resolved = resolved;
+    rt.caps = caps;
     const prep = prepareMember(ctx, { resolved, caps });
     rt.workspace = prep.workspace;
     this.store.setWorkspace(id, prep.workspace.dir);
@@ -366,12 +395,13 @@ export class Supervisor {
     budget.runs -= 1;
     const child = this.store.addMember({ runId: m.run_id, parentId: id, name: to, task, depth: m.depth + 1 });
     this.store.addEvent(id, 'delegated', { to, report_id: child.id });
+    this.#resolve(this.store.member(child.id));
     this.#schedule(child.id);
     return { report_id: child.id };
   }
 
   // Along the reporting line only: the caller's manager, or one of its own reports.
-  #sendTo(id, { to, text } = {}) {
+  async #sendTo(id, { to, text } = {}) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('send_to needs "text"');
     const m = this.#live.get(id).member;
     const parent = m.parent_id != null ? this.store.member(m.parent_id) : null;
@@ -386,12 +416,18 @@ export class Supervisor {
       fromKind = 'manager';
     }
     if (!target) throw new Error(`"${to}" is not your manager or one of your reports`);
-    // Same guard as send(): a stopping member will not read another message.
+    // A queued report may still be resolving; a v1 or team report has no session to read it.
+    if (fromKind === 'manager') {
+      const r = await this.#resolve(target);
+      if (r.team || r.caps?.protocol !== 2) {
+        throw new Error(`"${target.name}" runs one-shot and cannot receive messages — wait for its result`);
+      }
+    }
+    // Same guard as send(): a stopping member will not read another message. Re-read: the
+    // target can have finished during the await.
+    target = this.store.member(target.id);
     if (TERMINAL.has(target.state) || this.#live.get(target.id)?.stopping) {
       throw new Error(`"${target.name}" has finished — delegate a new task`);
-    }
-    if (this.#live.get(target.id)?.oneShot) {
-      throw new Error(`"${target.name}" runs one-shot and cannot receive messages — wait for its result`);
     }
     const messageId = this.store.enqueue({
       to: target.id, fromKind, fromName: m.name, reportId: fromKind === 'report' ? id : null, text
@@ -424,6 +460,7 @@ export class Supervisor {
     return new Promise((resolve) => {
       const timer = setTimeout(() => this.#resolveWaiter(id, { messages: [], timed_out: true }), seconds * 1000);
       rt.waiter = { resolve, timer, reportIds };
+      this.#drain();   // a blocked member gives up its slot
     });
   }
 
@@ -448,6 +485,7 @@ export class Supervisor {
         this.#resolveQuestion(id, { answer: null, timed_out: true });
       }, seconds * 1000);
       rt.question = { id: questionId, resolve, timer };
+      this.#drain();
     });
   }
 }
