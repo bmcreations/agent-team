@@ -90,7 +90,8 @@ exited, `claude --resume <session>` starts in its workspace in your terminal. It
 told it was taken over. Claude may first ask whether to trust the workspace folder. When you
 exit claude, however you exit, the member resumes headless and is told that you drove the
 session; your turns are in its history. While you have it, `pause` refuses it and a
-supervisor restart leaves it alone. If `attach` dies before it can hand back (a closed
+supervisor restart leaves it alone; a cancel still reaches it, including one that cascades from
+its manager or the run, and `attach` then says there is nothing to hand back. If `attach` dies before it can hand back (a closed
 terminal, a stopped supervisor), the member stays taken over: run `attach` again to reopen the
 same session, or `agent-team handback <run> <member>` to resume it headless. If the run is
 at its `max_cost_usd` cap when you hand back, the member stays paused and `attach` or

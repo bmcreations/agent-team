@@ -58,8 +58,14 @@ export async function attach(who, { call = adminCall, run = spawnSync, log = (s)
     log(handbackNotice(back));
     return back;
   } catch (err) {
-    log(`agent-team: ${t.name} is still taken over: ${err.message}\n` +
-        `agent-team: hand it back with \`agent-team handback <run> ${t.name}\` once \`agent-team serve\` is up.\n`);
+    // Cancelled (or ended some other way) while the human had it: nothing is left to resume.
+    const ended = /^"[^"]*" has already finished \((\w+)\)$/.exec(err.message);
+    if (ended) {
+      log(`agent-team: ${t.name} was ${ended[1]} while you had it; there is nothing to hand back.\n`);
+    } else {
+      log(`agent-team: ${t.name} is still taken over: ${err.message}\n` +
+          `agent-team: hand it back with \`agent-team handback <run> ${t.name}\` once \`agent-team serve\` is up.\n`);
+    }
     throw err;
   }
 }

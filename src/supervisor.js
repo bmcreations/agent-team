@@ -237,6 +237,8 @@ export class Supervisor {
   // adapter reports the session's cost since the member's recorded spend.
   handback({ by = 'local', drove = true, ...who } = {}) {
     const m = this.#target(who);
+    // A cancelled subtree takes its taken-over members with it. attach reads this wording.
+    if (TERMINAL.has(m.state)) throw new Error(`"${m.name}" has already finished (${m.state})`);
     if (m.state !== 'taken_over') throw new Error(`"${m.name}" is not taken over (${m.state})`);
     this.store.setState(m.id, 'paused');
     this.store.addEvent(m.id, 'handed_back', { by });

@@ -223,6 +223,41 @@ test('a handback held at the cost cap tells the manager the member is still paus
   } finally { await sup.close(); }
 });
 
+// A cancelled subtree takes its taken-over members with it; the human's exit then finds
+// nothing to hand back.
+test('attach says so when a cascade cancelled the member while a human had it', async () => {
+  const { root, script } = project({ lead: LIVE(), worker: LIVE({ reports_to: 'lead' }) }, {
+    by_member: {
+      lead: { steps: [{ tool: 'delegate', args: { to: 'worker', task: 'w' }, save: 'r' },
+                      { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }] },
+      worker: { steps: [{ tool: 'wait_for', args: {} }] }
+    }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    await until(() => store.children(leadId)[0]?.state === 'waiting');
+    const workerId = store.children(leadId)[0].id;
+    sup.pause({ member_id: workerId });
+    await until(() => store.member(workerId).state === 'paused');
+    const call = async (method, params) => {
+      if (method === 'takeover') {
+        store.setState(workerId, 'taken_over');
+        return { member_id: workerId, name: 'worker', cwd: root, argv: ['claude'] };
+      }
+      await until(() => store.member(workerId).state === 'cancelled');
+      return sup.handback(params);
+    };
+    let said = '';
+    const human = () => { sup.cancel({ member_id: leadId }); return { status: 0 }; };
+    await assert.rejects(attach({ member_id: workerId }, { call, run: human, log: (s) => { said += s; } }),
+      /"worker" has already finished \(cancelled\)/);
+    assert.match(said, /agent-team: worker was cancelled while you had it; there is nothing to hand back\./);
+    assert.doesNotMatch(said, /still taken over/);
+    assert.equal((await sup.waitRun(runId)).summary, 'cancelled by local');
+  } finally { await sup.close(); }
+});
+
 test('take-over of a queued member fails without pausing it', async () => {
   const { root, script } = project({ solo: { agent: 'claude', isolation: 'workspace' } }, {});
   const { sup, store } = await supervise(script, { maxRunning: 0, env: { PATH } });
