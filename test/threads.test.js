@@ -69,7 +69,7 @@ test('a request with no live lead starts a run in the receiving project that car
     assert.equal(th.run_id, r.run_id);
     assert.deepEqual(th.chain, [t.aReal]);
     assert.equal(th.task, 'fix it');
-    assert.equal(store.threadPosts(1).length, 1);
+    assert.equal(store.threadPosts(1).filter((p) => p.side === 'requester').length, 1);
     // The receiving team's budget starts from its own config; the requester paid for the request.
     assert.equal(bRun.budget, 3);
     assert.equal(store.run(runId).budget, 19);   // the default 20, less the one request
@@ -115,8 +115,10 @@ test('a live lead receives the request in its inbox, with no new run', async () 
     await sup.waitRun(lead.runId);
     const r = results(store, mgr.memberId, 'request')[0];
     assert.equal(r.run_id, undefined);
-    assert.equal(store.threadPosts(1).length, 1);   // delivery does not record a second opening post
+    assert.equal(store.threadPosts(1).filter((p) => p.side === 'requester').length, 1);   // delivery does not record a second opening post
     assert.equal(store.thread(r.thread_id).owner_member, lead.memberId);
+    // The lead's run ended without accepting, so the thread closed and the requester was released.
+    assert.equal(store.thread(r.thread_id).state, 'declined');
     const got = results(store, lead.memberId, 'wait_for')[0].messages[0];
     assert.equal(got.thread_id, 1);
     assert.equal(got.from, `${basename(t.aReal)}/manager (team)`);
@@ -211,7 +213,7 @@ test('a live lead that owns a thread cannot request the team that opened it', as
     const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
     await sup.waitRun(mgr.runId);
     await sup.waitRun(lead.runId);
-    assert.equal(store.threadPosts(1).length, 1);
+    assert.equal(store.threadPosts(1).filter((p) => p.side === 'requester').length, 1);
     assert.match(results(store, lead.memberId, 'request')[0].error, /request refused: team ".*" is already in this chain/);
     assert.equal(store.threads().length, 1);
   } finally { await sup.close(); store.close(); }
@@ -276,5 +278,264 @@ test('a request whose run cannot start leaves a declined thread and spends nothi
     assert.match(results(store, memberId, 'request')[0].error, /boom/);
     assert.equal(store.thread(1).state, 'declined');
     assert.equal(store.run(runId).budget, 20);
+  } finally { await sup.close(); store.close(); }
+});
+
+// ---- reply, the state machine, and closing ----
+
+// Plays A's manager (and whatever its script starts), waits for B's thread-run if there is
+// one, then hands the pieces to `fn` before the store closes.
+async function withTeams(script, opts, fn) {
+  const t = twoTeams(script, opts);
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(mgr.runId);
+    const runId = store.thread(1)?.run_id;
+    if (runId) await sup.waitRun(runId);
+    return await fn({ sup, store, t, mgr, bRun: runId ? store.run(runId) : null });
+  } finally { await sup.close(); store.close(); }
+}
+
+const messagesOf = (store, memberId) => results(store, memberId, 'wait_for').flatMap((r) => r.messages ?? []);
+const asking = (extra = {}) => ({ b }) => ({ by_member: {
+  manager: { steps: [
+    { tool: 'request', args: { team: b, text: 'crash on rotate', task: 'fix it' }, save: 't' },
+    { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+  ] },
+  ...extra
+} });
+const lead = (steps, more = {}) => ({ 'b-lead': { steps, ...more } });
+const replyTo = (args) => ({ tool: 'reply', args: { thread: '$brief.thread.id', ...args } });
+
+test('the receiving lead accepts, delegates, finishes, and the requester picks up the result', async () => {
+  await withTeams(asking({
+    ...lead([
+      replyTo({ text: 'on it', state: 'accepted' }),
+      { tool: 'delegate', args: { to: 'b-dev', task: 'patch' }, save: 'd' },
+      { tool: 'wait_for', args: {}, until_finished: ['$d.report_id'] }
+    ], { result: { status: 'ok', summary: 'fixed rotate' }, turn_cost_usd: 0.5 }),
+    'b-dev': { steps: [{ say: 'patched' }] }
+  }), { aDefaults: { max_delegations: 5 }, bDefaults: { max_delegations: 3 } }, ({ store, mgr, bRun }) => {
+    const th = store.thread(1);
+    assert.equal(th.state, 'done');
+    assert.deepEqual(th.result, { status: 'ok', summary: 'fixed rotate' });
+    const got = messagesOf(store, mgr.memberId);
+    const accepted = got.findIndex((m) => m.thread_id === 1 && m.text.endsWith('on it'));
+    const closed = got.findIndex((m) => m.thread_id === 1 && m.text === 'thread #1 done ok: fixed rotate');
+    assert.ok(accepted >= 0 && closed > accepted, JSON.stringify(got));
+    assert.deepEqual(store.threadPosts(1).slice(1).map((p) => [p.side, p.text, p.state]),
+      [['receiver', 'on it', 'accepted'], ['receiver', 'fixed rotate', 'done']]);
+    assert.equal(store.threadPosts(1)[0].side, 'requester');
+    // Each side spends its own budgets: A paid for the request, B for its delegation.
+    assert.equal(store.run(mgr.runId).budget, 4);
+    assert.equal(bRun.budget, 2);
+    assert.equal(store.run(mgr.runId).cost_usd, 0);
+    assert.ok(bRun.cost_usd >= 0.5, `thread-run cost ${bRun.cost_usd}`);
+    // The manager stayed alive for the close: nothing ended its wait with "no open reports".
+    assert.ok(results(store, mgr.memberId, 'wait_for').every((r) => !r.note && !r.error));
+  });
+});
+
+test('delegate is refused until a task thread is accepted', async () => {
+  await withTeams(asking(lead([{ tool: 'delegate', args: { to: 'b-dev', task: 'patch' } }])), {}, ({ store, bRun }) => {
+    const lid = store.run(bRun.id).root_member;
+    assert.match(results(store, lid, 'delegate')[0].error, /accept thread #1 first/);
+    assert.equal(store.children(lid).length, 0);
+  });
+});
+
+test('declining notifies the requester and does not fail the lead run', async () => {
+  await withTeams(asking(lead([replyTo({ text: 'not ours', state: 'declined' })])), {}, async ({ sup, store, mgr, bRun }) => {
+    assert.equal(store.thread(1).state, 'declined');
+    assert.ok(messagesOf(store, mgr.memberId).some((m) => m.text === 'thread #1 declined: not ours' && m.thread_id === 1));
+    assert.equal(bRun.status, 'done');
+  });
+});
+
+test('declining needs a reason, and a lead that finishes without accepting declines the thread', async () => {
+  await withTeams(asking(lead([replyTo({ text: '', state: 'declined' })])), {}, ({ store, mgr, bRun }) => {
+    const lid = bRun.root_member;
+    assert.match(results(store, lid, 'reply')[0].error, /a reason/);
+    assert.equal(store.thread(1).state, 'declined');
+    assert.ok(messagesOf(store, mgr.memberId).some((m) => m.text === 'thread #1 declined: the lead finished without accepting'));
+  });
+  await withTeams(asking(lead([{ say: 'hmm' }])), {}, ({ store, mgr }) => {
+    assert.equal(store.thread(1).state, 'declined');
+    assert.ok(messagesOf(store, mgr.memberId).some((m) => m.text === 'thread #1 declined: the lead finished without accepting'));
+  });
+});
+
+test('a question is answered with state done, or by the lead run finishing', async () => {
+  const q = ({ b }) => ({ by_member: {
+    manager: { steps: [
+      { tool: 'request', args: { team: b, text: 'which api?' }, save: 't' },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] },
+    ...lead([replyTo({ text: '42', state: 'done' })])
+  } });
+  await withTeams(q, {}, ({ store, mgr }) => {
+    assert.equal(store.thread(1).state, 'done');
+    assert.deepEqual(store.threadPosts(1).map((p) => [p.side, p.state]), [['requester', null], ['receiver', 'done']]);
+    assert.ok(messagesOf(store, mgr.memberId).some((m) => m.text === 'thread #1 done ok: 42'));
+  });
+  const open = ({ b }) => ({ by_member: {
+    manager: { steps: [
+      { tool: 'request', args: { team: b, text: 'which api?' }, save: 't' },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] },
+    ...lead([{ say: 'thinking' }], { result: { status: 'ok', summary: 'use v2' } })
+  } });
+  await withTeams(open, {}, ({ store, mgr }) => {
+    assert.equal(store.thread(1).state, 'done');
+    assert.deepEqual(store.thread(1).result, { status: 'ok', summary: 'use v2' });
+    assert.ok(messagesOf(store, mgr.memberId).some((m) => m.text === 'thread #1 done ok: use v2'));
+  });
+});
+
+test('a cancelled thread-run closes its accepted thread as failed', async () => {
+  const t = twoTeams(asking(lead([replyTo({ text: 'on it', state: 'accepted' }), { sleep_ms: 20_000 }])));
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await until(() => store.thread(1)?.state === 'accepted');
+    sup.cancel({ member_id: store.thread(1).owner_member });
+    await sup.waitRun(mgr.runId);
+    const th = store.thread(1);
+    assert.equal(th.state, 'done');
+    assert.equal(th.result.status, 'failed');
+    assert.ok(messagesOf(store, mgr.memberId).some((m) => /^thread #1 done failed: /.test(m.text)));
+    await sup.waitRun(th.run_id);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('illegal moves and members that are not on the thread are refused', async () => {
+  const script = ({ b }) => ({ by_member: {
+    manager: { steps: [
+      { tool: 'request', args: { team: b, text: 'x', task: 'y' }, save: 't' },
+      { tool: 'reply', args: { thread: '$t.thread_id', text: 'me too', state: 'accepted' } },
+      { tool: 'reply', args: { thread: 99, text: 'x' } },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] },
+    ...lead([
+      replyTo({ text: 'early', state: 'done' }),
+      replyTo({ text: 'on it', state: 'accepted' }),
+      replyTo({ text: 'again', state: 'accepted' }),
+      { tool: 'delegate', args: { to: 'b-dev', task: 'patch' }, save: 'd' },
+      { tool: 'wait_for', args: {}, until_finished: ['$d.report_id'] }
+    ]),
+    'b-dev': { steps: [{ tool: 'reply', args: { thread: 1, text: 'hi' } }] }
+  } });
+  await withTeams(script, {}, ({ store, mgr, bRun }) => {
+    const [early, ok, again] = results(store, bRun.root_member, 'reply');
+    assert.match(early.error, /cannot move thread #1 from open to done/);
+    assert.equal(ok.state, 'accepted');
+    assert.match(again.error, /cannot move thread #1 from accepted to accepted/);
+    const [byRequester, unknown] = results(store, mgr.memberId, 'reply');
+    assert.match(byRequester.error, /only .* can change its state/);
+    assert.match(unknown.error, /no thread #99/);
+    const dev = store.children(bRun.root_member)[0];
+    assert.match(results(store, dev.id, 'reply')[0].error, /is not on thread #1/);
+  });
+});
+
+test('a question back reaches the requester, and its answer reaches the lead', async () => {
+  const script = ({ b }) => ({ by_member: {
+    manager: { steps: [
+      { tool: 'request', args: { team: b, text: 'fix the build' }, save: 't' },
+      { tool: 'wait_for', args: { timeout_s: 10 }, save: 'q' },
+      { tool: 'reply', args: { thread: '$t.thread_id', text: 'pixel 8' } },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] },
+    ...lead([
+      replyTo({ text: 'which device?' }),
+      { tool: 'wait_for', args: { timeout_s: 10 } }
+    ])
+  } });
+  await withTeams(script, {}, ({ store, mgr, bRun }) => {
+    const q = results(store, mgr.memberId, 'wait_for')[0].messages[0];
+    assert.equal(q.thread_id, 1);
+    assert.match(q.text, /which device\?/);
+    const a = results(store, bRun.root_member, 'wait_for')[0].messages[0];
+    assert.equal(a.thread_id, 1);
+    assert.match(a.text, /pixel 8/);
+    assert.deepEqual(store.threadPosts(1).map((p) => p.side).slice(0, 3), ['requester', 'receiver', 'requester']);
+  });
+});
+
+test('when the requester has finished, its manager gets the thread traffic', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    manager: { steps: [
+      { tool: 'delegate', args: { to: 'android', task: 'ask b' }, save: 'd' },
+      { tool: 'wait_for', args: {}, until_finished: ['$d.report_id'] },
+      { tool: 'wait_for', args: {}, until_threads: [1] }
+    ] },
+    android: { steps: [{ tool: 'request', args: { team: b, text: 'q' } }, { sleep_ms: 20_000 }] },
+    ...lead([{ sleep_ms: 1500 }], { result: { status: 'ok', summary: 'late' } })
+  } }), { aMembers: { manager: LIVE(), android: LIVE({ reports_to: 'manager' }) } });
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await until(() => store.thread(1));
+    const android = store.children(mgr.memberId)[0];
+    sup.cancel({ member_id: android.id });
+    await sup.waitRun(mgr.runId);
+    assert.equal(store.thread(1).state, 'done');
+    assert.ok(messagesOf(store, mgr.memberId).some((m) => m.text === 'thread #1 done ok: late'));
+    await sup.waitRun(store.thread(1).run_id);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('thread traffic does not cut ask_human short', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    manager: { steps: [
+      { tool: 'request', args: { team: b, text: 'x', task: 'y' } },
+      { tool: 'ask_human', args: { question: 'ship it?' } }
+    ] },
+    ...lead([replyTo({ text: 'on it', state: 'accepted' })])
+  } }), {});
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await until(() => store.thread(1)?.state === 'done' && store.openQuestions().length === 1);
+    assert.equal(store.openQuestions().length, 1, 'the question is still open');
+    sup.answer({ question_id: store.openQuestions()[0].id, answer: 'yes', by: 'ann' });
+    await sup.waitRun(mgr.runId);
+    const [ask] = results(store, mgr.memberId, 'ask_human');
+    assert.equal(ask.answer, 'yes');
+    assert.equal(ask.note, undefined);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('a live lead that accepts a task starts a run for the thread under its own budgets', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    manager: { steps: [
+      { sleep_ms: 400 },
+      { tool: 'request', args: { team: b, text: 'crash', task: 'fix it' }, save: 't' },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] },
+    'b-lead': { steps: [
+      { tool: 'wait_for', args: { timeout_s: 3 }, save: 'w' },
+      { tool: 'reply', args: { thread: '$w.messages.0.thread_id', text: 'on it', state: 'accepted' } }
+    ] }
+  } }), {});
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const live = sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own it' });
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(mgr.runId);
+    await sup.waitRun(live.runId);
+    const th = store.thread(1);
+    assert.equal(th.state, 'done');
+    assert.notEqual(th.run_id, live.runId);
+    const run = store.run(th.run_id);
+    assert.equal(run.thread_id, 1);
+    assert.equal(store.member(run.root_member).name, 'b-lead');
+    assert.equal(th.owner_member, run.root_member);
+    const accept = results(store, live.memberId, 'reply')[0];
+    assert.equal(accept.state, 'accepted');
+    assert.equal(accept.run_id, th.run_id);
+    assert.match(accept.note, new RegExp(`thread #1: started run #${th.run_id}`));
+    await sup.waitRun(th.run_id);
   } finally { await sup.close(); store.close(); }
 });

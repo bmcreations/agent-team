@@ -292,6 +292,14 @@ it gets the thread in its inbox; otherwise `serve` starts a run in that reposito
 own config, budgets and `deny_paths`, with the thread in the lead's brief. Opening a thread
 spends one of the requester's delegations; the work it leads to is charged to the other team.
 
+A thread moves `open -> accepted | declined -> done`. The receiving lead answers with
+`reply(thread, text, state?)`: `accepted` before it delegates any of a task thread's work,
+`declined` with a reason, `done` to answer a question. A reply without a state is a post: a
+question back, an update. If the lead's run finishes without accepting a task thread, the
+thread is declined; if it finishes after accepting, the thread closes `done` with the run's
+result. The member that asked gets every post and the close through `wait_for`, and stays
+running while a thread it opened is open. If it has finished, its manager gets them instead.
+
 A request whose chain of threads leads back to a team already in it is refused, so A asking B
 asking A cannot loop.
 
