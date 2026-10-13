@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { project, supervise, LIVE } from './helpers/live.js';
+import { existsSync, copyFileSync, chmodSync } from 'node:fs';
+import { join } from 'node:path';
+import { project, supervise, adapterDir, LIVE } from './helpers/live.js';
 import { callRpc } from '../src/rpc.js';
 
 const until = async (f) => { while (!f()) await new Promise((r) => setTimeout(r, 20)); };
@@ -134,5 +135,37 @@ test('pause and cancel are admin RPCs that name a member by run and name', async
     const res = await callRpc(sup.socketPath, { method: 'cancel', params: { run_id: runId, member: 'solo', by: 'bob' } });
     assert.deepEqual(res.members, [{ id: memberId, name: 'solo' }]);
     assert.equal((await sup.waitRun(runId)).summary, 'cancelled by bob');
+  } finally { await sup.close(); }
+});
+
+test('send_to a report that is being cancelled is refused, not left unread', async () => {
+  const { root, script } = project({
+    lead: LIVE(), worker: { agent: 'slowint', reports_to: 'lead', isolation: 'none' }
+  }, {
+    by_member: { lead: { steps: [
+      { tool: 'delegate', args: { to: 'worker', task: 'slow' }, save: 'r' },
+      { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }
+    ] } }
+  });
+  const dir = adapterDir();
+  copyFileSync(new URL('./fixtures/session-slow-interrupt', import.meta.url).pathname, join(dir, 'slowint'));
+  chmodSync(join(dir, 'slowint'), 0o755);
+  const { sup, store } = await supervise(script, { adapterDir: dir, graceMs: 10_000 });
+  try {
+    const { memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    const deadline = Date.now() + 10_000;
+    const worker = () => store.children(leadId)[0];
+    while (!(worker() && store.events(worker().id).some((e) => e.body.text === 'working'))) {
+      assert.ok(Date.now() < deadline, 'worker never started');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const workerId = worker().id;
+    sup.cancel({ member_id: workerId });
+    const res = await callRpc(sup.socketPath, {
+      token: store.member(leadId).token, method: 'send_to', params: { to: 'worker', text: 'too late' }
+    }).catch((err) => ({ error: err.message }));
+    assert.match(String(res.error ?? JSON.stringify(res)), /"worker" has finished/);
+    await until(() => store.member(workerId).state === 'cancelled');
+    assert.deepEqual(store.takeQueued(workerId), [], 'a message was left in a cancelled inbox');
   } finally { await sup.close(); }
 });

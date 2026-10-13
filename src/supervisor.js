@@ -546,10 +546,11 @@ export class Supervisor {
         throw new Error(`"${target.name}" runs one-shot and cannot receive messages — wait for its result`);
       }
     }
-    // Same guard as send(): a stopping member will not read another message. Re-read: the
+    // Same guard as send(): a stopping or cancelling member will not read another message. Re-read: the
     // target can have finished during the await.
     target = this.store.member(target.id);
-    if (TERMINAL.has(target.state) || this.#live.get(target.id)?.stopping) {
+    const live = this.#live.get(target.id);
+    if (TERMINAL.has(target.state) || live?.stopping || live?.halt?.kind === 'cancel') {
       throw new Error(`"${target.name}" has finished — delegate a new task`);
     }
     const messageId = this.store.enqueue({
