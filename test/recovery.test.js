@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync } from 'node:fs';
+import { rmSync, copyFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
-import { project, supervise, LIVE } from './helpers/live.js';
+import { project, supervise, adapterDir, LIVE } from './helpers/live.js';
 
 const until = async (f, ms = 15_000) => {
   const deadline = Date.now() + ms;
@@ -132,5 +132,50 @@ test('a run with no recorded owner (written before owners existed) fails instead
     assert.equal(store.run(runId).status, 'failed');
     assert.match(store.member(id).result.summary, /left by an older agent-team; start it again/);
     assert.equal(store.question(qid).closed, 1, 'its open question is closed');
+  } finally { await sup.close(); }
+});
+
+test('a pause in flight when the supervisor closes is kept: the member stays paused after a restart', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ say: 'working' }, { sleep_ms: 30_000 }], on_resume: { steps: [] } } }
+  });
+  const first = await supervise(script);
+  const { store } = first;
+  const { runId, memberId } = first.sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+  await until(() => store.events(memberId).some((e) => e.kind === 'text'));
+  first.sup.pause({ member_id: memberId, by: 'ann' });   // waits for the turn, which outlasts close()
+  await first.sup.close();
+  assert.equal(store.member(memberId).state, 'paused');
+  assert.deepEqual(store.events(memberId).findLast((e) => e.kind === 'paused').body, { by: 'ann', now: false });
+
+  const { sup } = await supervise(script, { store });
+  try {
+    assert.deepEqual(await sup.recover(), { recovered: [runId], failed: [] });
+    assert.equal(store.member(memberId).state, 'paused');
+    assert.ok(!store.events(memberId).some((e) => e.kind === 'interrupted'), 'the paused member was relaunched');
+  } finally { await sup.close(); }
+});
+
+test('a cancel in flight when the supervisor closes is kept: the member and its run end cancelled', async () => {
+  const { root, script } = project({ solo: { agent: 'slowint', isolation: 'none' } }, {});
+  const dir = adapterDir();
+  copyFileSync(new URL('./fixtures/session-slow-interrupt', import.meta.url).pathname, join(dir, 'slowint'));
+  chmodSync(join(dir, 'slowint'), 0o755);
+  const first = await supervise(script, { adapterDir: dir });
+  const { store } = first;
+  const { runId, memberId } = first.sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+  await until(() => store.events(memberId).some((e) => e.body.text === 'working'));
+  first.sup.cancel({ member_id: memberId });   // slowint lingers 600 ms after the interrupt
+  const waited = first.sup.waitRun(runId);
+  await first.sup.close();
+  assert.equal(store.member(memberId).state, 'cancelled');
+  assert.deepEqual(store.member(memberId).result, { status: 'failed', summary: 'cancelled by local' });
+  assert.equal(store.run(runId).status, 'cancelled');
+  assert.deepEqual(await waited, { status: 'failed', summary: 'cancelled by local' });
+
+  const { sup } = await supervise(script, { store, adapterDir: dir });
+  try {
+    assert.deepEqual(await sup.recover(), { recovered: [], failed: [] });
+    assert.equal(store.member(memberId).state, 'cancelled');
   } finally { await sup.close(); }
 });

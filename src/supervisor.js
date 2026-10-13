@@ -66,13 +66,21 @@ export class Supervisor {
     this.#ticker.unref();
   }
 
-  // Ends every live adapter and leaves the members' states as they are, so the next start
-  // can recover them. Blocked tool calls are settled first, or their RPC connections hang.
+  // Ends every live adapter and leaves working members' states as they are, so the next start
+  // can recover them. A pause, cancel, or timeout already under way is recorded as its outcome
+  // instead (see #recordHalt). Blocked tool calls are settled first, or their RPC connections hang.
   async close() {
     this.#closing = true;
     clearInterval(this.#ticker);
     const live = [...this.#live.values()];
     for (const rt of live) this.#settle(rt, { error: 'the agent-team supervisor is shutting down' });
+    // Halted while launching: no adapter will exit to record it.
+    for (const rt of live) {
+      if (rt.halt && !rt.session) {
+        this.#live.delete(rt.member.id);
+        this.#recordHalt(rt);
+      }
+    }
     await Promise.all(live.map((rt) => rt.session?.end(this.graceMs)));
     await this.server?.close();
   }
@@ -359,6 +367,46 @@ export class Supervisor {
     this.#paused(rt.member, { by, now });
   }
 
+  // A halt under way when the supervisor closes, written straight to the store: #halted would
+  // drain the queue and pump inboxes, launching work on a supervisor that is going away. The
+  // manager's notice waits in its inbox. A root that ends takes its unfinished members with it,
+  // or they would sit `running` in a finished run that recover() never looks at again.
+  #recordHalt(rt) {
+    const m = rt.member;
+    const { kind, by, now } = rt.halt;
+    if (TERMINAL.has(this.store.member(m.id).state)) return;
+    if (kind === 'pause') {
+      this.store.setState(m.id, 'paused');
+      this.store.addEvent(m.id, 'paused', { by, now });
+      if (m.parent_id != null) this.#enqueueNotice(m, `paused by ${by}`);
+      return;
+    }
+    const result = kind === 'cancel'
+      ? { status: 'failed', summary: `cancelled by ${by}` }
+      : { status: 'failed', summary: `timed out after ${rt.halt.seconds}s of work` };
+    const state = kind === 'cancel' ? 'cancelled' : 'failed';
+    const record = (x, st, res) => {
+      this.store.setState(x.id, st);
+      this.store.setResult(x.id, res);
+      this.store.addEvent(x.id, 'finished', { status: res.status, state: st });
+    };
+    record(m, state, result);
+    if (m.parent_id != null) {
+      this.#enqueueNotice(m, `finished ${kind === 'cancel' ? 'cancelled' : 'failed'}: ${result.summary}`);
+      return;
+    }
+    for (const d of this.#subtree(m.id).slice(1)) {
+      if (!TERMINAL.has(d.state)) record(d, 'cancelled', { status: 'failed', summary: `cancelled: ${m.name} ended` });
+    }
+    this.store.finishRun(m.run_id, state);
+    for (const resolve of this.#runWaiters.get(m.run_id) ?? []) resolve(this.store.member(m.id).result);
+    this.#runWaiters.delete(m.run_id);
+  }
+
+  #enqueueNotice(m, text) {
+    this.store.enqueue({ to: m.parent_id, fromKind: 'report', fromName: m.name, reportId: m.id, text });
+  }
+
   #paused(m, { by, now }) {
     this.store.setState(m.id, 'paused');
     this.store.addEvent(m.id, 'paused', { by, now });
@@ -368,7 +416,7 @@ export class Supervisor {
 
   #notifyManager(m, text) {
     if (m.parent_id == null) return;
-    this.store.enqueue({ to: m.parent_id, fromKind: 'report', fromName: m.name, reportId: m.id, text });
+    this.#enqueueNotice(m, text);
     this.#pump(m.parent_id);
   }
 
@@ -553,6 +601,7 @@ export class Supervisor {
 
     const ctx = this.#ctx(m);
     const r = await this.#resolve(m);
+    if (this.#closing) return;   // close() has recorded any halt; a working member is recovered
     if (r.error) throw r.error;
     if (rt.halt) return this.#halted(id, rt);   // paused or cancelled while resolving
     // Teams in other projects and v1 adapters keep today's one-shot loop, with no session
@@ -630,6 +679,7 @@ export class Supervisor {
     if (this.#closing) {
       this.#live.delete(id);
       for (const mid of rt.offered) this.store.requeue(mid);
+      if (rt.halt) this.#recordHalt(rt);
       return;
     }
     // Pausing or cancelling wins over whatever the adapter reported on its way out.
