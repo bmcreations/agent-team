@@ -1392,6 +1392,12 @@ export class Supervisor {
     if (t.kind === 'question' && state !== 'done') {
       return this.#moveThread(t, 'declined', { text: `the lead's run ${state}`, author: 'agent-team' });
     }
+    // Accepted but no run ever started for it (a crash between the two): the finished run's
+    // summary is about other work.
+    if (!served && t.state === 'accepted' && t.run_id == null) {
+      const reason = 'the lead finished without starting the work';
+      return this.#moveThread(t, 'done', { text: reason, author: 'agent-team', result: { status: 'failed', summary: reason } });
+    }
     this.#moveThread(t, 'done', { text: summary, author: 'agent-team', result: { status, summary } });
   }
 

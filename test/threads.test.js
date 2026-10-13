@@ -662,3 +662,28 @@ test('a thread opened from a symlinked project path is stored and found by its r
     assert.equal(threadsView(store, { project: link }).pairs.length, 1);
   } finally { await sup.close(); store.close(); }
 });
+
+test('an accepted thread with no run is closed failed when its lead ends, not done with an unrelated summary', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    manager: { steps: [
+      { sleep_ms: 400 },
+      { tool: 'request', args: { team: b, text: 'x', task: 'do it' }, save: 't' },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] },
+    'b-lead': { steps: [{ sleep_ms: 2000 }], result: { status: 'ok', summary: 'unrelated work' } }
+  } }));
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const live = sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own it' });
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await until(() => store.thread(1));
+    // The window a crash leaves: accepted, owned by a live lead, with no run started.
+    assert.ok(store.moveThread(1, 'open', 'accepted'));
+    await sup.waitRun(live.runId);
+    await sup.waitRun(mgr.runId);
+    const th = store.thread(1);
+    assert.equal(th.state, 'done');
+    assert.deepEqual(th.result, { status: 'failed', summary: 'the lead finished without starting the work' });
+    assert.ok(!messagesOf(store, mgr.memberId).some((m) => /unrelated work/.test(m.text)));
+  } finally { await sup.close(); store.close(); }
+});
