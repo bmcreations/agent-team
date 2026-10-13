@@ -328,7 +328,7 @@ export class Supervisor {
       if (kind === 'pause' && m.state === 'paused') throw new Error(`"${m.name}" is already paused`);
       const i = this.#pending.indexOf(m.id);
       if (i >= 0) this.#pending.splice(i, 1);
-      if (kind === 'cancel') return this.#conclude(m, 'cancelled', { status: 'failed', summary: `cancelled by ${by}` });
+      if (kind === 'cancel') return this.#conclude(m, 'cancelled', { status: 'failed', summary: `cancelled by ${by}` }, null, by);
       return this.#paused(m, { by, now: false });
     }
     if (rt.oneShot) throw new Error(`"${m.name}" runs one-shot and cannot be ${verb} — wait for its result`);
@@ -359,7 +359,7 @@ export class Supervisor {
     this.#settle(rt, { error: 'member stopped' });
     const { kind, by, now } = rt.halt;
     if (kind === 'cancel') {
-      return this.#conclude(rt.member, 'cancelled', { status: 'failed', summary: `cancelled by ${by}` }, rt.workspace);
+      return this.#conclude(rt.member, 'cancelled', { status: 'failed', summary: `cancelled by ${by}` }, rt.workspace, by);
     }
     if (kind === 'timeout') {
       return this.#conclude(rt.member, 'failed', { status: 'failed', summary: `timed out after ${rt.halt.seconds}s of work` }, rt.workspace);
@@ -702,8 +702,11 @@ export class Supervisor {
 
   // Records a member's terminal state, tells its manager or ends the run, and frees its slot.
   // Also used for members that are not live: a cancelled queued or paused member.
-  #conclude(m, state, result, workspace = null) {
+  #conclude(m, state, result, workspace = null, by = null) {
     const id = m.id;
+    // A run never ends with members still at work, and a report whose manager was cancelled
+    // has nobody left to report to. Pausing a manager alone leaves its reports working.
+    if (m.parent_id == null || state === 'cancelled') this.#cancelReports(m, by ?? `${m.name} (${state})`);
     this.store.setState(id, state);
     this.store.setResult(id, result);
     this.store.addEvent(id, 'finished', { status: result.status, state });
@@ -721,6 +724,14 @@ export class Supervisor {
       this.#runWaiters.delete(m.run_id);
     }
     this.#drain();
+  }
+
+  // Deepest first, as cancel --subtree does. A report already halting or finished is skipped.
+  #cancelReports(m, by) {
+    for (const d of this.#subtree(m.id).slice(1).reverse()) {
+      if (TERMINAL.has(d.state)) continue;
+      try { this.#halt(d, 'cancel', { now: true, by }); } catch { /* already cancelling or finished */ }
+    }
   }
 
   // ---- inbox delivery ----

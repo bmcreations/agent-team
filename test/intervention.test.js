@@ -169,3 +169,71 @@ test('send_to a report that is being cancelled is refused, not left unread', asy
     assert.deepEqual(store.takeQueued(workerId), [], 'a message was left in a cancelled inbox');
   } finally { await sup.close(); }
 });
+
+const untilOr = async (f, what, ms = 10_000) => {
+  const deadline = Date.now() + ms;
+  while (!f()) {
+    assert.ok(Date.now() < deadline, what);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+
+test('cancelling a root alone cancels its reports, running and queued, and launches nothing after', async () => {
+  const { root, script } = project({
+    lead: LIVE(), worker: LIVE({ reports_to: 'lead' })
+  }, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'worker', task: 'one' }, save: 'a' },
+        { tool: 'delegate', args: { to: 'worker', task: 'two' }, save: 'b' },
+        { tool: 'wait_for', args: {}, until_finished: ['$a.report_id', '$b.report_id'] }
+      ] },
+      worker: { steps: [{ say: 'working' }, { sleep_ms: 30_000 }] }
+    }
+  }, { max_parallel: 1 });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    await untilOr(() => store.children(leadId).some((c) => kinds(store, c.id).includes('text')) &&
+                        store.member(leadId).state === 'waiting', 'the first worker never started');
+    const [first, second] = store.children(leadId);
+    assert.equal(store.member(second.id).state, 'queued');
+    sup.cancel({ member_id: leadId });
+    assert.deepEqual(await sup.waitRun(runId), { status: 'failed', summary: 'cancelled by local' });
+    assert.equal(store.run(runId).status, 'cancelled');
+    await untilOr(() => store.member(first.id).state === 'cancelled', 'the running report was left running');
+    assert.equal(store.member(second.id).state, 'cancelled');
+    assert.ok(!kinds(store, second.id).includes('started'), 'a report of a cancelled root was launched');
+    assert.match(store.member(first.id).result.summary, /^cancelled by local/);
+  } finally { await sup.close(); }
+});
+
+test('cancelling a mid-level manager alone cancels its reports; its own manager carries on', async () => {
+  const { root, script } = project({
+    lead: LIVE(), mid: LIVE({ reports_to: 'lead' }), worker: LIVE({ reports_to: 'mid' })
+  }, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'mid', task: 'm' }, save: 'r' },
+        { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }
+      ] },
+      mid: { steps: [
+        { tool: 'delegate', args: { to: 'worker', task: 'w' }, save: 'r' },
+        { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }
+      ] },
+      worker: { steps: [{ say: 'working' }, { sleep_ms: 30_000 }] }
+    }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    const mid = () => store.children(leadId)[0];
+    const worker = () => mid() && store.children(mid().id)[0];
+    await untilOr(() => worker() && kinds(store, worker().id).includes('text'), 'the worker never started');
+    sup.cancel({ member_id: mid().id });
+    await untilOr(() => store.member(worker().id).state === 'cancelled', 'the worker outlived its cancelled manager');
+    const result = await sup.waitRun(runId);
+    assert.equal(result.status, 'ok');
+    assert.equal(store.member(mid().id).state, 'cancelled');
+  } finally { await sup.close(); }
+});
