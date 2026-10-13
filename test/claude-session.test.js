@@ -93,6 +93,18 @@ test('a steered message is acked when claude replays it, not when it is written'
   assert.equal((await s.next('result')).summary, 'echo: HOLD the turn');
 });
 
+test('non-object claude lines are ignored and each turn reports its own cost', { timeout: 5000 }, async () => {
+  const s = session();
+  s.send({ type: 'start', brief: brief({ task: 'NOISE first' }), resume: null, note: null });
+  await s.next('session');
+  assert.deepEqual(await s.next('idle'), { type: 'idle', cost_usd: 0.25 });
+  s.send({ type: 'message', id: 7, from: 'lead (manager)', text: 'NOISE again' });
+  assert.deepEqual(await s.next('ack'), { type: 'ack', message_id: 7 });
+  assert.deepEqual(await s.next('idle'), { type: 'idle', cost_usd: 0.25 });
+  s.send({ type: 'stop' });
+  assert.equal((await s.next('result')).status, 'ok');
+});
+
 test('interrupt ends a running turn with idle {interrupted} and exits without a result', { timeout: 5000 }, async () => {
   const s = session();
   s.send({ type: 'start', brief: brief({ task: 'HOLD forever' }), resume: null, note: null });

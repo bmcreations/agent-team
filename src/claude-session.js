@@ -83,6 +83,7 @@ export function runClaudeSession({ artifacts }) {
     log.write(line + '\n');
     let e;
     try { e = JSON.parse(line); } catch { return; }
+    if (!e || typeof e !== 'object') return;
     if (e.type === 'system' && e.subtype === 'init' && !sessionId && e.session_id) {
       sessionId = e.session_id;
       out({ type: 'session', harness_id: sessionId, resume: sessionId });
@@ -110,7 +111,7 @@ export function runClaudeSession({ artifacts }) {
       turns++;
       const total = Number.isFinite(e.total_cost_usd) ? e.total_cost_usd : cost;
       const delta = Math.max(0, total - cost);
-      cost = total;
+      cost = Math.max(cost, total);
       lastError = e.is_error === true;
       if (typeof e.result === 'string') lastText = e.result;
       for (const d of e.permission_denials ?? []) denied.push(d.tool_name);
@@ -154,6 +155,7 @@ export function runClaudeSession({ artifacts }) {
   createInterface({ input: process.stdin }).on('line', (line) => {
     let m;
     try { m = JSON.parse(line); } catch { return; }
+    if (!m || typeof m !== 'object') return;
     if (m.type === 'start' && !claude) start(m);
     else if (m.type === 'message') pending.set(userTurn(`[from: ${m.from}] ${m.text}`), m.id);
     else if (m.type === 'stop') endClaude();
