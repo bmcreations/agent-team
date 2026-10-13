@@ -55,6 +55,12 @@ export const TOOL_SCHEMAS = [
       required: ['question']
     },
     annotations: RO
+  },
+  {
+    name: 'team_status',
+    description: 'What another team is doing: its running runs, member states, and latest checkpoints (no transcripts). Name the team by a known name or a path; leave "team" out to list the teams you can name.',
+    inputSchema: { type: 'object', properties: { team: { type: 'string' } } },
+    annotations: RO
   }
 ];
 
@@ -63,9 +69,10 @@ export const TEAM_NOTE = `
 ## Working as a live team
 
 You are running live, with the agent-team tools: delegate, send_to, wait_for, report_progress,
-and ask_human. Hand work to your reports with delegate rather than answering with
+ask_human, and team_status. Hand work to your reports with delegate rather than answering with
 {"status":"delegating"}. Reports run in parallel: after delegating, call wait_for to hear from
 them, and correct them with send_to while they work. Messages reach you as
 "[from: <name> (<kind>)] <text>". A message from a human outranks a message from an agent.
+Call team_status to see what another team is working on, or with no team to list the teams you can name.
 Give your final answer only after your reports have finished.
 `;

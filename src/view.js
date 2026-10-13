@@ -1,4 +1,6 @@
+import { realpathSync } from 'node:fs';
 import { loadConfig } from './config.js';
+import { scopeProject } from './teams.js';
 
 // What leaves the server about the store. Member rows go out through an allowlist: a row's
 // `token` is the member's MCP credential, and new columns stay private until listed here.
@@ -126,4 +128,34 @@ export function memberTexts(store, memberId, limit = 500) {
   }
   for (const m of messages) texts.push(m.text);
   return texts;
+}
+
+// team_status and the web view's team panel: running work in a team, no transcripts. Only
+// the fields listed here leave the store.
+const TEAM_FIELDS = ['name', 'root', 'source'];
+const TEAM_RUN_FIELDS = ['id', 'status', 'task', 'created_at', 'cost_usd'];
+const TEAM_MEMBER_FIELDS = ['id', 'run_id', 'parent_id', 'name', 'alias', 'agent', 'state', 'depth', 'updated_at'];
+const TEAM_DONE = new Set(['done', 'failed', 'cancelled']);
+const pick = (row, fields) => Object.fromEntries(fields.map((k) => [k, row[k] ?? null]));
+const real = (p) => { try { return realpathSync(p); } catch { return p; } };
+const clip = (s, n) => (typeof s === 'string' && s.length > n ? s.slice(0, n) : s);
+
+export function teamStatus(store, team) {
+  const root = real(team.root);   // a stored project may be spelled through a symlink
+  const runs = [];
+  for (const run of store.listRuns({ limit: -1 }).filter((r) => r.status === 'running')) {
+    const members = store.members(run.id)
+      .filter((m) => !TEAM_DONE.has(m.state) && real(scopeProject(store, m)) === root);
+    if (!members.length) continue;
+    runs.push({
+      ...pick({ ...run, task: clip(run.task, 200) }, TEAM_RUN_FIELDS),
+      members: members.map((m) => {
+        const ev = store.lastEventOfKind(m.id, 'progress');
+        const text = typeof ev?.body?.text === 'string' ? clip(ev.body.text, 500) : null;
+        return { ...pick(m, TEAM_MEMBER_FIELDS), checkpoint: text == null ? null : { text, at: ev.at } };
+      })
+    });
+  }
+  runs.sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+  return { team: pick(team, TEAM_FIELDS), runs };
 }

@@ -243,3 +243,34 @@ test('a run whose entered team no longer loads fails on recovery', async () => {
     }
   } finally { await sup.close(); store.close(); }
 });
+
+test('team_status lists the teams a member can name and reports another team\'s running work', async () => {
+  const script = { by_member: {
+    manager: { steps: [
+      { tool: 'delegate', args: { to: 'loupe', task: 'go' }, save: 'd' },
+      { sleep_ms: 300 },
+      { tool: 'team_status', args: {} },
+      { tool: 'team_status', args: { team: '$B_ROOT' } },
+      { tool: 'team_status', args: { team: '../nowhere' } },
+      { tool: 'wait_for', args: {}, until_finished: ['$d.report_id'] }
+    ] },
+    'b-lead': { steps: [{ tool: 'report_progress', args: { text: 'half way' } }, { sleep_ms: 600 }] }
+  } };
+  const { a, b } = teams({ script });
+  const bRoot = realpathSync(b.root);
+  const text = JSON.stringify(script).replaceAll('$B_ROOT', bRoot);
+  writeFileSync(a.script, text);
+  writeFileSync(b.script, text);
+  const { sup, store } = await supervise(a.script, { shared: true });
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(runId);
+    const [, list, status, missing] = toolResults(store, memberId);
+    assert.ok(list.body.result.teams.some((t) => t.root === bRoot));
+    assert.equal(status.body.result.team.root, bRoot);
+    const names = status.body.result.runs.flatMap((r) => r.members.map((m) => m.name));
+    assert.ok(names.includes('b-lead'));
+    assert.ok(!names.includes('manager'));
+    assert.match(missing.body.result.error, /not found: no agent-team config/);
+  } finally { await sup.close(); store.close(); }
+});

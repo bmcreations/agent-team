@@ -102,8 +102,8 @@ The supervisor sets two variables for the session process:
 | `AGENT_TEAM_TEAM_TOKEN` | A token that identifies the member to the supervisor. |
 
 A real harness is configured with `agent-team mcp` as an MCP server and passes both variables
-through to it. `agent-team mcp` serves the five team tools (`delegate`, `send_to`, `wait_for`,
-`report_progress`, `ask_human`) over stdio and forwards each call to the socket. It forwards
+through to it. `agent-team mcp` serves the six team tools (`delegate`, `send_to`, `wait_for`,
+`report_progress`, `ask_human`, `team_status`) over stdio and forwards each call to the socket. It forwards
 only those tool names. The socket also serves admin methods (`submit`, `wait_run`, `send`,
 `answer`, `questions`, `pause`, `resume`, `cancel`, `takeover`, `handback`), which the bridge refuses. They are reachable by anything that can open the socket,
 which is a directory created with mode `0700`. The token identifies a member; it does not
