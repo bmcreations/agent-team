@@ -278,7 +278,24 @@ function memberControls(m) {
 
 // Sections later tasks add to the member panel (devices, designs).
 function extras(m) {
-  return [];
+  const section = h('section', { class: 'devices', hidden: true });
+  api(`/api/members/${m.id}/devices`).then(({ enabled, targets }) => {
+    if (!enabled) return;
+    const pick = h('select', { 'aria-label': 'Loupe target' }, h('option', { value: '' }, 'Pick a device'));
+    const shown = h('div');
+    const show = (id) => {
+      const img = h('img', { alt: `Screenshot of ${id}`, src: `/api/loupe/screenshot?target=${encodeURIComponent(id)}` });
+      shown.replaceChildren(img, h('p', {},
+        h('button', { type: 'button', onclick: () => { img.src = `/api/loupe/screenshot?target=${encodeURIComponent(id)}&t=${Date.now()}`; } }, 'Refresh'),
+        ' ', h('a', { href: `/loupe/open?target=${encodeURIComponent(id)}`, target: '_blank', rel: 'noopener noreferrer' }, 'Open live view in loupe')));
+    };
+    pick.addEventListener('change', () => pick.value && show(pick.value));
+    section.append(h('h3', {}, 'Devices'), pick, shown);
+    section.hidden = false;
+    targets.forEach((t, i) => { if (i === 0) show(t.id); });
+    api('/api/loupe').then(({ targets: all }) => all.forEach((t) => pick.append(h('option', { value: t.id }, `${t.label} (${t.id})`))), () => {});
+  }, () => {});
+  return [section];
 }
 
 $('search').addEventListener('input', (e) => { S.query = e.target.value; schedule(); });

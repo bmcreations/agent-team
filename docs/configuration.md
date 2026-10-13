@@ -306,3 +306,15 @@ Optional.
 
 `/agent-team-init` writes `max_depth: 1` and `max_delegations: 12`, which lets the orchestrator
 delegate and stops its reports from delegating further.
+
+## Web view
+
+`agent-team serve` reads two optional environment variables for the web view.
+
+- `AGENT_TEAM_LOUPE_URL`: the address of a loupe (a local device viewer) running on this machine, for
+  example `https://localhost:18456`. A member's panel then shows screenshots of any loupe
+  target the member named (`sim:<udid>`, `avd:<name>`, an Android serial), a picker for the
+  rest, and a link that opens loupe's live view. `serve` reads loupe's token from
+  `LOUPE_TOKEN` or `~/Library/Caches/loupe/token` when it needs it and sends it only to
+  loupe. The URL must be `localhost`, `127.0.0.1` or `[::1]`; `serve` accepts loupe's
+  self-signed certificate there.
