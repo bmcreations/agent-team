@@ -1193,7 +1193,9 @@ export class Supervisor {
     const target = resolveTeam({ store: this.store, projectRoot: scope.projectRoot, config: scope.config, team });
     const chain = this.#threadChain(m, scope);
     if (target.keys.some((k) => chain.includes(k))) {
-      const names = [...chain, target.keys[0]].map((k) => basename(k)).join(' -> ');
+      // The team asked for closes the loop; it is named once when the chain already ends with it.
+      const path = chain.at(-1) === target.keys[0] ? chain : [...chain, target.keys[0]];
+      const names = path.map((k) => basename(k)).join(' -> ');
       throw new Error(`request refused: team "${team}" is already in this chain (${names})`);
     }
     const entry = teamEntry(target.config, null, target.root, team);
