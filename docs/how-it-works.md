@@ -34,6 +34,14 @@ mode `0700` on every start, and the store file to `0600`, since it holds member 
 socket directory named through `AGENT_TEAM_SUPERVISOR_SOCK` keeps its mode unless the
 supervisor created it. Socket paths longer than 103 bytes are refused.
 
+When `serve` starts, it adopts every run still marked running whose supervisor no longer
+listens: its own runs from before a restart, and a CLI's run whose in-process supervisor
+died. Members that were working are relaunched from their harness sessions in their own
+workspaces, within the caps, with a note that their last turn was cut off; a manager is also
+given its reports' states. A one-shot (v1) member cannot be resumed and fails. A run whose
+project config can no longer be read fails with the reason. `serve` does not watch for
+in-process supervisors that die while it runs; it adopts their runs at its next start.
+
 `defaults.max_parallel` (default 3) caps how many of one manager's reports run at once; the
 rest queue. It is per manager, not per run, so a run with several managers can have more
 members running. `serve` also caps running members across all runs at 6.

@@ -6,7 +6,7 @@ import { buildBrief } from './brief.js';
 import { resolveCaps, prepareMember, runMember, teamKeys } from './dispatch.js';
 import { pruneWorkspace } from './workspace.js';
 import { MemberSession } from './sessions.js';
-import { serveRpc } from './rpc.js';
+import { serveRpc, isListening } from './rpc.js';
 import { TEAM_NOTE } from './team-tools.js';
 import { DEFAULT_TIMEOUT_MS } from './adapter.js';
 
@@ -68,9 +68,11 @@ export class Supervisor {
   submit({ projectRoot, member, task, timeoutMs }) {
     const config = loadConfig(projectRoot);
     if (!Object.hasOwn(config.members, member)) throw new Error(`unknown member "${member}"`);
-    const runId = this.store.createRun({ project: projectRoot, task });
-    this.#runs.set(runId, { projectRoot, config, budget: { runs: config.defaults.max_delegations },
-                         timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : this.timeoutMs });
+    const limits = { budget: config.defaults.max_delegations,
+                     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : this.timeoutMs };
+    // Limits and owner are stored so a restarted supervisor can rebuild the run.
+    const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath });
+    this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs });
     const { id } = this.store.addMember({ runId, parentId: null, name: member, task, depth: 0 });
     this.store.setRunRoot(runId, id);
     this.#resolve(this.store.member(id));
@@ -195,12 +197,20 @@ export class Supervisor {
     if (member_id != null) {
       const m = this.store.member(Number(member_id));
       if (!m) throw new Error(`unknown member ${member_id}`);
-      return m;
+      return this.#owned(m);
     }
     if (run_id == null || typeof member !== 'string') throw new Error('name a member: member_id, or run_id and member');
     const matches = this.store.members(Number(run_id)).filter((m) => m.name === member);
     if (!matches.length) throw new Error(`run ${run_id} has no member "${member}"`);
-    return matches.filter((m) => !TERMINAL.has(m.state)).at(-1) ?? matches.at(-1);
+    return this.#owned(matches.filter((m) => !TERMINAL.has(m.state)).at(-1) ?? matches.at(-1));
+  }
+
+  // Another supervisor (a CLI's in-process one) may be running this member's run.
+  #owned(m) {
+    if (!this.#runs.has(m.run_id)) {
+      throw new Error(`run ${m.run_id} is run by another supervisor (${this.store.run(m.run_id).owner})`);
+    }
+    return m;
   }
 
   #subtree(id) {
@@ -269,6 +279,70 @@ export class Supervisor {
     if (m.parent_id == null) return;
     this.store.enqueue({ to: m.parent_id, fromKind: 'report', fromName: m.name, reportId: m.id, text });
     this.#pump(m.parent_id);
+  }
+
+  // ---- recovery ----
+
+  // Adopts runs left running by a supervisor that is gone: this one before a restart, or a
+  // CLI's in-process one. `serve` calls it once after start(). Members that were working are
+  // relaunched from their harness sessions within the caps; paused ones stay paused.
+  async recover() {
+    const out = { recovered: [], failed: [] };
+    for (const run of this.store.runsWithStatus('running')) {
+      if (this.#runs.has(run.id) || (run.owner && await isListening(run.owner))) continue;
+      let config;
+      try {
+        config = loadConfig(run.project);
+      } catch (err) {
+        this.#failRun(run, `could not recover after a supervisor restart: ${err.message}`);
+        out.failed.push(run.id);
+        continue;
+      }
+      this.#runs.set(run.id, {
+        projectRoot: run.project, config,
+        budget: { runs: run.budget ?? config.defaults.max_delegations },
+        timeoutMs: run.timeout_ms ?? this.timeoutMs
+      });
+      this.store.setRunOwner(run.id, this.socketPath);
+      for (const m of this.store.members(run.id)) this.#recoverMember(m);
+      out.recovered.push(run.id);
+    }
+    return out;
+  }
+
+  #recoverMember(m) {
+    if (TERMINAL.has(m.state) || m.state === 'paused') return;
+    this.store.requeueOffered(m.id);
+    if (m.state === 'queued') {
+      // Queued after a resume: it has a workspace and maybe a session to go back to.
+      if (m.workspace) this.#resumes.set(m.id, { note: 'Resumed after an agent-team supervisor restart.' });
+      return this.#schedule(m.id);
+    }
+    // running or waiting: its process ended with the old supervisor.
+    for (const q of this.store.openQuestions()) if (q.member_id === m.id) this.store.closeQuestion(q.id);
+    const lines = ['The agent-team supervisor restarted while you were working, and your last turn ' +
+                   'was cut off: a command it started may have partly run. Check the workspace ' +
+                   'before repeating work.'];
+    if (m.state === 'waiting') lines.push('A wait_for or ask_human call you were in was ended; call it again if you still need it.');
+    const reports = this.store.children(m.id);
+    if (reports.length) {
+      lines.push('Your reports now:', ...reports.map((r) => `- ${r.name} (#${r.id}): ${r.state}`));
+    }
+    this.store.addEvent(m.id, 'interrupted', { by: 'supervisor restart' });
+    this.store.setState(m.id, 'queued');
+    this.#resumes.set(m.id, { note: lines.join('\n'), restart: true });
+    this.#schedule(m.id);
+  }
+
+  // A run that cannot be rebuilt: every unfinished member fails with the reason.
+  #failRun(run, summary) {
+    for (const m of this.store.members(run.id)) {
+      if (TERMINAL.has(m.state)) continue;
+      this.store.setState(m.id, 'failed');
+      this.store.setResult(m.id, { status: 'failed', summary });
+      this.store.addEvent(m.id, 'finished', { status: 'failed', state: 'failed' });
+    }
+    this.store.finishRun(run.id, 'failed');
   }
 
   // ---- scheduling ----
@@ -345,7 +419,11 @@ export class Supervisor {
     // for send_to to deliver to.
     if (r.team || r.caps.protocol !== 2) {
       rt.oneShot = true;
-      return this.#finish(id, await runMember(r.team ? ctx : { ...ctx, preresolved: r }));
+      // A one-shot member has no session to resume after a restart.
+      if (resume?.restart) return this.#finish(id, { status: 'failed', summary: 'interrupted by a supervisor restart' });
+      const result = await runMember(r.team ? ctx : { ...ctx, preresolved: r });
+      if (!this.#closing) this.store.setBudget(m.run_id, run.budget.runs);   // a team spends the run's budget too
+      return this.#finish(id, result);
     }
 
     const { resolved, caps } = r;
@@ -589,6 +667,7 @@ export class Supervisor {
     }
     if (budget.runs <= 0) throw new Error('delegation budget exhausted (max_delegations)');
     budget.runs -= 1;
+    this.store.setBudget(m.run_id, budget.runs);
     const child = this.store.addMember({ runId: m.run_id, parentId: id, name: to, task, depth: m.depth + 1 });
     this.store.addEvent(id, 'delegated', { to, report_id: child.id });
     this.#resolve(this.store.member(child.id));

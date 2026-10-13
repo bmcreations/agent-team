@@ -36,7 +36,10 @@ const MIGRATIONS = [
    ALTER TABLE runs ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
    ALTER TABLE runs ADD COLUMN timeout_ms INTEGER;
    ALTER TABLE runs ADD COLUMN budget INTEGER;
-   ALTER TABLE runs ADD COLUMN max_cost_usd REAL;`
+   ALTER TABLE runs ADD COLUMN max_cost_usd REAL;`,
+  // The socket of the supervisor running the run; recovery adopts a run only when nothing
+  // listens there any more.
+  `ALTER TABLE runs ADD COLUMN owner TEXT;`
 ];
 
 function migrate(db) {
@@ -78,9 +81,11 @@ export function openStore(path) {
   return {
     close: () => db.close(),
 
-    createRun: ({ project, task, timeoutMs = null, budget = null, maxCostUsd = null }) => Number(
-      q("INSERT INTO runs (project, task, status, created_at, timeout_ms, budget, max_cost_usd) VALUES (?, ?, 'running', ?, ?, ?, ?)")
-        .run(project, task, now(), timeoutMs, budget, maxCostUsd).lastInsertRowid),
+    createRun: ({ project, task, timeoutMs = null, budget = null, maxCostUsd = null, owner = null }) => Number(
+      q("INSERT INTO runs (project, task, status, created_at, timeout_ms, budget, max_cost_usd, owner) VALUES (?, ?, 'running', ?, ?, ?, ?, ?)")
+        .run(project, task, now(), timeoutMs, budget, maxCostUsd, owner).lastInsertRowid),
+    setRunOwner: (id, owner) => q('UPDATE runs SET owner = ? WHERE id = ?').run(owner, id),
+    runsWithStatus: (status) => q('SELECT * FROM runs WHERE status = ? ORDER BY id').all(status),
     setBudget: (id, left) => q('UPDATE runs SET budget = ? WHERE id = ?').run(left, id),
     setRunCap: (id, usd) => q('UPDATE runs SET max_cost_usd = ? WHERE id = ?').run(usd, id),
     addRunCost(id, usd) {
@@ -155,6 +160,9 @@ export function openStore(path) {
     },
     ackMessage: (id) => setMessageState(id, 'offered', 'delivered'),
     requeue: (id) => setMessageState(id, 'offered', 'queued'),
+    // After a restart nothing holds an offer: every unacked one goes back to the queue.
+    requeueOffered: (memberId) =>
+      q("UPDATE messages SET state = 'queued' WHERE to_member = ? AND state = 'offered'").run(memberId),
     message: (id) => q('SELECT * FROM messages WHERE id = ?').get(id),
 
     addQuestion: ({ memberId, question, options = null }) => Number(

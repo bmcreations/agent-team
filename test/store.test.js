@@ -159,3 +159,16 @@ test('claimForQuestion takes human and manager messages and leaves report messag
   assert.equal(store.message(human).state, 'delivered');
   assert.equal(store.message(report).state, 'queued');
 });
+
+test('runs record their owner, and recovery queries find running runs and offered messages', () => {
+  const { store, runId, lead } = seeded();
+  store.setRunOwner(runId, '/tmp/a.sock');
+  assert.equal(store.run(runId).owner, '/tmp/a.sock');
+  assert.deepEqual(store.runsWithStatus('running').map((r) => r.id), [runId]);
+  store.finishRun(runId, 'done');
+  assert.deepEqual(store.runsWithStatus('running'), []);
+  const a = store.enqueue({ to: lead.id, fromKind: 'human', fromName: 'b', text: 'a' });
+  store.offerQueued(lead.id);
+  store.requeueOffered(lead.id);
+  assert.equal(store.message(a).state, 'queued');
+});

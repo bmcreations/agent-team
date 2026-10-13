@@ -69,6 +69,11 @@ if (positionals[0] === 'serve') {
     fail(err);
   }
   process.stderr.write(`agent-team: supervisor listening on ${defaultSocketPath()}\n`);
+  // Runs left behind by a previous serve, or by a CLI whose in-process supervisor died.
+  const { recovered, failed } = await sup.recover();
+  if (recovered.length || failed.length) {
+    process.stderr.write(`agent-team: recovered runs [${recovered.join(', ')}]; could not recover [${failed.join(', ')}]\n`);
+  }
   let stopping = false;
   const shutdown = () => {
     if (stopping) return;
