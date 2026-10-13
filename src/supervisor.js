@@ -53,8 +53,10 @@ export class Supervisor {
   #resolutions = new Map();   // memberId -> Promise of { resolved, caps } | { team: true } | { error }
 
   constructor({ store, adapterDir, skillsDir = null, socketPath, env = {}, maxRunning = 6,
-                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000 }) {
-    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs });
+                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000, stopMs = null }) {
+    // How long a member may take to exit after its final stop before it is ended.
+    stopMs ??= Math.max(graceMs * 2, 10_000);
+    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs, stopMs });
   }
 
   async start() {
@@ -73,7 +75,10 @@ export class Supervisor {
     this.#closing = true;
     clearInterval(this.#ticker);
     const live = [...this.#live.values()];
-    for (const rt of live) this.#settle(rt, { error: 'the agent-team supervisor is shutting down' });
+    for (const rt of live) {
+      clearTimeout(rt.stopTimer);
+      this.#settle(rt, { error: 'the agent-team supervisor is shutting down' });
+    }
     // Halted while launching: no adapter will exit to record it.
     for (const rt of live) {
       if (rt.halt && !rt.session) {
@@ -336,7 +341,8 @@ export class Supervisor {
       throw new Error(`"${m.name}" is already being ${rt.halt.kind === 'cancel' ? 'cancelled' : 'stopped: it timed out'}`);
     }
     if (rt.halt && kind === 'pause' && (!now || rt.halt.now)) throw new Error(`"${m.name}" is already being paused`);
-    if (rt.stopping && !rt.halt) throw new Error(`"${m.name}" has finished its work and is stopping`);
+    // A stopping member has nothing left to pause, but cancel still ends one that hangs.
+    if (rt.stopping && !rt.halt && kind === 'pause') throw new Error(`"${m.name}" has finished its work and is stopping`);
     rt.halt = { kind, now: now || kind === 'cancel', by };
     // A harness cannot end its turn while a tool call is pending.
     const note = this.#haltNote(rt);
@@ -676,6 +682,7 @@ export class Supervisor {
   #onExit(id, code, stderr) {
     const rt = this.#live.get(id);
     if (!rt) return;
+    clearTimeout(rt.stopTimer);
     if (this.#closing) {
       this.#live.delete(id);
       for (const mid of rt.offered) this.store.requeue(mid);
@@ -684,6 +691,11 @@ export class Supervisor {
     }
     // Pausing or cancelling wins over whatever the adapter reported on its way out.
     if (rt.halt) return this.#halted(id, rt);
+    if (rt.stopOverdue) {
+      return this.#finish(id, rt.result ?? {
+        status: 'failed', summary: `the adapter did not exit within ${this.stopMs / 1000}s of being asked to stop`
+      });
+    }
     this.#finish(id, rt.result ?? {
       status: 'failed',
       summary: `adapter exited with code ${code} before a result: ${stderr.trim().slice(-1000)}`
@@ -774,6 +786,13 @@ export class Supervisor {
     if (rt.idle && rt.offered.size === 0 && this.#openReports(id) === 0) {
       rt.stopping = true;
       rt.session.send({ type: 'stop' });
+      // An adapter that hangs on its way out would hold its slot forever.
+      rt.stopTimer = setTimeout(() => {
+        if (this.#live.get(id) !== rt || rt.halt) return;
+        rt.stopOverdue = true;
+        rt.session.end(this.graceMs);
+      }, this.stopMs);
+      rt.stopTimer.unref();
     }
   }
 

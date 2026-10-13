@@ -237,3 +237,37 @@ test('cancelling a mid-level manager alone cancels its reports; its own manager 
     assert.equal(store.member(mid().id).state, 'cancelled');
   } finally { await sup.close(); }
 });
+
+const deafAdapters = () => {
+  const dir = adapterDir();
+  copyFileSync(new URL('./fixtures/session-deaf-stop', import.meta.url).pathname, join(dir, 'deaf'));
+  chmodSync(join(dir, 'deaf'), 0o755);
+  return dir;
+};
+
+test('a member that does not exit after its final stop is ended and fails, freeing its slot', async () => {
+  const { root, script } = project({ solo: { agent: 'deaf', isolation: 'none' } }, {});
+  const { sup, store } = await supervise(script, { adapterDir: deafAdapters(), graceMs: 200, stopMs: 300 });
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    const result = await Promise.race([
+      sup.waitRun(runId),
+      new Promise((r) => setTimeout(() => r('still stopping'), 8000))
+    ]);
+    assert.deepEqual(result, { status: 'failed', summary: 'the adapter did not exit within 0.3s of being asked to stop' });
+    assert.equal(store.member(memberId).state, 'failed');
+  } finally { await sup.close(); }
+});
+
+test('cancel reaches a member that is stopping', async () => {
+  const { root, script } = project({ solo: { agent: 'deaf', isolation: 'none' } }, {});
+  const { sup, store } = await supervise(script, { adapterDir: deafAdapters(), graceMs: 200 });
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    await untilOr(() => store.events(memberId).some((e) => e.body.text === 'stop-received'), 'stop was never sent');
+    assert.throws(() => sup.pause({ member_id: memberId }), /has finished its work and is stopping/);
+    sup.cancel({ member_id: memberId });
+    assert.deepEqual(await sup.waitRun(runId), { status: 'failed', summary: 'cancelled by local' });
+    assert.equal(store.member(memberId).state, 'cancelled');
+  } finally { await sup.close(); }
+});
