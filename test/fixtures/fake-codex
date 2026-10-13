@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline';
 const LOG = process.env.FAKE_CODEX_LOG;
 const log = (o) => { if (LOG) appendFileSync(LOG, JSON.stringify({ pid: process.pid, ...o }) + '\n'); };
 const argv = process.argv.slice(2);
-log({ argv, cwd: process.cwd() });
+log({ argv, cwd: process.cwd(), team_token: process.env.AGENT_TEAM_TEAM_TOKEN ?? null, team_socket: process.env.AGENT_TEAM_TEAM_SOCKET ?? null });
 
 if (argv[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
 
@@ -48,7 +48,7 @@ function stdioServer() {
     const t = turn; turn = null;
     if (status === 'completed') {
       const failed = t.texts.some((s) => s.includes('FAIL'));
-      notify('item/completed', { threadId: thread, turnId: t.id,
+      if (!t.texts.some((s) => s.includes('LATE'))) notify('item/completed', { threadId: thread, turnId: t.id,
         item: { type: 'agentMessage', id: `m-${t.id}`, text: `echo: ${t.texts.join(' | ')}`, phase: 'final_answer' } });
       total += 100;
       notify('thread/tokenUsage/updated', { threadId: thread, turnId: t.id, tokenUsage: { total: { totalTokens: total }, last: { totalTokens: 100 } } });
@@ -66,6 +66,16 @@ function stdioServer() {
     // Another thread's traffic on the same server: the adapter must ignore it.
     notify('item/completed', { threadId: 'thr-other', item: { type: 'agentMessage', id: 'x', text: 'NOT YOURS', phase: 'final_answer' } });
     const s = turn.texts[0];
+    // CRASH_ON: dies mid-turn when the turn's text includes it.
+    if (process.env.FAKE_CODEX_CRASH_ON && s.includes(process.env.FAKE_CODEX_CRASH_ON)) {
+      process.stderr.write('fake-codex: crashed\n');
+      process.exit(1);
+    }
+    if (s.includes('LATE')) {
+      // A non-final message after the final answer: the final answer must still win.
+      notify('item/completed', { threadId: thread, item: { type: 'agentMessage', id: 'f1', text: 'the final answer', phase: 'final_answer' } });
+      notify('item/completed', { threadId: thread, item: { type: 'agentMessage', id: 'f2', text: 'a later aside', phase: 'commentary' } });
+    }
     if (s.includes('TOOL')) {
       notify('item/started', { threadId: thread, item: { type: 'mcpToolCall', id: 'c1', server: 'agent-team', tool: 'report_progress', arguments: { note: 'hi' }, status: 'inProgress' } });
       notify('item/completed', { threadId: thread, item: { type: 'mcpToolCall', id: 'c1', server: 'agent-team', tool: 'report_progress', arguments: { note: 'hi' }, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }] } } });
@@ -103,6 +113,7 @@ function stdioServer() {
       case 'initialize': return ok({ userAgent: 'fake' });
       case 'initialized': return;
       case 'thread/start':
+        if (process.env.FAKE_CODEX_FAIL_THREAD === '1') return err('thread refused');
         thread = 'thr-1';
         return ok({ thread: { id: thread } });
       case 'thread/resume':
@@ -111,6 +122,7 @@ function stdioServer() {
         ok({ thread: { id: thread } });
         return notify('thread/tokenUsage/updated', { threadId: thread, tokenUsage: { total: { totalTokens: total }, last: { totalTokens: 0 } } });
       case 'turn/start':
+        if (process.env.FAKE_CODEX_FAIL_TURN === '1') return err('turn refused');
         if (turn) return err('a turn is already running');
         begin(m.params.input);
         return ok({ turn: { id: turn?.id ?? `turn-${turns}`, status: 'inProgress' } });

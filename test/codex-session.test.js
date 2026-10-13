@@ -152,3 +152,102 @@ test('capabilities declare protocol 2', { timeout: 5000 }, () => {
   assert.equal(caps.structured_output, true);
   assert.equal(caps.tool_dialect, 'codex');
 });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+test('the team token and socket stay out of the app-server process env', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send({ type: 'start', brief: { task: 'Say hi', cwd: newCwd(), read_only: false }, resume: null, note: null });
+  await s.next('idle');
+  const [first] = s.logged();
+  assert.equal(first.team_token, null);
+  assert.equal(first.team_socket, null);
+  s.send({ type: 'stop' });
+  await s.next('result');
+  assert.equal(await s.exit, 0);
+});
+
+test('a stop mid-turn waits for the turn, and the result carries that turn\'s text', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send({ type: 'start', brief: { task: 'Slow', cwd: newCwd(), read_only: false }, resume: null, note: null });
+  await s.next('session');
+  s.send({ type: 'stop' });   // the first turn is in flight (or just finished)
+  const result = await s.next('result');
+  assert.equal(result.status, 'ok');
+  assert.equal(result.summary, 'echo: Slow');
+  assert.equal(result.usage.turns, 1);
+  assert.equal(await s.exit, 0);
+});
+
+test('an app-server that dies mid-turn after a stop is a failed result', { timeout: 10000 }, async () => {
+  const s = session({ FAKE_CODEX_CRASH_ON: 'BOOM' });
+  s.send({ type: 'start', brief: { task: 'BOOM', cwd: newCwd(), read_only: false }, resume: null, note: null });
+  await s.next('session');
+  s.send({ type: 'stop' });
+  const result = await s.next('result');
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /before the turn finished: .*fake-codex: crashed/s);
+  assert.equal(await s.exit, 0);
+});
+
+test('an app-server that dies without a stop is a failed result', { timeout: 10000 }, async () => {
+  const s = session({ FAKE_CODEX_CRASH_ON: 'BOOM' });
+  s.send({ type: 'start', brief: { task: 'BOOM', cwd: newCwd(), read_only: false }, resume: null, note: null });
+  const result = await s.next('result');
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /before it was asked to stop: .*fake-codex: crashed/s);
+  assert.equal(await s.exit, 0);
+});
+
+test('SIGTERM to the adapter exits 143 and takes the app-server with it', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send({ type: 'start', brief: { task: 'HOLD it', cwd: newCwd(), read_only: false }, resume: null, note: null });
+  await s.next('session');
+  const serverPid = s.logged().find((l) => l.argv)?.pid;
+  assert.ok(alive(serverPid));
+  // The adapter's pid is not exposed by the harness; signal it through its child's parent.
+  const ppid = Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(serverPid)]).toString().trim());
+  process.kill(ppid, 'SIGTERM');
+  assert.equal(await s.exit, 143);
+  for (let i = 0; i < 40 && alive(serverPid); i++) await sleep(50);
+  assert.ok(!alive(serverPid));
+});
+
+test('a thread/start failure is a failed result', { timeout: 10000 }, async () => {
+  const s = session({ FAKE_CODEX_FAIL_THREAD: '1' });
+  s.send({ type: 'start', brief: { task: 'x', cwd: newCwd(), read_only: false }, resume: null, note: null });
+  const result = await s.next('result');
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /did not start a session: thread refused/);
+  assert.equal(await s.exit, 0);
+});
+
+test('a turn/start rejection is worded as a rejected turn', { timeout: 10000 }, async () => {
+  const s = session({ FAKE_CODEX_FAIL_TURN: '1' });
+  s.send({ type: 'start', brief: { task: 'x', cwd: newCwd(), read_only: false }, resume: null, note: null });
+  await s.next('session');
+  const result = await s.next('result');
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /codex rejected the turn: turn refused/);
+  assert.equal(await s.exit, 0);
+});
+
+test('a final_answer message wins over a later non-final one', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send({ type: 'start', brief: { task: 'LATE', cwd: newCwd(), read_only: false }, resume: null, note: null });
+  await s.next('idle');
+  s.send({ type: 'stop' });
+  assert.equal((await s.next('result')).summary, 'the final answer');
+  assert.equal(await s.exit, 0);
+});
+
+test('brief.effort becomes model_reasoning_effort in the thread config', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send({ type: 'start', brief: { task: 'x', cwd: newCwd(), read_only: false, effort: 'high' }, resume: null, note: null });
+  await s.next('idle');
+  assert.equal(s.requests('thread/start')[0].config.model_reasoning_effort, 'high');
+  s.send({ type: 'stop' });
+  await s.next('result');
+  assert.equal(await s.exit, 0);
+});

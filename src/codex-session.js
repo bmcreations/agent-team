@@ -74,6 +74,7 @@ export function runCodexSession({ artifacts }) {
   const pending = new Map();   // request id -> { resolve, reject }
   let inTurn = false;
   let stopping = false;
+  let killedByUs = false;   // we ended the server on purpose; any other exit is a crash
   let startError = null;
   // thread/tokenUsage/updated carries the thread's cumulative total; each idle reports the
   // change since the previous turn ended.
@@ -93,7 +94,7 @@ export function runCodexSession({ artifacts }) {
     write({ id, method, params });
   });
   const finish = (result) => process.stdout.write(JSON.stringify({ type: 'result', ...result }) + '\n', () => process.exit(0));
-  const endServer = () => { stopping = true; server?.kill('SIGTERM'); };
+  const endServer = () => { stopping = true; killedByUs = true; server?.kill('SIGTERM'); };
 
   function onItem(item, phase) {
     if (!item || typeof item !== 'object') return;
@@ -165,6 +166,9 @@ export function runCodexSession({ artifacts }) {
     if (startError) outcome = { status: 'failed', summary: startError };
     else if (!stopping) {
       outcome = { status: 'failed', summary: `codex app-server exited (${signal ?? `code ${code}`}) before it was asked to stop: ${stderr.trim()}` };
+    } else if (inTurn && !killedByUs) {
+      // A stop was requested mid-turn, but the server died before the turn finished.
+      outcome = { status: 'failed', summary: `codex app-server exited (${signal ?? `code ${code}`}) before the turn finished: ${stderr.trim()}` };
     } else outcome = { status: lastError ? 'failed' : 'ok', summary: lastText };
     const art = artifacts(brief.cwd, logDir);
     log.end(() => finish({ ...outcome, usage, permission_denials: [], findings: [], checked_sound: [],
@@ -178,19 +182,28 @@ export function runCodexSession({ artifacts }) {
     threadId = started.thread.id;
     out({ type: 'session', harness_id: threadId, resume: threadId });
     inTurn = true;
-    await request('turn/start', { threadId, input: [{ type: 'text', text: brief.task, text_elements: [] }] });
+    await request('turn/start', { threadId, input: [{ type: 'text', text: brief.task, text_elements: [] }] })
+      .catch((err) => { throw Object.assign(err, { phase: 'turn' }); });
   }
 
   function start({ brief: b }) {
     brief = b;
     if (!existsSync(brief.cwd)) return finish({ status: 'failed', summary: `cwd does not exist: ${brief.cwd}`, log_path: logPath });
-    server = spawn(codexBin(), ['app-server'], { cwd: brief.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    // The team token reaches codex only inside the thread config, not through its own env.
+    const env = { ...process.env };
+    delete env.AGENT_TEAM_TEAM_TOKEN;
+    delete env.AGENT_TEAM_TEAM_SOCKET;
+    server = spawn(codexBin(), ['app-server'], { cwd: brief.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     server.stdin.on('error', () => {});
     server.stderr.on('data', (d) => { log.write(d); stderr = (stderr + d).slice(-STDERR_TAIL); });
     server.on('error', (err) => { stderr += `\n${err.message}`; });
     createInterface({ input: server.stdout }).on('line', onServerLine);
     server.on('close', onServerExit);
-    begin().catch((err) => { startError = `codex app-server did not start a session: ${err.message} ${stderr.trim()}`.trim(); endServer(); });
+    begin().catch((err) => {
+      const what = err.phase === 'turn' ? 'codex rejected the turn' : 'codex app-server did not start a session';
+      startError = `${what}: ${err.message} ${stderr.trim()}`.trim();
+      endServer();
+    });
   }
 
   createInterface({ input: process.stdin }).on('line', (line) => {
@@ -207,6 +220,7 @@ export function runCodexSession({ artifacts }) {
     // The supervisor closed our stdin or died: the server must not outlive it.
     if (!server || server.exitCode !== null || server.signalCode !== null) return;
     stopping = true;
+    killedByUs = true;
     server.kill('SIGTERM');
     setTimeout(() => server.kill('SIGKILL'), ORPHAN_GRACE_MS).unref();
   });
@@ -214,5 +228,13 @@ export function runCodexSession({ artifacts }) {
   process.stdout.on('error', () => {});
 
   // The supervisor's last resort after an interrupt is SIGTERM; the server goes with us.
-  process.on('SIGTERM', () => { server?.kill('SIGTERM'); process.exit(143); });
+  process.on('SIGTERM', () => {
+    if (server && server.exitCode === null && server.signalCode === null) {
+      server.kill('SIGTERM');
+      // Unref'd timers cannot keep us alive, so the grace is a detached killer.
+      spawn(process.execPath, ['-e', `setTimeout(()=>{try{process.kill(${server.pid},'SIGKILL')}catch{}},${ORPHAN_GRACE_MS})`],
+            { detached: true, stdio: 'ignore' }).unref();
+    }
+    process.exit(143);
+  });
 }
