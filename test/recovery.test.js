@@ -106,6 +106,8 @@ test('a mid-level cancel in flight when the supervisor closes takes its reports 
   await first.sup.close();
   assert.equal(store.member(mid().id).state, 'cancelled');
   assert.equal(store.member(worker().id).state, 'cancelled');
+  // Worded as the live cascade words it.
+  assert.deepEqual(store.member(worker().id).result, { status: 'failed', summary: 'cancelled by local' });
 
   const { sup } = await supervise(script, { store });
   try {

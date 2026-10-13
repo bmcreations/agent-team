@@ -11,6 +11,9 @@ import { TEAM_NOTE } from './team-tools.js';
 import { DEFAULT_TIMEOUT_MS } from './adapter.js';
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled']);
+// Who a cascade names in its reports' "cancelled by ..." summary: whoever cancelled the
+// manager, or the manager itself and how it ended. The live path and close() share it.
+const cascadeBy = (m, state, by) => by ?? `${m.name} (${state})`;
 const WAIT_DEFAULT_S = 600;
 const WAIT_MAX_S = 1800;
 const ASK_DEFAULT_S = 1800;
@@ -412,8 +415,9 @@ export class Supervisor {
       this.store.addEvent(x.id, 'finished', { status: res.status, state: st });
     };
     record(m, state, result);
+    const cascaded = { status: 'failed', summary: `cancelled by ${cascadeBy(m, state, kind === 'cancel' ? by : null)}` };
     for (const d of this.#subtree(m.id).slice(1)) {
-      if (!TERMINAL.has(d.state)) record(d, 'cancelled', { status: 'failed', summary: `cancelled: ${m.name} ended` });
+      if (!TERMINAL.has(d.state)) record(d, 'cancelled', cascaded);
     }
     if (m.parent_id != null) {
       this.#enqueueNotice(m, `finished ${kind === 'cancel' ? 'cancelled' : 'failed'}: ${result.summary}`);
@@ -750,7 +754,7 @@ export class Supervisor {
     const id = m.id;
     // A run never ends with members still at work, and a report whose manager was cancelled or
     // failed has nobody left to report to. Pausing a manager alone leaves its reports working.
-    if (m.parent_id == null || state !== 'done') this.#cancelReports(m, by ?? `${m.name} (${state})`);
+    if (m.parent_id == null || state !== 'done') this.#cancelReports(m, cascadeBy(m, state, by));
     this.store.setState(id, state);
     this.store.setResult(id, result);
     this.store.addEvent(id, 'finished', { status: result.status, state });
