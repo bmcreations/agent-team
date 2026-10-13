@@ -102,7 +102,7 @@ class Hub {
     this.#clients.add(c);
     req.on('close', () => this.#drop(c));
     res.on('error', () => this.#drop(c));
-    this.#push(c);
+    try { this.#push(c); } catch (err) { c.res.destroy(); this.#drop(c); throw err; }
     if (!this.#timer) {
       this.#timer = setInterval(() => this.#poll(), this.pollMs);
       this.#timer.unref();
@@ -130,7 +130,8 @@ class Hub {
       this.#version = v;
     } catch { return; }   // the store is closing
     for (const c of [...this.#clients]) {
-      if (changed || c.more || c.blockedAt != null) this.#push(c);
+      if (!(changed || c.more || c.blockedAt != null)) continue;
+      try { this.#push(c); } catch { c.res.destroy(); this.#drop(c); }   // one bad client must not stop the rest
     }
   }
 
@@ -165,7 +166,8 @@ class Hub {
 // "<event>.<message>", as the stream's ids are written.
 function lastEventId(raw) {
   const m = /^(\d+)\.(\d+)$/.exec(raw ?? '');
-  return m ? { event: Number(m[1]), message: Number(m[2]) } : null;
+  const cursor = m && { event: Number(m[1]), message: Number(m[2]) };
+  return cursor && Number.isSafeInteger(cursor.event) && Number.isSafeInteger(cursor.message) ? cursor : null;
 }
 
 export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAULT_PORT, env = process.env,

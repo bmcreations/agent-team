@@ -139,3 +139,37 @@ test('close() ends open streams at once', async () => {
   await until(() => s.ended());
   store.close();
 });
+
+test('a push that throws drops that client and leaves serve and the other streams running', async () => {
+  const { store, runId, lead } = seeded();
+  const web = await startHttp({ store, port: 0, pollMs: 20 });
+  const a = stream(web.url, `/api/stream?run=${runId}&after_event=0&after_message=0`);
+  const b = stream(web.url, `/api/stream?run=${runId}&after_event=0&after_message=0`);
+  const real = store.timeline;
+  try {
+    await Promise.all([a.ready, b.ready]);
+    await until(() => web.clients() === 2);
+    let thrown = 0;
+    store.timeline = (...args) => {
+      if (!thrown++) throw new Error('SQLITE_BUSY');
+      return real.apply(store, args);
+    };
+    store.addEvent(lead.id, 'text', { text: 'after the throw' });
+    await until(() => web.clients() === 1);
+    await until(() => a.ended() || b.ended());
+    const survivor = a.ended() ? b : a;
+    await survivor.waitFor(hasEvent('after the throw'));
+    assert.equal((await get(web.url, '/api/runs')).status, 200);
+  } finally { store.timeline = real; a.close(); b.close(); await web.close(); store.close(); }
+});
+
+test('a Last-Event-ID beyond the safe integer range is treated as malformed', async () => {
+  const { store, runId, lead } = seeded();
+  store.addEvent(lead.id, 'text', { text: 'x' });
+  const web = await startHttp({ store, port: 0, pollMs: 20 });
+  const s = stream(web.url, `/api/stream?run=${runId}&after_event=0&after_message=0`, { 'Last-Event-ID': '99999999999999999999.0' });
+  try {
+    const frame = await s.waitFor(timeline);
+    assert.deepEqual(frame.data.events.map((e) => e.body.text), ['x']);
+  } finally { s.close(); await web.close(); store.close(); }
+});
