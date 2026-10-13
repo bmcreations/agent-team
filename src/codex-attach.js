@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, chmodSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, chmodSync, writeFileSync, writeSync, rmSync } from 'node:fs';
 import { tmpdir, constants } from 'node:os';
 import { join } from 'node:path';
 import { descendants, endTree, merge } from './proctree.js';
@@ -10,6 +10,13 @@ const KILL_AFTER_MS = 2_000;
 const STDERR_TAIL = 2_000;
 const TOKEN_ENV = 'AGENT_TEAM_CODEX_REMOTE_TOKEN';
 const LISTENING = /listening on: (ws:\/\/\S+)/;
+
+// A diagnostic for the human. The terminal may be gone (a closed window, a dropped ssh session):
+// touching process.stderr there can block opening the tty or throw EPIPE, so this writes straight
+// to fd 2 and gives up quietly. Callers clean up first, so nothing is left behind either way.
+export function diag(text) {
+  try { writeSync(2, text); } catch { /* no terminal to tell */ }
+}
 
 // `adapters/codex attach <thread>`: the human's take-over of a codex member. The member's own
 // app-server has exited; this starts a private one on a loopback websocket, guarded by a
@@ -47,7 +54,8 @@ export async function codexAttach(threadId) {
       token = randomBytes(32).toString('hex');
       writeFileSync(tokenFile, token, { mode: 0o600 });
     } catch (err) {
-      process.stderr.write(`agent-team: could not set up the codex take-over: ${err.message}\n`);
+      await cleanup();
+      diag(`agent-team: could not set up the codex take-over: ${err.message}\n`);
       return 3;
     }
     // Its own process group, so a signal meant for the terminal's foreground job (the TUI)
@@ -56,7 +64,8 @@ export async function codexAttach(threadId) {
                          '--ws-token-file', tokenFile], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
     const listen = await listening(server);
     if (listen.error !== undefined) {
-      process.stderr.write(`agent-team: codex app-server did not start listening: ${listen.error}\n`);
+      await cleanup();
+      diag(`agent-team: codex app-server did not start listening: ${listen.error}\n`);
       return 3;
     }
     tui = spawn(bin, ['resume', threadId, '--remote', listen.url, '--remote-auth-token-env', TOKEN_ENV], {
@@ -64,8 +73,10 @@ export async function codexAttach(threadId) {
     });
     return await new Promise((resolve) => {
       tui.once('error', (err) => {
-        process.stderr.write(`agent-team: could not run codex: ${err.message}\n`);
-        resolve(3);
+        cleanup().finally(() => {
+          diag(`agent-team: could not run codex: ${err.message}\n`);
+          resolve(3);
+        });
       });
       tui.once('exit', (code, signal) => resolve(code ?? 128 + (constants.signals[signal] ?? 0)));
     });

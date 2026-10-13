@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
 import { runCodexSession } from '../src/codex-session.js';
-import { codexAttach } from '../src/codex-attach.js';
+import { codexAttach, diag } from '../src/codex-attach.js';
 
 // Binary resolution: PATH is the contract ("codex" must resolve there for a normal install).
 // The env var is only an escape hatch for a non-PATH install — on this machine codex-cli
@@ -92,7 +92,7 @@ if (sub === 'probe') {
   if (!process.argv[3]) { process.stderr.write('usage: codex attach <thread-id>\n'); process.exit(2); }
   // Anything unexpected is "never started" (3), so the handback does not claim the human drove.
   codexAttach(process.argv[3])
-    .catch((err) => { process.stderr.write(`agent-team: codex attach failed: ${err.message}\n`); return 3; })
+    .catch((err) => { diag(`agent-team: codex attach failed: ${err.message}\n`); return 3; })
     .then((code) => process.exit(code));
 } else if (sub === 'run') {
   const brief = JSON.parse(readFileSync(0, 'utf8'));

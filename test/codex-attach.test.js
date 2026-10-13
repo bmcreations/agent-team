@@ -4,7 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { project, supervise } from './helpers/live.js';
 
 const BIN = new URL('../bin/agent-team.js', import.meta.url).pathname;
@@ -163,6 +163,31 @@ test('adapters/codex attach stops the server and removes the token when it is hu
   } finally {
     child.kill('SIGKILL');
     for (const e of entries().filter((x) => x.tui)) { try { process.kill(e.pid, 'SIGKILL'); } catch { /* gone */ } }
+  }
+});
+
+test('adapters/codex attach whose stderr has gone still exits as never started and cleans up', { timeout: 30_000 }, async () => {
+  const log = join(mkdtempSync(join(tmpdir(), 'at-ca-')), 'codex.jsonl');
+  const entries = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+  // A terminal that went away during start-up: nobody reads stderr any more.
+  const child = spawn(join(ADAPTERS, 'codex'), ['attach', 'thr-1'], {
+    stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, AGENT_TEAM_CODEX_BIN: FAKE, FAKE_CODEX_LOG: log, FAKE_CODEX_NO_LISTEN: '1' }
+  });
+  const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
+  try {
+    await until(() => entries().some((e) => e.listen));
+    child.stderr.destroy();
+    assert.equal(await exited, 3);
+    const { serverStart, exit } = takeoverLog(entries());
+    assert.ok(exit, 'the take-over server was stopped');
+    assert.equal(alive(serverStart.pid), false);
+    const a = serverStart.argv;
+    assert.equal(existsSync(dirname(a[a.indexOf('--ws-token-file') + 1])), false, 'the token directory was removed');
+    assert.equal(entries().filter((e) => e.tui).length, 0);
+  } finally {
+    child.kill('SIGKILL');
+    const s = takeoverLog(entries()).serverStart;
+    if (s) { try { process.kill(s.pid, 'SIGKILL'); } catch { /* gone */ } }
   }
 });
 
