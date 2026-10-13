@@ -102,3 +102,35 @@ test('a one-shot member left running fails on recovery: it has no session to res
     assert.deepEqual(await sup.waitRun(runId), { status: 'failed', summary: 'interrupted by a supervisor restart' });
   } finally { await sup.close(); }
 });
+
+test('a restart on the same socket path adopts the runs its predecessor owned', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } }
+  });
+  const first = await supervise(script);
+  const { runId, memberId } = first.sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+  await until(() => first.store.member(memberId).state === 'waiting');
+  await first.sup.close();
+  // serve listens on its fixed path before it recovers, so the old owner looks alive.
+  const { sup } = await supervise(script, { store: first.store, socketPath: first.socketPath });
+  try {
+    assert.deepEqual(await sup.recover(), { recovered: [runId], failed: [] });
+    assert.equal((await sup.waitRun(runId)).status, 'ok');
+  } finally { await sup.close(); }
+});
+
+test('a run with no recorded owner (written before owners existed) fails instead of relaunching', async () => {
+  const { root, script } = project({ solo: LIVE() }, {});
+  const { sup, store } = await supervise(script);
+  try {
+    const runId = store.createRun({ project: root, task: 'go' });
+    const { id } = store.addMember({ runId, parentId: null, name: 'solo', task: 'go', depth: 0 });
+    store.setRunRoot(runId, id);
+    store.setState(id, 'running');
+    const qid = store.addQuestion({ memberId: id, question: 'q?' });
+    assert.deepEqual(await sup.recover(), { recovered: [], failed: [runId] });
+    assert.equal(store.run(runId).status, 'failed');
+    assert.match(store.member(id).result.summary, /left by an older agent-team; start it again/);
+    assert.equal(store.question(qid).closed, 1, 'its open question is closed');
+  } finally { await sup.close(); }
+});

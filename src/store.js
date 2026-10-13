@@ -85,6 +85,8 @@ export function openStore(path) {
       q("INSERT INTO runs (project, task, status, created_at, timeout_ms, budget, max_cost_usd, owner) VALUES (?, ?, 'running', ?, ?, ?, ?, ?)")
         .run(project, task, now(), timeoutMs, budget, maxCostUsd, owner).lastInsertRowid),
     setRunOwner: (id, owner) => q('UPDATE runs SET owner = ? WHERE id = ?').run(owner, id),
+    // Atomic adoption: true only for the caller whose update changed the owner.
+    claimRun: (id, from, to) => q('UPDATE runs SET owner = ? WHERE id = ? AND owner IS ?').run(to, id, from).changes > 0,
     runsWithStatus: (status) => q('SELECT * FROM runs WHERE status = ? ORDER BY id').all(status),
     setBudget: (id, left) => q('UPDATE runs SET budget = ? WHERE id = ?').run(left, id),
     setRunCap: (id, usd) => q('UPDATE runs SET max_cost_usd = ? WHERE id = ?').run(usd, id),

@@ -289,7 +289,16 @@ export class Supervisor {
   async recover() {
     const out = { recovered: [], failed: [] };
     for (const run of this.store.runsWithStatus('running')) {
-      if (this.#runs.has(run.id) || (run.owner && await isListening(run.owner))) continue;
+      if (this.#runs.has(run.id)) continue;
+      if (run.owner == null) {
+        // Written before runs recorded an owner: no way to tell whether it is alive.
+        this.#failRun(run, 'left by an older agent-team; start it again');
+        out.failed.push(run.id);
+        continue;
+      }
+      // serve listens on its fixed path before recovering, so its own old runs look alive.
+      if (run.owner !== this.socketPath && await isListening(run.owner)) continue;
+      if (!this.store.claimRun(run.id, run.owner, this.socketPath)) continue;   // another recoverer won
       let config;
       try {
         config = loadConfig(run.project);
@@ -303,7 +312,6 @@ export class Supervisor {
         budget: { runs: run.budget ?? config.defaults.max_delegations },
         timeoutMs: run.timeout_ms ?? this.timeoutMs
       });
-      this.store.setRunOwner(run.id, this.socketPath);
       for (const m of this.store.members(run.id)) this.#recoverMember(m);
       out.recovered.push(run.id);
     }
@@ -338,6 +346,7 @@ export class Supervisor {
   #failRun(run, summary) {
     for (const m of this.store.members(run.id)) {
       if (TERMINAL.has(m.state)) continue;
+      for (const q of this.store.openQuestions()) if (q.member_id === m.id) this.store.closeQuestion(q.id);
       this.store.setState(m.id, 'failed');
       this.store.setResult(m.id, { status: 'failed', summary });
       this.store.addEvent(m.id, 'finished', { status: 'failed', state: 'failed' });

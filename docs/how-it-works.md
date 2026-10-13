@@ -41,6 +41,8 @@ workspaces, within the caps, with a note that their last turn was cut off; a man
 given its reports' states. A one-shot (v1) member cannot be resumed and fails. A run whose
 project config can no longer be read fails with the reason. `serve` does not watch for
 in-process supervisors that die while it runs; it adopts their runs at its next start.
+A run recorded before runs had an owner (written by an older agent-team) is failed, not
+relaunched.
 
 `defaults.max_parallel` (default 3) caps how many of one manager's reports run at once; the
 rest queue. It is per manager, not per run, so a run with several managers can have more

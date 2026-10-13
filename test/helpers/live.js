@@ -45,7 +45,7 @@ export function project(members, scripted, defaults = {}) {
 
 export async function supervise(script, opts = {}) {
   // Short path: macOS caps Unix socket paths at 104 bytes.
-  const socketPath = join(mkdtempSync(join(tmpdir(), 'at-s-')), 'sup.sock');
+  const socketPath = opts.socketPath ?? join(mkdtempSync(join(tmpdir(), 'at-s-')), 'sup.sock');
   const store = opts.store ?? openStore(':memory:');   // shared to stand in for a restart
   const sup = new Supervisor({
     store, adapterDir: opts.adapterDir ?? adapterDir(), socketPath,
@@ -53,7 +53,7 @@ export async function supervise(script, opts = {}) {
     graceMs: opts.graceMs ?? 5000
   });
   await sup.start();
-  return { sup, store };
+  return { sup, store, socketPath };
 }
 
 export const LIVE = (extra = {}) => ({ agent: 'mock-live', isolation: 'none', ...extra });
