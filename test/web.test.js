@@ -112,3 +112,10 @@ test('app.js guards what the DOM cannot test here: stale loads, null children, b
   assert.match(src, /try \{ data = JSON\.parse\(ev\.data\); \} catch/, 'stream frames are parsed defensively');
   assert.match(src, /S\.failed = /, 'a failed load is shown in the view');
 });
+
+test('every script in src/web parses as a module', async () => {
+  const { execFileSync } = await import('node:child_process');
+  for (const f of readdirSync(new URL('../src/web/', import.meta.url)).filter((n) => n.endsWith('.js'))) {
+    execFileSync(process.execPath, ['--check', new URL(`../src/web/${f}`, import.meta.url).pathname], { stdio: 'pipe' });
+  }
+});

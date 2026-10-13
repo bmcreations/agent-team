@@ -243,7 +243,7 @@ function eventRow(e) {
 }
 
 const messageRow = (x) => h('li', { class: 'msg' }, h('time', {}, clock(x.at)), ' ',
-  h('b', {}, `${x.from_name} (${x.from_kind})`), ' ', x.text));
+  h('b', {}, `${x.from_name} (${x.from_kind})`), ' ', x.text);
 
 function memberControls(m) {
   const base = `/api/members/${m.id}`;
