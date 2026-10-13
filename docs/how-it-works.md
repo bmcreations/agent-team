@@ -78,8 +78,8 @@ runs past it fails the member as timed out. `--now` interrupts the turn, so a co
 started may have partly run. A member that has finished its work and is stopping cannot be
 paused, but `cancel` still ends it. `resume` starts the member again from its harness session in the same workspace
 and delivers anything sent to it while paused. `cancel` keeps the workspace. `--subtree`
-applies the verb to the member and every report under it. Cancelling a manager also cancels
-its unfinished reports, and a root member that finishes, fails, or is cancelled cancels every
+applies the verb to the member and every report under it. A manager that is cancelled or
+fails also cancels its unfinished reports, and a root member that finishes, fails, or is cancelled cancels every
 unfinished member of its run, queued ones included. Pausing a manager alone leaves its reports
 working. A one-shot (v1) report that is already running cannot be cancelled and runs until it
 finishes. Each verb is signed with your OS

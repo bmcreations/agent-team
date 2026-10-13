@@ -1,4 +1,4 @@
-// Opt-in: runs the real `claude` on Haiku and costs about $0.30. `npm run test:live`.
+// Opt-in: runs the real `claude` (asks for Haiku) and costs about $0.20. `npm run test:live`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

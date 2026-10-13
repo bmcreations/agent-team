@@ -208,8 +208,8 @@ its session id, and resume that session either headless or interactively.
   delivers anything that queued while paused.
 - **Cancel** stops the member and keeps its workspace for inspection, matching today's rule
   that only `ok` runs prune their workspace.
-- Pause and cancel apply to one member or its whole subtree. Cancelling a manager also
-  cancels its unfinished reports, and a root that ends for any reason cancels the rest of its
+- Pause and cancel apply to one member or its whole subtree. A manager that is cancelled or
+  fails also cancels its unfinished reports, and a root that ends for any reason cancels the rest of its
   run. Pausing a manager alone leaves its reports working.
 - **Take-over** is `agent-team attach <run> <member>`. It pauses the member and runs
   `claude --resume <sid>` or `codex resume <id>` in the workspace, in the user's own terminal.
