@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { mkdirSync, chmodSync, existsSync, realpathSync } from 'node:fs';
 import { loadConfig, CONFIG_RELPATH } from './config.js';
 import { parseGithubRepo } from './cloud.js';
@@ -47,7 +47,7 @@ export function lockSupervisorDir(env = process.env) {
 }
 
 const label = (m) => `${m.from_name} (${m.from_kind})`;
-const render = (m) => ({ id: m.id, from: label(m), text: m.text, report_id: m.report_id });
+const render = (m) => ({ id: m.id, from: label(m), text: m.text, report_id: m.report_id, thread_id: m.thread_id ?? null });
 const clampSeconds = (v, dflt, max) => (Number.isInteger(v) && v > 0 ? Math.min(v, max) : dflt);
 
 function checkCap(cap) {
@@ -103,7 +103,7 @@ export class Supervisor {
     await this.server?.close();
   }
 
-  submit({ projectRoot, member, task, timeoutMs, maxCostUsd }) {
+  submit({ projectRoot, member, task, timeoutMs, maxCostUsd, threadId = null }) {
     const config = loadConfig(projectRoot);
     if (!Object.hasOwn(config.members, member)) throw new Error(`unknown member "${member}"`);
     const limits = { budget: config.defaults.max_delegations,
@@ -111,7 +111,7 @@ export class Supervisor {
                      maxCostUsd: maxCostUsd ?? config.defaults.max_cost_usd };
     if (limits.maxCostUsd != null) checkCap(limits.maxCostUsd);
     // Limits and owner are stored so a restarted supervisor can rebuild the run.
-    const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath });
+    const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath, threadId });
     this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs,
                             configs: new Map(), keys: new Map() });
     const { id } = this.store.addMember({ runId, parentId: null, name: member, task, depth: 0 });
@@ -751,7 +751,9 @@ export class Supervisor {
     const prep = prepareMember(ctx, { resolved, caps }, { workspaceDir: resume ? m.workspace : null });
     rt.workspace = prep.workspace;
     this.store.setWorkspace(id, prep.workspace.dir);
+    const { thread, threads } = this.#threadsForBrief(m, scope);
     const brief = buildBrief({
+      thread, threads,
       resolved, task: m.task, cwd: prep.workspace.dir, denyPaths: scope.config.deny_paths,
       skillText: prep.skillText, dialectText: prep.dialectText,
       timeoutSec: Math.floor(run.timeoutMs / 1000), depth: m.depth, maxDepth: scope.config.defaults.max_depth
@@ -999,7 +1001,8 @@ export class Supervisor {
       wait_for: (id, p) => this.#waitFor(id, p),
       report_progress: (id, p) => this.#reportProgress(id, p),
       ask_human: (id, p) => this.#askHuman(id, p),
-      team_status: (id, p) => this.#teamStatus(id, p)
+      team_status: (id, p) => this.#teamStatus(id, p),
+      request: (id, p) => this.#request(id, p)
     };
     if (!Object.hasOwn(tools, method)) throw new Error(`unknown tool "${method}"`);
     const m = typeof token === 'string' ? this.store.memberByToken(token) : null;
@@ -1039,18 +1042,11 @@ export class Supervisor {
     if (m.depth >= config.defaults.max_depth) {
       throw new Error(`delegation refused: already at max_depth ${config.defaults.max_depth}`);
     }
-    if (run.budget.runs <= 0) throw new Error('delegation budget exhausted (max_delegations)');
-    for (const e of scope.entries) {
-      if (this.store.member(e.id).scope_budget <= 0) {
-        throw new Error(`delegation budget exhausted (max_delegations of the team at ${e.project})`);
-      }
-    }
+    this.#checkBudget(run, scope);
     const spec = config.members[to];
     const entered = spec.team && this.shared && !parseGithubRepo(spec.team)
       ? this.#enterTeam(m, scope, to, spec) : null;   // throws before anything is spent
-    run.budget.runs -= 1;
-    this.store.setBudget(m.run_id, run.budget.runs);
-    for (const e of scope.entries) this.store.setScopeBudget(e.id, this.store.member(e.id).scope_budget - 1);
+    this.#spendBudget(m.run_id, run, scope);
     const child = entered
       ? this.store.addMember({ runId: m.run_id, parentId: id, name: entered.entry, task, depth: 0,
                                project: entered.root, alias: to, scopeBudget: entered.budget })
@@ -1059,6 +1055,22 @@ export class Supervisor {
     this.#resolve(this.store.member(child.id));
     this.#schedule(child.id);
     return { report_id: child.id, ...(entered ? { team: { root: entered.root, member: entered.entry } } : {}) };
+  }
+
+  // The run's delegation counter and every enclosing team's: what delegate and request spend.
+  #checkBudget(run, scope) {
+    if (run.budget.runs <= 0) throw new Error('delegation budget exhausted (max_delegations)');
+    for (const e of scope.entries) {
+      if (this.store.member(e.id).scope_budget <= 0) {
+        throw new Error(`delegation budget exhausted (max_delegations of the team at ${e.project})`);
+      }
+    }
+  }
+
+  #spendBudget(runId, run, scope) {
+    run.budget.runs -= 1;
+    this.store.setBudget(runId, run.budget.runs);
+    for (const e of scope.entries) this.store.setScopeBudget(e.id, this.store.member(e.id).scope_budget - 1);
   }
 
   // Checks a local team can be entered from here and returns where and as whom.
@@ -1075,6 +1087,110 @@ export class Supervisor {
       throw new Error(`member "${to}": entry member "${entry}" of ${real} is itself a team — set "member" to a member that runs an agent`);
     }
     return { root: real, entry, budget: teamConfig.defaults.max_delegations };
+  }
+
+  // ---- threads ----
+
+  #request(id, { team, text, task } = {}) {
+    if (!this.shared) throw new Error('threads need `agent-team serve`');
+    if (typeof text !== 'string' || !text.trim()) throw new Error('request needs "text"');
+    if (task != null && (typeof task !== 'string' || !task.trim())) {
+      throw new Error('"task" must be a non-empty string when given');
+    }
+    const m = this.store.member(id);
+    const run = this.#runs.get(m.run_id);
+    const scope = this.#scope(m);
+    const target = resolveTeam({ store: this.store, projectRoot: scope.projectRoot, config: scope.config, team });
+    const chain = this.#threadChain(m, scope);
+    if (target.keys.some((k) => chain.includes(k))) {
+      const names = [...chain, target.keys[0]].map((k) => basename(k)).join(' -> ');
+      throw new Error(`request refused: team "${team}" is already in this chain (${names})`);
+    }
+    const entry = teamEntry(target.config, null, target.root, team);
+    if (target.config.members[entry].team) {
+      throw new Error(`team "${team}": its entry member "${entry}" is itself a team — set "member" to a member that runs an agent`);
+    }
+    this.#checkBudget(run, scope);   // checked before anything is written
+    const threadId = this.store.addThread({
+      kind: task ? 'task' : 'question', fromProject: scope.projectRoot, fromRun: m.run_id, fromMember: id,
+      toProject: target.root, toMember: entry, parentThread: this.store.run(m.run_id).thread_id ?? null,
+      chain, text, task: task ?? null
+    });
+    this.#spendBudget(m.run_id, run, scope);
+    this.store.addEvent(id, 'thread_opened', { thread_id: threadId, team: target.root, kind: task ? 'task' : 'question' });
+    const lead = this.#liveLead(target.root, entry);
+    let runId = null;
+    if (lead) {
+      this.store.setThreadOwner(threadId, lead.id);
+      this.#deliver(threadId, lead.id, {
+        side: 'requester', author: m.name, fromTeam: scope.projectRoot, record: false,
+        text: task ? `${text}\n\nTask: ${task}` : text
+      });
+    } else {
+      runId = this.#startThreadRun(threadId);
+    }
+    return { thread_id: threadId, state: 'open', team: { name: target.name, root: target.root }, ...(runId ? { run_id: runId } : {}) };
+  }
+
+  // The team keys this request extends: the parent thread's chain when the requester's run
+  // serves a thread, then every team on the requester's path from its run's project.
+  #threadChain(m, scope) {
+    const parentId = this.store.run(m.run_id).thread_id;
+    const parent = parentId == null ? null : this.store.thread(parentId);
+    return [...new Set([...(parent ? parent.chain : []), ...scope.teams])];
+  }
+
+  // A live member of this supervisor that can own a thread for (project, entry) right now.
+  #liveLead(project, entry) {
+    for (const rt of this.#live.values()) {
+      const m = this.store.member(rt.member.id);
+      if (m.name !== entry || m.depth !== 0 || TERMINAL.has(m.state) || rt.stopping || rt.halt) continue;
+      // Roots are compared as real paths: a run's project is stored as it was submitted.
+      if (realpathSync(this.#scope(m).projectRoot) === project) return m;
+    }
+    return null;
+  }
+
+  // A new run in the receiving project, under its own config and budgets.
+  #startThreadRun(threadId) {
+    const t = this.store.thread(threadId);
+    const from = this.store.member(t.from_member);
+    const { runId, memberId } = this.submit({
+      projectRoot: t.to_project, member: t.to_member, threadId,
+      task: t.task ? `Thread #${t.id}: ${t.task}` : `Thread #${t.id}: answer ${basename(t.from_project)}/${from.name}`
+    });
+    this.store.setThreadRun(threadId, runId);
+    this.store.setThreadOwner(threadId, memberId);
+    return runId;
+  }
+
+  // One post on a thread, delivered to a member's inbox. `record: false` when the caller has
+  // already stored the post (the opening one).
+  #deliver(threadId, to, { side, author, text, state = null, fromTeam, record = true }) {
+    if (record) this.store.addThreadPost({ threadId, side, author, text, state });
+    this.store.enqueue({
+      to, threadId, fromKind: side === 'human' ? 'human' : 'team',
+      fromName: side === 'human' ? author : `${basename(fromTeam)}/${author}`,
+      text: `[thread #${threadId}] ${text}`
+    });
+    this.#pump(to);
+  }
+
+  // What a launching member's brief says about threads: the one its run serves (root only),
+  // and open ones for its team that nobody owns yet, which it now owns.
+  #threadsForBrief(m, scope) {
+    const none = { thread: null, threads: [] };
+    if (m.parent_id != null) return none;
+    const run = this.store.run(m.run_id);
+    const view = (t) => {
+      const first = this.store.threadPosts(t.id)[0];
+      const from = `${basename(t.from_project)}/${this.store.member(t.from_member).name}`;
+      return { id: t.id, kind: t.kind, from, text: first?.text ?? '', task: t.task };
+    };
+    const own = run.thread_id != null ? view(this.store.thread(run.thread_id)) : null;
+    const waiting = this.store.unownedThreadsTo(scope.projectRoot, m.name).filter((t) => t.id !== run.thread_id);
+    for (const t of waiting) this.store.setThreadOwner(t.id, m.id);
+    return { thread: own, threads: waiting.map(view) };
   }
 
   // Along the reporting line only: the caller's manager, or one of its own reports.
