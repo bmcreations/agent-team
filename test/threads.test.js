@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, realpathSync } from 'node:fs';
+import { writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import { project, supervise, LIVE } from './helpers/live.js';
 
@@ -115,6 +115,7 @@ test('a live lead receives the request in its inbox, with no new run', async () 
     await sup.waitRun(lead.runId);
     const r = results(store, mgr.memberId, 'request')[0];
     assert.equal(r.run_id, undefined);
+    assert.equal(store.threadPosts(1).length, 1);   // delivery does not record a second opening post
     assert.equal(store.thread(r.thread_id).owner_member, lead.memberId);
     const got = results(store, lead.memberId, 'wait_for')[0].messages[0];
     assert.equal(got.thread_id, 1);
@@ -196,5 +197,84 @@ test('a live cross-team member cannot request the team it was entered from', asy
     await sup.waitRun(runId);
     const lead = store.members(runId).find((m) => m.name === 'b-lead');
     assert.match(results(store, lead.id, 'request')[0].error, /request refused: team ".*" is already in this chain/);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('a live lead that owns a thread cannot request the team that opened it', async () => {
+  const t = twoTeams(({ a, b }) => ({ by_member: {
+    manager: { steps: [{ sleep_ms: 400 }, { tool: 'request', args: { team: b, text: 'hi', task: 'go' } }] },
+    'b-lead': { steps: [{ tool: 'wait_for', args: { timeout_s: 10 } }, { tool: 'request', args: { team: a, text: 'back' } }] }
+  } }));
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const lead = sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own it' });
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(mgr.runId);
+    await sup.waitRun(lead.runId);
+    assert.equal(store.threadPosts(1).length, 1);
+    assert.match(results(store, lead.memberId, 'request')[0].error, /request refused: team ".*" is already in this chain/);
+    assert.equal(store.threads().length, 1);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('A -> live B -> C -> A is refused at the last hop', async () => {
+  const c = project({ 'c-lead': LIVE() }, {});
+  const t = twoTeams(({ a, b }) => ({ by_member: {
+    manager: { steps: [{ sleep_ms: 400 }, { tool: 'request', args: { team: b, text: 'hi', task: 'go' } }] },
+    'b-lead': { steps: [{ tool: 'wait_for', args: { timeout_s: 10 } }, { tool: 'request', args: { team: realpathSync(c.root), text: 'c', task: 'go' } }] },
+    'c-lead': { steps: [{ tool: 'request', args: { team: a, text: 'loop' } }] }
+  } }));
+  writeFileSync(c.script, readFileSync(t.a.script, 'utf8'));
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const lead = sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own it' });
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(mgr.runId);
+    await sup.waitRun(lead.runId);
+    const { run_id } = results(store, lead.memberId, 'request')[0];
+    await sup.waitRun(run_id);
+    const cLead = store.members(run_id)[0];
+    assert.match(results(store, cLead.id, 'request')[0].error, /already in this chain/);
+    assert.equal(store.threads().length, 2);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('a member another run entered cross-team is not a lead for threads', async () => {
+  const b = project({ 'b-lead': LIVE() }, {});
+  const a = project({ manager: LIVE(), loupe: { team: b.root, reports_to: 'manager' } }, {});
+  const x = project({ xer: LIVE() }, {});
+  const bReal = realpathSync(b.root);
+  writeFileSync(a.script, JSON.stringify({ by_member: {
+    manager: { steps: [{ tool: 'delegate', args: { to: 'loupe', task: 'go' }, save: 'd' },
+                       { tool: 'wait_for', args: {}, until_finished: ['$d.report_id'] }] },
+    'b-lead': { steps: [{ sleep_ms: 1500 }] },
+    xer: { steps: [{ sleep_ms: 300 }, { tool: 'request', args: { team: bReal, text: 'q', task: 't' } }] }
+  } }));
+  const { sup, store } = await supervise(a.script, { shared: true });
+  try {
+    const mgr = sup.submit({ projectRoot: a.root, member: 'manager', task: 'ship' });
+    await new Promise((r) => setTimeout(r, 100));
+    const xr = sup.submit({ projectRoot: x.root, member: 'xer', task: 'x' });
+    await sup.waitRun(xr.runId);
+    const r = results(store, xr.memberId, 'request')[0];
+    assert.equal(typeof r.run_id, 'number');   // its own run, not the entered member
+    await sup.waitRun(mgr.runId);
+    await sup.waitRun(r.run_id);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('a request whose run cannot start leaves a declined thread and spends nothing', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    manager: { steps: [{ tool: 'request', args: { team: b, text: 'x', task: 'y' } }] }
+  } }));
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const real = sup.submit.bind(sup);
+    sup.submit = (p) => { if (p.threadId) throw new Error('boom'); return real(p); };
+    const { runId, memberId } = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(runId);
+    assert.match(results(store, memberId, 'request')[0].error, /boom/);
+    assert.equal(store.thread(1).state, 'declined');
+    assert.equal(store.run(runId).budget, 20);
   } finally { await sup.close(); store.close(); }
 });

@@ -1116,19 +1116,25 @@ export class Supervisor {
       toProject: target.root, toMember: entry, parentThread: this.store.run(m.run_id).thread_id ?? null,
       chain, text, task: task ?? null
     });
-    this.#spendBudget(m.run_id, run, scope);
     this.store.addEvent(id, 'thread_opened', { thread_id: threadId, team: target.root, kind: task ? 'task' : 'question' });
     const lead = this.#liveLead(target.root, entry);
     let runId = null;
-    if (lead) {
-      this.store.setThreadOwner(threadId, lead.id);
-      this.#deliver(threadId, lead.id, {
-        side: 'requester', author: m.name, fromTeam: scope.projectRoot, record: false,
-        text: task ? `${text}\n\nTask: ${task}` : text
-      });
-    } else {
-      runId = this.#startThreadRun(threadId);
+    try {
+      if (lead) {
+        this.store.setThreadOwner(threadId, lead.id);
+        this.#deliver(threadId, lead.id, {
+          side: 'requester', author: m.name, fromTeam: scope.projectRoot, record: false,
+          text: task ? `${text}\n\nTask: ${task}` : text
+        });
+      } else {
+        runId = this.#startThreadRun(threadId);
+      }
+    } catch (err) {
+      // No orphan: the thread is declined with the reason and the delegation is not spent.
+      this.store.moveThread(threadId, 'open', 'declined', { result: { reason: `could not start: ${err.message}` } });
+      throw err;
     }
+    this.#spendBudget(m.run_id, run, scope);
     return { thread_id: threadId, state: 'open', team: { name: target.name, root: target.root }, ...(runId ? { run_id: runId } : {}) };
   }
 
@@ -1137,16 +1143,27 @@ export class Supervisor {
   #threadChain(m, scope) {
     const parentId = this.store.run(m.run_id).thread_id;
     const parent = parentId == null ? null : this.store.thread(parentId);
-    return [...new Set([...(parent ? parent.chain : []), ...scope.teams])];
+    const chain = [...(parent ? parent.chain : []), ...scope.teams];
+    // A thread delivered to a live lead leaves its run unmarked, so threads owned by this
+    // member or anyone above it in the run extend the chain too.
+    const above = new Set();
+    for (let cur = m; cur; cur = cur.parent_id == null ? null : this.store.member(cur.parent_id)) above.add(cur.id);
+    for (const t of this.store.threadsInState(['open', 'accepted'])) {
+      if (above.has(t.owner_member)) chain.push(...t.chain);
+    }
+    return [...new Set(chain)];
   }
 
   // A live member of this supervisor that can own a thread for (project, entry) right now.
   #liveLead(project, entry) {
     for (const rt of this.#live.values()) {
       const m = this.store.member(rt.member.id);
-      if (m.name !== entry || m.depth !== 0 || TERMINAL.has(m.state) || rt.stopping || rt.halt) continue;
+      // Only the team's own run root: a member another run entered cross-team works under that run's budgets.
+      if (m.name !== entry || m.parent_id != null || m.project != null || TERMINAL.has(m.state) || rt.stopping || rt.halt) continue;
       // Roots are compared as real paths: a run's project is stored as it was submitted.
-      if (realpathSync(this.#scope(m).projectRoot) === project) return m;
+      let root = this.#scope(m).projectRoot;
+      try { root = realpathSync(root); } catch { /* a vanished root cannot match */ }
+      if (root === project) return m;
     }
     return null;
   }
