@@ -81,9 +81,13 @@ function stdioServer() {
     notify('item/completed', { threadId: 'thr-other', item: { type: 'agentMessage', id: 'x', text: 'NOT YOURS', phase: 'final_answer' } });
     const s = turn.texts[0];
     // CRASH_ON: dies mid-turn when the turn's text includes it.
+    // With SPAWN_SLEEP the crash comes a little after the command has started, as a real one would.
     if (process.env.FAKE_CODEX_CRASH_ON && s.includes(process.env.FAKE_CODEX_CRASH_ON)) {
-      process.stderr.write('fake-codex: crashed\n');
-      process.exit(1);
+      const crash = () => { process.stderr.write('fake-codex: crashed\n'); process.exit(1); };
+      if (process.env.FAKE_CODEX_SPAWN_SLEEP !== '1') crash();
+      notify('item/started', { threadId: thread, turnId: turn.id, item: { type: 'commandExecution', id: 'cmd-1', command: 'sleep 300', status: 'inProgress' } });
+      setTimeout(crash, 300);
+      return;
     }
     if (s.includes('LATE')) {
       // A non-final message after the final answer: the final answer must still win.

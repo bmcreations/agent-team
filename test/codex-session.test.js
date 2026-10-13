@@ -448,3 +448,12 @@ test('SIGTERM to the adapter ends the shell commands the app-server started', { 
     assert.equal(await s.exit, 143);
   });
 });
+
+test('an app-server that crashes mid-turn takes its shell commands with it', { timeout: 15000 }, async () => {
+  await withSleep({ FAKE_CODEX_CRASH_ON: 'HOLD' }, async (s) => {
+    const result = await s.next('result');
+    assert.equal(result.status, 'failed');
+    assert.match(result.summary, /before it was asked to stop/);
+    assert.equal(await s.exit, 0);
+  });
+});

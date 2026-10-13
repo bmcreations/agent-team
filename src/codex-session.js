@@ -72,7 +72,7 @@ export function runCodexSession({ artifacts }) {
   let stderr = '';
   let threadId = null;
   let nextId = 1;
-  const pending = new Map();   // request id -> { resolve, reject }
+  const pending = new Map();   // request id -> { resolve, reject, onReply }
   let inTurn = false;
   let turnId = null;        // the running turn's id, once turn/start's reply or turn/started names it
   let turnSeq = 0;          // identifies the latest turn/start, so a late reply is not taken for a newer turn
@@ -94,9 +94,11 @@ export function runCodexSession({ artifacts }) {
   let lastError = false;
 
   const write = (m) => { if (server?.stdin.writable) server.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...m }) + '\n'); };
-  const request = (method, params) => new Promise((resolve, reject) => {
+  // `onReply` runs on a successful reply as soon as its line is read, before any later line in the
+  // same chunk; a promise callback would run only after the whole chunk (an ack after the idle).
+  const request = (method, params, onReply) => new Promise((resolve, reject) => {
     const id = nextId++;
-    pending.set(id, { resolve, reject });
+    pending.set(id, { resolve, reject, onReply });
     write({ id, method, params });
   });
   const finish = (result) => process.stdout.write(JSON.stringify({ type: 'result', ...result }) + '\n', () => process.exit(0));
@@ -106,6 +108,11 @@ export function runCodexSession({ artifacts }) {
   // own process groups, so they are ended by pid once the server is gone.
   let tree = [];
   const snapshot = () => { if (serverAlive()) tree = merge(tree, descendants(server.pid)); };
+  // While a turn runs, the tree is refreshed as commands start, so a server that crashes on its
+  // own still leaves a list to end. A refresh replaces the tree rather than adding to it: while the
+  // server lives, everything it started is still its descendant, and pids of commands that have
+  // long finished are not kept around to be signalled after the system reuses them.
+  const refresh = () => { if (serverAlive()) tree = descendants(server.pid); };
   const endCommands = (signal) => endTree(tree, signal);
   const endServer = () => {
     stopping = true;
@@ -135,12 +142,10 @@ export function runCodexSession({ artifacts }) {
     inTurn = true;
     turnId = null;
     const seq = ++turnSeq;
-    return request('turn/start', { threadId, input: textInput(text) })
-      .catch((err) => { throw Object.assign(err, { phase: 'turn' }); })
-      .then((r) => {
-        if (ackId !== null) out({ type: 'ack', message_id: ackId });
-        if (seq === turnSeq && inTurn) setTurnId(r?.turn?.id);
-      });
+    return request('turn/start', { threadId, input: textInput(text) }, (r) => {
+      if (ackId !== null) out({ type: 'ack', message_id: ackId });
+      if (seq === turnSeq && inTurn) setTurnId(r?.turn?.id);
+    }).then(() => {}, (err) => { throw Object.assign(err, { phase: 'turn' }); });
   }
 
   // Messages for the running turn go in as steers once its id is known. A steer that loses the
@@ -149,8 +154,8 @@ export function runCodexSession({ artifacts }) {
     if (!inTurn || !turnId || stopping || interrupting) return;
     while (queue.length) {
       const m = queue.shift();
-      request('turn/steer', { threadId, input: textInput(m.text), expectedTurnId: turnId }).then(
-        () => out({ type: 'ack', message_id: m.id }),
+      request('turn/steer', { threadId, input: textInput(m.text), expectedTurnId: turnId },
+              () => out({ type: 'ack', message_id: m.id })).catch(
         () => { queue.push(m); queue.sort((a, b) => a.seq - b.seq); drain(); }
       );
     }
@@ -171,6 +176,7 @@ export function runCodexSession({ artifacts }) {
       else out({ type: 'event', kind: 'tool_result', name, is_error: item.status !== 'completed', text: mcpResultText(item).slice(0, 2000) });
       return;
     }
+    if (item.type === 'commandExecution' && phase === 'started') refresh();
     if (phase !== 'completed') return;
     if (item.type === 'agentMessage') {
       out({ type: 'event', kind: 'text', text: item.text ?? '' });
@@ -207,7 +213,7 @@ export function runCodexSession({ artifacts }) {
   function onNotification(m) {
     const p = m.params ?? {};
     if (p.threadId && p.threadId !== threadId) return;   // another thread's traffic on the same server
-    if (m.method === 'turn/started') { if (inTurn) setTurnId(p.turn?.id); }
+    if (m.method === 'turn/started') { if (inTurn) { refresh(); setTurnId(p.turn?.id); } }
     else if (m.method === 'item/started') onItem(p.item, 'started');
     else if (m.method === 'item/completed') onItem(p.item, 'completed');
     else if (m.method === 'thread/tokenUsage/updated') {
@@ -226,7 +232,7 @@ export function runCodexSession({ artifacts }) {
       if (!p) return;
       pending.delete(m.id);
       if (m.error) p.reject(new Error(m.error.message ?? 'codex request failed'));
-      else p.resolve(m.result);
+      else { p.onReply?.(m.result); p.resolve(m.result); }
     } else if (m.method) onNotification(m);
   }
 
