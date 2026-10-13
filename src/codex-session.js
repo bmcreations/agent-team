@@ -107,12 +107,18 @@ export function runCodexSession({ artifacts }) {
   // Everything the server has started, as last seen while it was alive. Commands run in their
   // own process groups, so they are ended by pid once the server is gone.
   let tree = [];
-  const snapshot = () => { if (serverAlive()) tree = merge(tree, descendants(server.pid)); };
+  let psWarned = false;
+  const psFailed = (why) => {
+    if (psWarned || log.writableEnded) return;
+    psWarned = true;
+    log.write(`agent-team: ${why}; the shell commands codex starts will not be ended with it\n`);
+  };
+  const snapshot = () => { if (serverAlive()) tree = merge(tree, descendants(server.pid, psFailed)); };
   // While a turn runs, the tree is refreshed as commands start, so a server that crashes on its
   // own still leaves a list to end. A refresh replaces the tree rather than adding to it: while the
   // server lives, everything it started is still its descendant, and pids of commands that have
   // long finished are not kept around to be signalled after the system reuses them.
-  const refresh = () => { if (serverAlive()) tree = descendants(server.pid); };
+  const refresh = () => { if (serverAlive()) tree = descendants(server.pid, psFailed); };
   const endCommands = (signal) => endTree(tree, signal);
   const endServer = () => {
     stopping = true;
