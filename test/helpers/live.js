@@ -50,7 +50,8 @@ export async function supervise(script, opts = {}) {
   const sup = new Supervisor({
     store, adapterDir: opts.adapterDir ?? adapterDir(), socketPath,
     env: { AGENT_TEAM_MOCK_SCRIPT: script, ...opts.env }, maxRunning: opts.maxRunning ?? 6,
-    graceMs: opts.graceMs ?? 5000, tickMs: opts.tickMs ?? 50, stopMs: opts.stopMs
+    graceMs: opts.graceMs ?? 5000, tickMs: opts.tickMs ?? 50, stopMs: opts.stopMs,
+    shared: opts.shared ?? false
   });
   await sup.start();
   return { sup, store, socketPath };

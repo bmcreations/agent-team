@@ -1,9 +1,10 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync, chmodSync } from 'node:fs';
-import { loadConfig } from './config.js';
+import { mkdirSync, chmodSync, existsSync, realpathSync } from 'node:fs';
+import { loadConfig, CONFIG_RELPATH } from './config.js';
+import { parseGithubRepo } from './cloud.js';
 import { buildBrief } from './brief.js';
-import { resolveCaps, prepareMember, runMember, teamKeys, adapterPath } from './dispatch.js';
+import { resolveCaps, prepareMember, runMember, teamKeys, teamRoot, teamEntry, refuseCycle, adapterPath } from './dispatch.js';
 import { pruneWorkspace } from './workspace.js';
 import { MemberSession } from './sessions.js';
 import { serveRpc, isListening } from './rpc.js';
@@ -54,7 +55,7 @@ function checkCap(cap) {
 export class Supervisor {
   #live = new Map();          // memberId -> runtime state of a launched, unfinished member
   #pending = [];              // memberIds waiting for a slot
-  #runs = new Map();          // runId -> { projectRoot, config, budget }
+  #runs = new Map();          // runId -> { projectRoot, config, budget, timeoutMs, configs, keys }
   #runWaiters = new Map();    // runId -> [resolve]
   #resumes = new Map();       // memberId -> { note } for a paused member's next launch
   #closing = false;
@@ -63,10 +64,10 @@ export class Supervisor {
   #resolutions = new Map();   // memberId -> Promise of { resolved, caps } | { team: true } | { error }
 
   constructor({ store, adapterDir, skillsDir = null, socketPath, env = {}, maxRunning = 6,
-                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000, stopMs = null }) {
+                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000, stopMs = null, shared = false }) {
     // How long a member may take to exit after its final stop before it is ended.
     stopMs ??= Math.max(graceMs * 2, 10_000);
-    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs, stopMs });
+    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs, stopMs, shared });
   }
 
   async start() {
@@ -109,7 +110,8 @@ export class Supervisor {
     if (limits.maxCostUsd != null) checkCap(limits.maxCostUsd);
     // Limits and owner are stored so a restarted supervisor can rebuild the run.
     const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath });
-    this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs });
+    this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs,
+                            configs: new Map(), keys: new Map() });
     const { id } = this.store.addMember({ runId, parentId: null, name: member, task, depth: 0 });
     this.store.setRunRoot(runId, id);
     this.#resolve(this.store.member(id));
@@ -486,7 +488,8 @@ export class Supervisor {
       const finishingTurn = rt.halt?.kind === 'pause' && !rt.halt.now;
       if (rt.waiter || rt.question || rt.idle || (rt.halt && !finishingTurn) || rt.stopping) { rt.quietSince = at; continue; }
       rt.activeMs += elapsed;
-      const { timeoutMs, config } = this.#runs.get(rt.member.run_id);
+      const { timeoutMs } = this.#runs.get(rt.member.run_id);
+      const { config } = this.#scope(rt.member);
       if (rt.activeMs >= timeoutMs) {
         this.store.addEvent(id, 'timed_out', { after_s: timeoutMs / 1000 });
         rt.halt = { kind: 'timeout', now: true, by: 'timeout', seconds: timeoutMs / 1000 };
@@ -538,11 +541,22 @@ export class Supervisor {
         out.failed.push(run.id);
         continue;
       }
-      this.#runs.set(run.id, {
+      const entry = {
         projectRoot: run.project, config,
         budget: { runs: run.budget ?? config.defaults.max_delegations },
-        timeoutMs: run.timeout_ms ?? this.timeoutMs
-      });
+        timeoutMs: run.timeout_ms ?? this.timeoutMs,
+        configs: new Map(), keys: new Map()
+      };
+      this.#runs.set(run.id, entry);
+      // Every entered team's config is loaded up front; one that no longer loads fails the run.
+      try {
+        for (const m of this.store.members(run.id)) if (m.project != null) this.#teamConfig(entry, m.project);
+      } catch (err) {
+        this.#runs.delete(run.id);
+        this.#failRun(run, `could not recover after a supervisor restart: ${err.message}`);
+        out.failed.push(run.id);
+        continue;
+      }
       for (const m of this.store.members(run.id)) this.#recoverMember(m);
       out.recovered.push(run.id);
     }
@@ -608,7 +622,7 @@ export class Supervisor {
       if (this.#running() >= this.maxRunning) return;
       const m = this.store.member(id);
       if (m.parent_id != null) {
-        const { config } = this.#runs.get(m.run_id);
+        const { config } = this.#scope(this.store.member(m.parent_id));
         const running = this.store.children(m.parent_id).filter((c) => this.#live.has(c.id)).length;
         if (running >= config.defaults.max_parallel) continue;
       }
@@ -620,13 +634,44 @@ export class Supervisor {
     }
   }
 
+  // An entered team's config, loaded once per run. Throws if it no longer loads.
+  #teamConfig(run, root) {
+    if (!run.configs.has(root)) run.configs.set(root, loadConfig(root));
+    return run.configs.get(root);
+  }
+
+  #keys(run, root) {
+    if (!run.keys.has(root)) run.keys.set(root, teamKeys(root));
+    return run.keys.get(root);
+  }
+
+  // The project a member works in and what bounds it there: the nearest entry member at or
+  // above it (members.project set), else the run's own project. Every config read goes
+  // through here, so a team entered live keeps its own deny_paths, max_depth, max_parallel,
+  // stall_minutes and members. `entries` are the enclosing entry members, innermost first;
+  // `teams` is every team key on the path from the run's project, outermost first.
+  #scope(m) {
+    const run = this.#runs.get(m.run_id);
+    const entries = [];
+    for (let cur = m; cur; cur = cur.parent_id == null ? null : this.store.member(cur.parent_id)) {
+      if (cur.project != null) entries.push(cur);
+    }
+    const top = entries[0];
+    const projectRoot = top ? top.project : run.projectRoot;
+    const config = top ? this.#teamConfig(run, top.project) : run.config;
+    const teams = [run.projectRoot, ...entries.map((e) => e.project).reverse()]
+      .flatMap((root) => this.#keys(run, root));
+    return { projectRoot, config, entries, teams };
+  }
+
   #ctx(m) {
     const run = this.#runs.get(m.run_id);
+    const { projectRoot, config, teams } = this.#scope(m);
     return {
-      config: run.config, projectRoot: run.projectRoot, member: m.name, task: m.task,
+      config, projectRoot, member: m.name, task: m.task,
       adapterDir: this.adapterDir, assignments: {}, skillsDir: this.skillsDir, env: this.env,
       timeoutMs: run.timeoutMs, budget: run.budget, depth: m.depth,
-      teams: teamKeys(run.projectRoot), originRoot: run.projectRoot
+      teams, originRoot: run.projectRoot
     };
   }
 
@@ -635,7 +680,7 @@ export class Supervisor {
   #resolve(m) {
     let p = this.#resolutions.get(m.id);
     if (!p) {
-      const { config } = this.#runs.get(m.run_id);
+      const { config } = this.#scope(m);
       p = config.members[m.name].team
         ? Promise.resolve({ team: true })
         : resolveCaps(this.#ctx(m)).catch((error) => ({ error }));
@@ -659,6 +704,7 @@ export class Supervisor {
     this.store.setState(id, 'running');
     this.store.addEvent(id, 'started', {});
 
+    const scope = this.#scope(m);
     const ctx = this.#ctx(m);
     const r = await this.#resolve(m);
     if (this.#closing) return;   // close() has recorded any halt; a working member is recovered
@@ -689,9 +735,9 @@ export class Supervisor {
     rt.workspace = prep.workspace;
     this.store.setWorkspace(id, prep.workspace.dir);
     const brief = buildBrief({
-      resolved, task: m.task, cwd: prep.workspace.dir, denyPaths: run.config.deny_paths,
+      resolved, task: m.task, cwd: prep.workspace.dir, denyPaths: scope.config.deny_paths,
       skillText: prep.skillText, dialectText: prep.dialectText,
-      timeoutSec: Math.floor(run.timeoutMs / 1000), depth: m.depth, maxDepth: run.config.defaults.max_depth
+      timeoutSec: Math.floor(run.timeoutMs / 1000), depth: m.depth, maxDepth: scope.config.defaults.max_depth
     });
     brief.task += TEAM_NOTE;
     rt.session = new MemberSession({
@@ -957,7 +1003,9 @@ export class Supervisor {
   #delegate(id, { to, task } = {}) {
     const rt = this.#live.get(id);
     const m = rt.member;
-    const { config, budget } = this.#runs.get(m.run_id);
+    const run = this.#runs.get(m.run_id);
+    const scope = this.#scope(m);
+    const { config } = scope;
     if (rt.halt) throw new Error(`delegation refused: ${this.#haltNote(rt)}`);
     if (typeof to !== 'string' || typeof task !== 'string' || !task.trim()) {
       throw new Error('delegate needs "to" (a report\'s name) and "task"');
@@ -966,14 +1014,42 @@ export class Supervisor {
     if (m.depth >= config.defaults.max_depth) {
       throw new Error(`delegation refused: already at max_depth ${config.defaults.max_depth}`);
     }
-    if (budget.runs <= 0) throw new Error('delegation budget exhausted (max_delegations)');
-    budget.runs -= 1;
-    this.store.setBudget(m.run_id, budget.runs);
-    const child = this.store.addMember({ runId: m.run_id, parentId: id, name: to, task, depth: m.depth + 1 });
-    this.store.addEvent(id, 'delegated', { to, report_id: child.id });
+    if (run.budget.runs <= 0) throw new Error('delegation budget exhausted (max_delegations)');
+    for (const e of scope.entries) {
+      if (this.store.member(e.id).scope_budget <= 0) {
+        throw new Error(`delegation budget exhausted (max_delegations of the team at ${e.project})`);
+      }
+    }
+    const spec = config.members[to];
+    const entered = spec.team && this.shared && !parseGithubRepo(spec.team)
+      ? this.#enterTeam(m, scope, to, spec) : null;   // throws before anything is spent
+    run.budget.runs -= 1;
+    this.store.setBudget(m.run_id, run.budget.runs);
+    for (const e of scope.entries) this.store.setScopeBudget(e.id, this.store.member(e.id).scope_budget - 1);
+    const child = entered
+      ? this.store.addMember({ runId: m.run_id, parentId: id, name: entered.entry, task, depth: 0,
+                               project: entered.root, alias: to, scopeBudget: entered.budget })
+      : this.store.addMember({ runId: m.run_id, parentId: id, name: to, task, depth: m.depth + 1 });
+    this.store.addEvent(id, 'delegated', { to, report_id: child.id, ...(entered ? { team: entered.root } : {}) });
     this.#resolve(this.store.member(child.id));
     this.#schedule(child.id);
-    return { report_id: child.id };
+    return { report_id: child.id, ...(entered ? { team: { root: entered.root, member: entered.entry } } : {}) };
+  }
+
+  // Checks a local team can be entered from here and returns where and as whom.
+  #enterTeam(m, scope, to, spec) {
+    const root = teamRoot(scope.projectRoot, spec.team);
+    if (!existsSync(join(root, CONFIG_RELPATH))) {
+      throw new Error(`member "${to}": no agent-team config for team "${spec.team}" at ${join(root, CONFIG_RELPATH)}`);
+    }
+    const real = realpathSync(root);
+    refuseCycle(to, spec.team, teamKeys(real), scope.teams);
+    const teamConfig = this.#teamConfig(this.#runs.get(m.run_id), real);
+    const entry = teamEntry(teamConfig, spec.member, real, to);
+    if (teamConfig.members[entry].team) {
+      throw new Error(`member "${to}": entry member "${entry}" of ${real} is itself a team — set "member" to a member that runs an agent`);
+    }
+    return { root: real, entry, budget: teamConfig.defaults.max_delegations };
   }
 
   // Along the reporting line only: the caller's manager, or one of its own reports.
@@ -987,7 +1063,7 @@ export class Supervisor {
       target = parent;
       fromKind = 'report';
     } else {
-      const matches = this.store.children(id).filter((c) => c.id === to || c.name === to);
+      const matches = this.store.children(id).filter((c) => c.id === to || c.name === to || c.alias === to);
       target = matches.find((c) => !TERMINAL.has(c.state)) ?? matches.at(-1);
       fromKind = 'manager';
     }
