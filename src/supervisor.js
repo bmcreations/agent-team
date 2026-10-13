@@ -48,6 +48,9 @@ export function lockSupervisorDir(env = process.env) {
 
 const label = (m) => `${m.from_name} (${m.from_kind})`;
 // Legal thread moves by kind; declined and done are final.
+// A project root as a real path; one that no longer exists stays as given and matches nothing.
+const realRoot = (p) => { try { return realpathSync(p); } catch { return p; } };
+
 const THREAD_MOVES = { task: { open: ['accepted', 'declined'], accepted: ['done'] }, question: { open: ['done', 'declined'] } };
 const render = (m) => ({ id: m.id, from: label(m), text: m.text, report_id: m.report_id, thread_id: m.thread_id ?? null });
 const clampSeconds = (v, dflt, max) => (Number.isInteger(v) && v > 0 ? Math.min(v, max) : dflt);
@@ -599,10 +602,16 @@ export class Supervisor {
           this.#startThreadRun(t.id);
         }
       } catch (err) {
+        // An open thread is declined with the reason; an accepted one can only finish, so it
+        // closes done-failed. Either way the requester is told and the thread does not linger.
+        const reason = `the receiving team could not be recovered: ${err.message}`;
         try {
-          this.#moveThread(this.store.thread(t.id), 'declined',
-            { text: `the receiving team could not be recovered: ${err.message}`, author: 'agent-team' });
-        } catch { /* a concurrent move already closed it */ }
+          const cur = this.store.thread(t.id);
+          if (cur.state === 'open') this.#moveThread(cur, 'declined', { text: reason, author: 'agent-team' });
+          else this.#closeThread(cur, 'failed', { status: 'failed', summary: reason });
+        } catch (closeErr) {
+          process.stderr.write(`agent-team: could not close thread #${t.id} on recovery: ${closeErr.message}\n`);
+        }
       }
     }
   }
@@ -1201,9 +1210,7 @@ export class Supervisor {
       // Only the team's own run root: a member another run entered cross-team works under that run's budgets.
       if (m.name !== entry || m.parent_id != null || m.project != null || TERMINAL.has(m.state) || rt.stopping || rt.halt) continue;
       // Roots are compared as real paths: a run's project is stored as it was submitted.
-      let root = this.#scope(m).projectRoot;
-      try { root = realpathSync(root); } catch { /* a vanished root cannot match */ }
-      if (root === project) return m;
+      if (realRoot(this.#scope(m).projectRoot) === project) return m;
     }
     return null;
   }
@@ -1360,9 +1367,7 @@ export class Supervisor {
     };
     const own = run.thread_id != null ? view(this.store.thread(run.thread_id)) : null;
     // Threads store their target as a real path; a run's project is stored as it was submitted.
-    let root = scope.projectRoot;
-    try { root = realpathSync(root); } catch { /* a vanished root has no threads */ }
-    const waiting = this.store.unownedThreadsTo(root, m.name).filter((t) => t.id !== run.thread_id);
+    const waiting = this.store.unownedThreadsTo(realRoot(scope.projectRoot), m.name).filter((t) => t.id !== run.thread_id);
     for (const t of waiting) this.store.setThreadOwner(t.id, m.id);
     return { thread: own, threads: waiting.map(view) };
   }
