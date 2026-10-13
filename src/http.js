@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { whoAmI } from './admin.js';
 import { loupeConfig, loupeGet, openUrl, mentionedTargets, TARGET_RE } from './loupe.js';
+import { figmaRefs, figmaImage, FILE_KEY_RE, NODE_RE } from './figma.js';
+import { loadConfig } from './config.js';
 import { memberTexts, publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState, READ_ONLY_NOTE } from './view.js';
 
 // The web view: a JSON API over the store, server-sent events, and a static page. It binds to
@@ -255,6 +257,15 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
     return v;
   };
 
+  const figmaCache = new Map();
+  const figmaToken = () => {
+    if (!env.FIGMA_TOKEN) throw new HttpError(404, 'Figma previews are off: set FIGMA_TOKEN before starting serve');
+    return env.FIGMA_TOKEN;
+  };
+  const defaultFileKey = (runId) => {
+    try { return loadConfig(store.run(runId).project).defaults.figma_file_key; } catch { return null; }
+  };
+
   // [method, path pattern, handler]. A handler returns a value to send as JSON, or undefined
   // when it wrote the response itself.
   const routes = [
@@ -263,6 +274,19 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
       member(params[0]);
       if (!loupe) return { enabled: false, targets: [] };
       return { enabled: true, targets: mentionedTargets(memberTexts(store, params[0]), await loupeTargets()) };
+    }],
+    ['GET', /^\/api\/members\/(\d+)\/designs$/, ({ params }) => {
+      const m = member(params[0]);
+      if (!env.FIGMA_TOKEN) return { enabled: false, refs: [] };
+      return { enabled: true, refs: figmaRefs(memberTexts(store, m.id), defaultFileKey(m.run_id)) };
+    }],
+    ['GET', /^\/api\/figma\/image$/, async ({ url, res }) => {
+      const fileKey = url.searchParams.get('file') ?? '';
+      const nodeId = url.searchParams.get('node') ?? '';
+      if (!FILE_KEY_RE.test(fileKey) || !NODE_RE.test(nodeId)) throw new HttpError(400, 'file and node must be a Figma file key and a node id like 12:34');
+      const png = await figmaImage({ token: figmaToken(), fileKey, nodeId, fetchImpl, cache: figmaCache })
+        .catch((err) => { throw new HttpError(502, err.message); });
+      sendBody(res, 200, 'image/png', png);
     }],
     ['GET', /^\/api\/loupe\/screenshot$/, async ({ url, res }) => {
       const target = targetParam(url);

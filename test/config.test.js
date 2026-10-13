@@ -745,3 +745,10 @@ test('defaults.stall_minutes defaults to 10 and max_cost_usd to no cap', () => {
   assert.throws(() => parseConfig({ ...base, defaults: { max_cost_usd: '5' } }, 'c.json'),
     /"defaults.max_cost_usd" must be a positive number of dollars, or null/);
 });
+
+test('defaults.figma_file_key is a file key or null', () => {
+  const base = OK;
+  assert.equal(parseConfig(base, 'c.json').defaults.figma_file_key, null);
+  assert.equal(parseConfig({ ...base, defaults: { figma_file_key: 'AbCdEf123456' } }, 'c.json').defaults.figma_file_key, 'AbCdEf123456');
+  assert.throws(() => parseConfig({ ...base, defaults: { figma_file_key: 'a/b' } }, 'c.json'), /figma_file_key/);
+});

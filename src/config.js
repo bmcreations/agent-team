@@ -436,6 +436,7 @@ export function parseConfig(raw, path) {
     cloud_max_cost_usd: 5,
     stall_minutes: 10,
     max_cost_usd: null,
+    figma_file_key: null,
     ...(raw.defaults ?? {})
   };
   // Checked after the merge, not on raw.defaults, so a bad value baked into the hardcoded
@@ -473,6 +474,13 @@ export function parseConfig(raw, path) {
     throw new Error(
       `${path}: "defaults.max_cost_usd" must be a positive number of dollars, or null — got ` +
       `${JSON.stringify(defaults.max_cost_usd)}`
+    );
+  }
+  if (defaults.figma_file_key !== null && (typeof defaults.figma_file_key !== 'string' ||
+      !/^[A-Za-z0-9]{10,64}$/.test(defaults.figma_file_key))) {
+    throw new Error(
+      `${path}: "defaults.figma_file_key" must be a Figma file key (letters and digits), or null — got ` +
+      `${JSON.stringify(defaults.figma_file_key)}`
     );
   }
 

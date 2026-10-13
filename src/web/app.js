@@ -278,6 +278,10 @@ function memberControls(m) {
 
 // Sections later tasks add to the member panel (devices, designs).
 function extras(m) {
+  return [devices(m), designs(m)];
+}
+
+function devices(m) {
   const section = h('section', { class: 'devices', hidden: true });
   api(`/api/members/${m.id}/devices`).then(({ enabled, targets }) => {
     if (!enabled) return;
@@ -295,7 +299,20 @@ function extras(m) {
     targets.forEach((t, i) => { if (i === 0) show(t.id); });
     api('/api/loupe').then(({ targets: all }) => all.forEach((t) => pick.append(h('option', { value: t.id }, `${t.label} (${t.id})`))), () => {});
   }, () => {});
-  return [section];
+  return section;
+}
+
+function designs(m) {
+  const section = h('section', { class: 'designs', hidden: true });
+  api(`/api/members/${m.id}/designs`).then(({ enabled, refs }) => {
+    if (!enabled || !refs.length) return;
+    section.append(h('h3', {}, 'Designs'), ...refs.map((r) => h('figure', {},
+      h('img', { loading: 'lazy', alt: `Figma node ${r.node_id}`,
+                 src: `/api/figma/image?file=${encodeURIComponent(r.file_key)}&node=${encodeURIComponent(r.node_id)}` }),
+      h('figcaption', { class: 'muted' }, `node ${r.node_id} · file ${r.file_key}`))));
+    section.hidden = false;
+  }, () => {});
+  return section;
 }
 
 $('search').addEventListener('input', (e) => { S.query = e.target.value; schedule(); });

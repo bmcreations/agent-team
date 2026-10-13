@@ -302,6 +302,7 @@ Optional.
 | `on_unavailable` | `claude` | The agent to use when a member's agent fails its probe. The run carries a `warning` saying so. If the fallback also fails its probe, the run is refused. |
 | `max_depth` | `3` | How many levels below the dispatched member can be delegated to. `0` turns delegation off. |
 | `cloud_max_cost_usd` | `5` | The spend cap, in US dollars, set on every [cloud](#cloud-members) session. |
+| `figma_file_key` | `null` | The Figma file that bare `node 12:34` mentions refer to, for previews in the [web view](#web-view). |
 | `max_delegations` | `20` | Total adapter runs allowed across one dispatch, counting the dispatched member and every call back to a manager. Minimum `1`. |
 
 `/agent-team-init` writes `max_depth: 1` and `max_delegations: 12`, which lets the orchestrator
@@ -309,7 +310,7 @@ delegate and stops its reports from delegating further.
 
 ## Web view
 
-`agent-team serve` reads two optional environment variables for the web view.
+`agent-team serve` reads optional environment variables for the web view.
 
 - `AGENT_TEAM_LOUPE_URL`: the address of a loupe (a local device viewer) running on this machine, for
   example `https://localhost:18456`. A member's panel then shows screenshots of any loupe
@@ -318,3 +319,7 @@ delegate and stops its reports from delegating further.
   `LOUPE_TOKEN` or `~/Library/Caches/loupe/token` when it needs it and sends it only to
   loupe. The URL must be `localhost`, `127.0.0.1` or `[::1]`; `serve` accepts loupe's
   self-signed certificate there.
+- `FIGMA_TOKEN`: a Figma personal access token. A member's panel then shows a rendered
+  preview of each Figma node the member mentioned, as a Figma link with `node-id`, or as
+  `node 12:34` when the project sets `defaults.figma_file_key`. `serve` sends the token only
+  to Figma's API and caches each image for ten minutes.
