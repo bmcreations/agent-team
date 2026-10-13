@@ -230,6 +230,10 @@ Every adapter run, including each call back to a manager, spends one unit of
 `max_delegations`. When the budget runs out, the current run fails with
 `delegation budget exhausted`.
 
+`team_status(team?)` shows what another team is doing: its running runs, member states, and
+latest checkpoints, never transcripts. With no team, it lists the teams you can name: the
+supervisor's projects and this project's `peers`.
+
 ### Other teams
 
 A report that is a [`team` member](configuration.md#other-teams) runs another project's team.

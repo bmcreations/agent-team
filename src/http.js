@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs';
 import { whoAmI } from './admin.js';
 import { loupeConfig, loupeGet, openUrl, mentionedTargets, TARGET_RE } from './loupe.js';
 import { figmaRefs, figmaImage, FILE_KEY_RE, NODE_RE } from './figma.js';
+import { basename } from 'node:path';
 import { loadConfig } from './config.js';
-import { memberTexts, publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState, READ_ONLY_NOTE } from './view.js';
+import { knownTeams } from './teams.js';
+import { memberTexts, publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState, teamStatus, READ_ONLY_NOTE } from './view.js';
 
 // The web view: a JSON API over the store, server-sent events, and a static page. It binds to
 // 127.0.0.1 and has no sign-in yet: anyone who can open a connection to the port on this
@@ -273,6 +275,30 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
   // [method, path pattern, handler]. A handler returns a value to send as JSON, or undefined
   // when it wrote the response itself.
   const routes = [
+    ['GET', /^\/api\/teams$/, ({ url }) => {
+      const project = url.searchParams.get('project') ?? '';
+      if (!store.projects().includes(project)) throw new HttpError(404, `unknown project ${project}`);
+      let config;
+      try { config = loadConfig(project); } catch (err) { throw new HttpError(409, err.message); }
+      return { teams: knownTeams({ store, projectRoot: project, config }) };
+    }],
+    // Only teams the supervisor already knows: the page never resolves arbitrary paths.
+    ['GET', /^\/api\/teams\/status$/, ({ url }) => {
+      const root = url.searchParams.get('root') ?? '';
+      const known = new Map();
+      for (const p of store.projects()) {
+        let config = null;
+        try { config = loadConfig(p); } catch { /* moved or broken */ }
+        const teams = config ? knownTeams({ store, projectRoot: p, config })
+          : [{ name: basename(p), root: p, source: 'supervisor' }];
+        for (const t of teams) {   // a peer entry outranks a bare supervisor project, as in knownTeams
+          if (!t.missing && (t.source === 'peer' || !known.has(t.root))) known.set(t.root, t);
+        }
+      }
+      const t = known.get(root);
+      if (!t) throw new HttpError(404, `unknown team ${root}`);
+      return teamStatus(store, t);
+    }],
     ['GET', /^\/api\/loupe$/, async () => (loupe ? { enabled: true, targets: await loupeTargets() } : { enabled: false, targets: [] })],
     ['GET', /^\/api\/members\/(\d+)\/devices$/, async ({ params }) => {
       member(params[0]);

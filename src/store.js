@@ -245,6 +245,8 @@ export function openStore(path) {
       return { events, messages };
     },
     event: (id) => eventRow(q('SELECT * FROM events WHERE id = ?').get(id)),
+    lastEventOfKind: (memberId, kind) => eventRow(
+      q('SELECT * FROM events WHERE member_id = ? AND kind = ? ORDER BY id DESC LIMIT 1').get(memberId, kind)),
     lastEvent: (memberId) => eventRow(q('SELECT * FROM events WHERE member_id = ? ORDER BY id DESC LIMIT 1').get(memberId)),
     memberSpan: (memberId) => ({ ...q(
       "SELECT (SELECT min(at) FROM events WHERE member_id = ?1) AS started, " +

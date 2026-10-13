@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
+import { teamStatus } from '../src/view.js';
 import { project, LIVE } from './helpers/live.js';
 import { get, view } from './helpers/http.js';
 
@@ -164,4 +165,31 @@ test('a port already in use is reported with what to do about it', async () => {
     assert.equal(r.code, 1);
     assert.match(r.stderr, /already in use; pass --port/);
   } finally { busy.close(); store.close(); }
+});
+
+test('/api/teams lists the known teams; /api/teams/status serves only known ones', async () => {
+  const bProj = project({ lead: LIVE() }, { by_member: {} });
+  const aProj = project({ solo: LIVE() }, { by_member: {} });
+  const cfgFile = join(aProj.root, '.claude', 'agent-team.json');
+  writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, 'utf8')), peers: [bProj.root] }));
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project: aProj.root, task: 'a work' });
+  store.addMember({ runId, parentId: null, name: 'solo', task: 't', depth: 0 });
+  const bRun = store.createRun({ project: bProj.root, task: 'b work' });
+  const bLead = store.addMember({ runId: bRun, parentId: null, name: 'lead', task: 't', depth: 0 });
+  store.addEvent(bLead.id, 'progress', { text: 'checkpoint' });
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const teams = await get(web.url, `/api/teams?project=${encodeURIComponent(aProj.root)}`);
+    assert.equal(teams.status, 200);
+    assert.ok(teams.json.teams.some((t) => t.root === realpathSync(bProj.root) && t.source === 'peer'));
+    assert.equal((await get(web.url, '/api/teams?project=/not/known')).status, 404);
+
+    const st = await get(web.url, `/api/teams/status?root=${encodeURIComponent(realpathSync(bProj.root))}`);
+    assert.equal(st.status, 200);
+    assert.deepEqual(st.json, teamStatus(store, st.json.team));
+    assert.equal(st.json.team.source, 'peer');
+    assert.equal(st.json.runs[0].members[0].checkpoint.text, 'checkpoint');
+    assert.equal((await get(web.url, '/api/teams/status?root=/not/known')).status, 404);
+  } finally { await web.close(); }
 });

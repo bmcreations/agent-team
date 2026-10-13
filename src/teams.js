@@ -23,6 +23,15 @@ export function knownTeams({ store, projectRoot, config }) {
   return [...out.values()].sort((a, b) => a.name.localeCompare(b.name) || a.root.localeCompare(b.root));
 }
 
+// The project a member works in: its own entry's, else its nearest entering ancestor's, else
+// its run's. (liveMembersIn files nested members under the run's project, so it cannot say.)
+export function scopeProject(store, m) {
+  for (let cur = m; cur; cur = cur.parent_id == null ? null : store.member(cur.parent_id)) {
+    if (cur.project != null) return cur.project;
+  }
+  return store.run(m.run_id).project;
+}
+
 export function resolveTeam({ store, projectRoot, config, team }) {
   if (typeof team !== 'string' || !team.trim()) throw new Error('name a team: a known team\'s name or a path');
   if (isRemote(team)) {

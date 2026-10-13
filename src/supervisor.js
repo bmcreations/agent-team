@@ -9,6 +9,8 @@ import { pruneWorkspace } from './workspace.js';
 import { MemberSession } from './sessions.js';
 import { serveRpc, isListening } from './rpc.js';
 import { TEAM_NOTE } from './team-tools.js';
+import { knownTeams, resolveTeam } from './teams.js';
+import { teamStatus } from './view.js';
 import { DEFAULT_TIMEOUT_MS } from './adapter.js';
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled']);
@@ -981,12 +983,20 @@ export class Supervisor {
       send_to: (id, p) => this.#sendTo(id, p),
       wait_for: (id, p) => this.#waitFor(id, p),
       report_progress: (id, p) => this.#reportProgress(id, p),
-      ask_human: (id, p) => this.#askHuman(id, p)
+      ask_human: (id, p) => this.#askHuman(id, p),
+      team_status: (id, p) => this.#teamStatus(id, p)
     };
     if (!Object.hasOwn(tools, method)) throw new Error(`unknown tool "${method}"`);
     const m = typeof token === 'string' ? this.store.memberByToken(token) : null;
     if (!m || !this.#live.has(m.id)) throw new Error('this member is not running');
     return tools[method](m.id, params);
+  }
+
+  // Reads the store only, so it also works in an in-process supervisor.
+  #teamStatus(id, { team } = {}) {
+    const { projectRoot, config } = this.#scope(this.store.member(id));
+    if (team == null || team === '') return { teams: knownTeams({ store: this.store, projectRoot, config }) };
+    return teamStatus(this.store, resolveTeam({ store: this.store, projectRoot, config, team }));
   }
 
   #reportProgress(id, { text }) {
