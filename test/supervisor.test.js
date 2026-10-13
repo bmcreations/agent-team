@@ -123,3 +123,32 @@ test('a launched member records its harness, model and whether it could write', 
     assert.deepEqual([m.agent, m.model, m.read_only], ['mock-live', 'mock-1', 1]);   // isolation none is read-only
   } finally { await sup.close(); }
 });
+
+test('send names a member by run and name, as pause does', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ sleep_ms: 400 }, { say: 'done' }] } }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    const { message_id } = sup.send({ run_id: runId, member: 'solo', text: 'use tabs', from: 'b' });
+    assert.equal(store.timeline({ memberId }).messages.find((m) => m.id === message_id).text, 'use tabs');
+    await sup.waitRun(runId);
+  } finally { await sup.close(); }
+});
+
+test('send and answer refuse a run another supervisor is running', async () => {
+  const { script } = project({ solo: LIVE() }, { by_member: {} });
+  const { sup, store } = await supervise(script);
+  try {
+    // Seeded after start, so recovery never sees it.
+    const runId = store.createRun({ project: '/p', task: 't', owner: '/elsewhere.sock' });
+    const lead = store.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+    store.setRunRoot(runId, lead.id);
+    store.setState(lead.id, 'waiting');
+    const qid = store.addQuestion({ memberId: lead.id, question: 'ok?' });
+    assert.throws(() => sup.send({ member_id: lead.id, text: 'hi' }), /run by another supervisor/);
+    assert.throws(() => sup.answer({ question_id: qid, answer: 'yes' }), /run by another supervisor/);
+    assert.equal(store.question(qid).answer, null);
+  } finally { await sup.close(); }
+});

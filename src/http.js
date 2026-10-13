@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { whoAmI } from './admin.js';
-import { publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState } from './view.js';
+import { publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState, READ_ONLY_NOTE } from './view.js';
 
 // The web view: a JSON API over the store, server-sent events, and a static page. It binds to
 // 127.0.0.1 and has no sign-in yet: anyone who can open a connection to the port on this
@@ -170,6 +170,50 @@ function lastEventId(raw) {
   return cursor && Number.isSafeInteger(cursor.event) && Number.isSafeInteger(cursor.message) ? cursor : null;
 }
 
+const MAX_BODY = 64 * 1024;
+
+// Not auth: a check that the request came from this page and not from another site open in
+// the same browser. application/json makes a cross-origin browser send a CORS preflight,
+// which this server answers without CORS headers; Origin and Sec-Fetch-Site catch the rest.
+function checkSameSite(req, bound) {
+  const type = (req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+  if (type !== 'application/json') throw new HttpError(415, 'send Content-Type: application/json');
+  const origin = req.headers.origin;
+  if (origin != null && origin !== `http://127.0.0.1:${bound}` && origin !== `http://localhost:${bound}`) {
+    throw new HttpError(403, 'requests from another site cannot steer');
+  }
+  const site = req.headers['sec-fetch-site'];
+  if (site != null && site !== 'same-origin' && site !== 'none') {
+    throw new HttpError(403, 'requests from another site cannot steer');
+  }
+}
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => { size += c.length; if (size <= MAX_BODY) chunks.push(c); });
+    req.on('end', () => {
+      if (size > MAX_BODY) return reject(new HttpError(413, 'request body is over 64 KiB'));
+      let value;
+      try { value = size ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; } catch {
+        return reject(new HttpError(400, 'request body is not JSON'));
+      }
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        return reject(new HttpError(400, 'request body must be a JSON object'));
+      }
+      resolve(value);
+    });
+    req.on('error', reject);
+  });
+}
+
+const text = (v, name) => {
+  if (typeof v !== 'string' || !v.trim()) throw new HttpError(400, `${name} must be non-empty text`);
+  return v;
+};
+const flag = (v) => v === true;
+
 export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAULT_PORT, env = process.env,
                             by = null, pollMs = 250, heartbeatMs = 15_000, stallMs = 60_000, fetchImpl = fetch } = {}) {
   const own = sup?.socketPath ?? null;
@@ -177,6 +221,23 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
   const hub = new Hub({ store, own, pollMs, heartbeatMs, stallMs });
   const found = (v, what) => { if (v == null) throw new HttpError(404, `unknown ${what}`); return v; };
   const member = (id) => found(store.member(id), `member ${id}`);
+  const who = by ?? whoAmI();
+  // The admin RPCs' operations, with their errors mapped to statuses. Supervisor messages
+  // name members and runs, never tokens, so they are safe to return.
+  const steer = (f) => {
+    if (!sup) throw new HttpError(503, 'steering needs `agent-team serve`');
+    try { return f(); } catch (err) {
+      if (err instanceof HttpError) throw err;
+      if (/run by another supervisor/.test(err.message)) throw new HttpError(409, `read-only: ${READ_ONLY_NOTE}`);
+      if (/^(unknown |run \d+ has no member)/.test(err.message)) throw new HttpError(404, err.message);
+      throw new HttpError(409, err.message);
+    }
+  };
+  const cap = (v) => {
+    if (v == null) return null;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) throw new HttpError(400, 'max_cost_usd must be a positive number');
+    return v;
+  };
 
   // [method, path pattern, handler]. A handler returns a value to send as JSON, or undefined
   // when it wrote the response itself.
@@ -207,7 +268,20 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
         message: intParam(url, 'after_message', top.message, MAX)
       };
       hub.add(req, res, { runId, cursor });
-    }]
+    }],
+    ['POST', /^\/api\/members\/(\d+)\/message$/, ({ params, body }) =>
+      steer(() => sup.send({ member_id: params[0], text: text(body.text, 'text'), from: who }))],
+    ['POST', /^\/api\/members\/(\d+)\/pause$/, ({ params, body }) =>
+      steer(() => sup.pause({ member_id: params[0], now: flag(body.now), subtree: flag(body.subtree), by: who }))],
+    ['POST', /^\/api\/members\/(\d+)\/cancel$/, ({ params, body }) =>
+      steer(() => sup.cancel({ member_id: params[0], subtree: flag(body.subtree), by: who }))],
+    ['POST', /^\/api\/members\/(\d+)\/resume$/, ({ params, body }) => {
+      const note = body.note == null || body.note === '' ? null : text(body.note, 'note');
+      const maxCost = cap(body.max_cost_usd);
+      return steer(() => sup.resume({ member_id: params[0], subtree: flag(body.subtree), note, max_cost_usd: maxCost, by: who }));
+    }],
+    ['POST', /^\/api\/questions\/(\d+)\/answer$/, ({ params, body }) =>
+      steer(() => sup.answer({ question_id: params[0], answer: text(body.answer, 'answer'), by: who }))]
   ];
 
   function serveStatic(res, path) {
@@ -233,7 +307,12 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
       if (!hit) throw new HttpError(405, 'method not allowed');
       const [, match, handler] = hit;
       const params = match.slice(1).map((s) => positiveInt(s));
-      const out = await handler({ req, res, url, params, body: null });
+      let body = null;
+      if (req.method === 'POST') {
+        checkSameSite(req, bound);
+        body = await readJson(req);
+      }
+      const out = await handler({ req, res, url, params, body });
       if (out !== undefined) json(res, 200, out);
     } catch (err) {
       if (res.headersSent) { res.destroy(); return; }

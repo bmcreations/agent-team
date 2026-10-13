@@ -126,22 +126,24 @@ export class Supervisor {
     });
   }
 
-  send({ member_id, text, from = 'local' }) {
-    const m = this.store.member(member_id);
-    if (!m) throw new Error(`unknown member ${member_id}`);
+  send({ member_id, run_id, member, text, from = 'local' }) {
+    const m = this.#target({ member_id, run_id, member });
     // A stopping or cancelling member will not read another message. A pausing or paused one
     // will, after it is resumed.
-    const rt = this.#live.get(member_id);
+    const rt = this.#live.get(m.id);
     if (TERMINAL.has(m.state) || rt?.stopping || (rt?.halt && rt.halt.kind !== 'pause')) throw new Error(`"${m.name}" has finished — delegate a new task`);
     if (typeof text !== 'string' || !text.trim()) throw new Error('a message needs text');
-    const id = this.store.enqueue({ to: member_id, fromKind: 'human', fromName: from, text });
-    this.#pump(member_id);
+    const id = this.store.enqueue({ to: m.id, fromKind: 'human', fromName: from, text });
+    this.#pump(m.id);
     return { message_id: id };
   }
 
   answer({ question_id, answer, by = 'local' }) {
     const q = this.store.question(question_id);
     if (!q || q.answer != null || q.closed) throw new Error(`question ${question_id} is no longer open`);
+    // The asker's wait lives in the supervisor running its run; an answer written here would
+    // never reach it.
+    this.#owned(this.store.member(q.member_id));
     if (!this.store.answerQuestion(question_id, answer, by)) throw new Error(`question ${question_id} is no longer open`);
     const rt = this.#live.get(q.member_id);
     if (rt?.question?.id === question_id) {

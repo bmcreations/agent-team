@@ -37,6 +37,14 @@ codex members is never paused by the cap. A member that has finished its work an
 started with the `delegate` tool and run in parallel, each in its own workspace. A v1 member
 keeps the `{"status":"delegating"}` loop described under [Delegation](#delegation).
 
+The page steers with the same operations as the CLI verbs: message a member, pause, pause now,
+resume, cancel (one member or its subtree), and answer an `ask_human` question. Actions are
+signed with the name of the OS user running `serve`. Take-over stays in the terminal: the page
+shows the `agent-team attach <run> <member>` command to copy. A run started by a CLI with no
+`serve` running belongs to that CLI's in-process supervisor; the page shows it live but
+read-only, and `send` and `answer` refuse it too, because only the supervisor running a member
+can deliver to it.
+
 | What | Where | Override |
 |---|---|---|
 | Store | `~/.cache/agent-team/supervisor/supervisor.db` | `AGENT_TEAM_SUPERVISOR_DB` |
