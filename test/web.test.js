@@ -111,6 +111,7 @@ test('app.js guards what the DOM cannot test here: stale loads, null children, b
   assert.ok((src.match(/gen !== S\.gen/g) ?? []).length >= 4, 'open() re-checks it after each await and in listeners');
   assert.match(src, /replaceChildren\(\.\.\.present\(/, 'the run header filters absent children');
   assert.match(src, /try \{ data = JSON\.parse\(ev\.data\); \} catch/, 'stream frames are parsed defensively');
+  assert.match(src, /deny_paths_by_project/, 'the member panel reads the entered project\'s deny_paths');
   assert.match(src, /S\.failed = /, 'a failed load is shown in the view');
 });
 

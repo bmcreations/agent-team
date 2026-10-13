@@ -402,13 +402,24 @@ function drawRun() {
       tokens(run.tokens) ? h('span', { class: 'pill quiet' }, tokens(run.tokens)) : null,
       run.created_at ? h('span', { class: 'pill quiet' }, 'started ', when(run.created_at), run.status === 'running' ? null : '') : null)),
     run.read_only_note ? h('div', { class: 'banner' }, icon('lock'), h('span', {}, 'Read-only here. ', run.read_only_note)) : null));
-  const node = (m) => h('li', {},
-    h('a', { href: memberHref(run.id, m.id), class: `mate${m.id === S.route.member ? ' current' : ''}` },
-      avatar(m.name, { agent: m.agent }),
-      h('span', { class: 'body' }, h('div', { class: 'name' }, m.name), h('div', { class: 'task' }, m.task ?? '')),
-      pill(m.state)),
-    m.children.length ? h('ul', {}, m.children.map(node)) : null);
-  S.panel.tree.replaceChildren(...memberTree(members).map(node));
+  // A member below an entered one works in that member's project, so the project flows down the tree.
+  const scope = new Map();
+  const node = (m, inherited = null) => {
+    const project = m.project ?? inherited;
+    scope.set(m.id, project);
+    return h('li', {},
+      h('a', { href: memberHref(run.id, m.id), class: `mate${m.id === S.route.member ? ' current' : ''}` },
+        avatar(m.name, { agent: m.agent }),
+        h('span', { class: 'body' },
+          h('div', { class: 'name' }, m.name,
+            m.project ? [' ', h('span', { class: 'pill quiet', title: m.project }, `team ${shortPath(m.project)}`)] : null,
+            m.alias ? [' ', h('span', { class: 'muted' }, `as ${m.alias}`)] : null),
+          h('div', { class: 'task' }, m.task ?? '')),
+        pill(m.state)),
+      m.children.length ? h('ul', {}, m.children.map((c) => node(c, project))) : null);
+  };
+  S.panel.tree.replaceChildren(...memberTree(members).map((m) => node(m)));
+  S.scope = scope;
   const states = new Map(members.map((x) => [x.id, x.state]));
   const running = tasks(S.model.events).filter((t) => states.has(t.member_id))
     .sort((a, b) => Number(TERMINAL.has(states.get(a.member_id))) - Number(TERMINAL.has(states.get(b.member_id))) || b.latest.at - a.latest.at);
@@ -458,10 +469,12 @@ function drawMember(run, m) {
     ? h('div', { class: `banner ${m.result.status === 'ok' ? 'info' : ''}`.trim() }, icon(m.result.status === 'ok' ? 'spark' : 'x'),
       h('span', {}, `Finished${m.result.status === 'ok' ? '' : ` (${m.result.status})`}`, m.result.summary ? `: ${m.result.summary}` : ''))
     : null));
-  const deny = S.detail?.deny_paths;
+  const scopeProject = S.scope?.get(m.id) ?? null;
+  const deny = scopeProject != null ? S.detail?.deny_paths_by_project?.[scopeProject] : S.detail?.deny_paths;
+  const denyLabel = scopeProject != null ? `deny_paths (${shortPath(scopeProject)})` : 'deny_paths';
   p.facts.replaceChildren(...[
     ['harness', m.agent ?? '—'], ['model', m.model ?? '—'], ['workspace', m.workspace ?? 'project folder'],
-    ['read-only', m.read_only == null ? '—' : m.read_only ? 'yes' : 'no'], ['deny_paths', deny ? deny.join(', ') || 'none' : '—'],
+    ['read-only', m.read_only == null ? '—' : m.read_only ? 'yes' : 'no'], [denyLabel, deny ? deny.join(', ') || 'none' : '—'],
     ['cost', money(m.cost_usd) ?? '—'], ['tokens', m.tokens ? String(m.tokens) : '—']
   ].flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
   p.controls.update(run, m);

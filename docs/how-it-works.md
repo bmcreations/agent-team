@@ -17,7 +17,8 @@ project. One dispatch does the following for the named member:
 SIGINT or SIGTERM, with the web view at `http://127.0.0.1:4747/` (`--port 0` picks a free port;
 the address is printed at start). The view binds to `127.0.0.1` only and has no sign-in yet:
 any user or process on this machine that can reach the port can read every run and steer the
-runs `serve` owns. `--max-running` (default 6) caps the members working at once across every
+runs `serve` owns. A member another repository's team runs is tagged with that team, and its
+panel shows that repository's `deny_paths`. `--max-running` (default 6) caps the members working at once across every
 project. When the
 root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol-2),
 `agent-team --member ...` runs it through the supervisor: it submits to a running one, or
