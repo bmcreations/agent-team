@@ -3,9 +3,11 @@ import { describe, memberTree, activity, countLabel, todayCount, mergeTimeline, 
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
 const $ = (id) => document.getElementById(id);
-const S = { route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null, query: '', panel: null };
+const S = { gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null, query: '', panel: null };
 
 const safeHref = (v) => { const s = String(v); return s.startsWith('#') || s.startsWith('/') ? s : '#'; };
+// replaceChildren stringifies null, so anything that may be absent goes through here first.
+const present = (...list) => list.flat(Infinity).filter((c) => c != null && c !== false);
 function h(tag, props = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
@@ -66,20 +68,35 @@ async function open() {
     return schedule();
   }
   S.source?.close();
-  Object.assign(S, { route, panel: null, detail: null, model: { events: [], messages: [] } });
+  const gen = ++S.gen;
+  Object.assign(S, { route, failed: null, panel: null, detail: null, model: { events: [], messages: [] } });
   try {
     const tl = await api(route.run ? `/api/runs/${route.run}/timeline?limit=500` : '/api/timeline?limit=500');
+    if (gen !== S.gen) return;
+    const detail = route.run ? await api(`/api/runs/${route.run}`) : null;
+    if (gen !== S.gen) return;
     S.model = { events: tl.events, messages: tl.messages };
-    if (route.run) S.detail = await api(`/api/runs/${route.run}`);
+    S.detail = detail;
     const q = new URLSearchParams({ after_event: tl.cursor.event, after_message: tl.cursor.message });
     if (route.run) q.set('run', route.run);
     const src = new EventSource(`/api/stream?${q}`);
-    src.addEventListener('state', (ev) => { S.state = JSON.parse(ev.data); schedule(); });
-    src.addEventListener('timeline', (ev) => { S.model = mergeTimeline(S.model, JSON.parse(ev.data)); schedule(); });
+    const on = (name, f) => src.addEventListener(name, (ev) => {
+      if (gen !== S.gen) return;
+      let data;
+      try { data = JSON.parse(ev.data); } catch { return; }   // one bad frame must not stop the stream
+      f(data);
+      schedule();
+    });
+    on('state', (data) => { S.state = data; });
+    on('timeline', (data) => { S.model = mergeTimeline(S.model, data); });
     src.onopen = () => { $('conn').textContent = 'live'; };
     src.onerror = () => { $('conn').textContent = 'reconnecting…'; };
     S.source = src;
-  } catch (err) { flash(err.message); }
+  } catch (err) {
+    if (gen !== S.gen) return;
+    S.failed = `Could not load this view: ${err.message}`;
+    flash(err.message);
+  }
   schedule();
 }
 
@@ -94,7 +111,8 @@ function schedule() {
 function draw() {
   drawSidebar();
   drawNeeds();
-  if (S.route.run) drawRun(); else drawActivity();
+  if (S.failed) $('view').replaceChildren(h('p', { class: 'note' }, S.failed));
+  else if (S.route.run) drawRun(); else drawActivity();
 }
 
 function drawSidebar() {
@@ -170,10 +188,10 @@ function drawRun() {
     $('view').replaceChildren(S.panel.head, h('div', { class: 'run' },
       h('div', {}, h('h2', {}, 'Team'), S.panel.tree, h('h2', {}, 'Conversation'), S.panel.talk), S.panel.member));
   }
-  S.panel.head.replaceChildren(
+  S.panel.head.replaceChildren(...present(
     h('h1', {}, `Run #${run.id}: `, run.task),
     h('p', { class: 'muted' }, run.project, ' · ', run.status, ' · ', money(run.cost_usd), run.tokens ? ` · ${run.tokens} tokens` : ''),
-    run.read_only_note ? h('p', { class: 'note' }, 'Read-only: ', run.read_only_note) : null);
+    run.read_only_note ? h('p', { class: 'note' }, 'Read-only: ', run.read_only_note) : null));
   const node = (m) => h('li', {}, h('a', { href: `#/run/${run.id}/member/${m.id}`, class: m.id === S.route.member ? 'current' : null }, m.name),
     ' ', tag(m.agent), ' ', state(m.state), m.children.length ? h('ul', {}, m.children.map(node)) : null);
   S.panel.tree.replaceChildren(...memberTree(members).map(node));
