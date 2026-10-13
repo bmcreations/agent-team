@@ -375,8 +375,11 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
       steer(() => sup.answer({ question_id: params[0], answer: text(body.answer, 'answer'), by: who }))],
     ['GET', /^\/api\/threads$/, ({ url }) => threadsView(store, { project: url.searchParams.get('project') || null })],
     ['GET', /^\/api\/threads\/(\d+)$/, ({ params }) => found(threadDetail(store, Number(params[0])), `thread ${params[0]}`)],
-    ['POST', /^\/api\/threads\/(\d+)\/reply$/, ({ params, body }) =>
-      steer(() => sup.humanReply({ thread_id: Number(params[0]), text: text(body.text, 'text'), by: who }))]
+    ['POST', /^\/api\/threads\/(\d+)\/reply$/, ({ params, body }) => {
+      // A human posts; accepting, declining and closing belong to the receiving lead.
+      if (Object.hasOwn(body, 'state')) throw new HttpError(400, "humans cannot change a thread's state; post text only");
+      return steer(() => sup.humanReply({ thread_id: Number(params[0]), text: text(body.text, 'text'), by: who }));
+    }]
   ];
 
   function serveStatic(res, path) {
