@@ -280,6 +280,8 @@ test('a request whose run cannot start leaves a declined thread and spends nothi
     await sup.waitRun(runId);
     assert.match(results(store, memberId, 'request')[0].error, /boom/);
     assert.equal(store.thread(1).state, 'declined');
+    assert.deepEqual(store.threadPosts(1).slice(1).map((p) => [p.side, p.author, p.state, p.text]),
+      [['receiver', 'agent-team', 'declined', 'could not start: boom']]);
     assert.equal(store.run(runId).budget, 20);
   } finally { await sup.close(); store.close(); }
 });

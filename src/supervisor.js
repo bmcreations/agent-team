@@ -1221,7 +1221,10 @@ export class Supervisor {
       }
     } catch (err) {
       // No orphan: the thread is declined with the reason and the delegation is not spent.
-      this.store.moveThread(threadId, 'open', 'declined', { result: { reason: `could not start: ${err.message}` } });
+      const reason = `could not start: ${err.message}`;
+      if (this.store.moveThread(threadId, 'open', 'declined', { result: { reason } })) {
+        this.store.addThreadPost({ threadId, side: 'receiver', author: 'agent-team', text: reason, state: 'declined' });
+      }
       throw err;
     }
     this.#spendBudget(m.run_id, run, scope);
