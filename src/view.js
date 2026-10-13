@@ -159,3 +159,46 @@ export function teamStatus(store, team) {
   runs.sort((a, b) => b.created_at - a.created_at || b.id - a.id);
   return { team: pick(team, TEAM_FIELDS), runs };
 }
+
+// ---- Peer threads ----
+// `chain` holds the real path of every team in it, so it never leaves the store; the page gets
+// the pair. Text is cut like a tool result is: the store keeps all of it.
+const THREAD_FIELDS = ['id', 'kind', 'state', 'from_project', 'from_run', 'to_project', 'run_id', 'parent_thread', 'task', 'created_at', 'updated_at'];
+const THREAD_POST_FIELDS = ['id', 'side', 'author', 'text', 'state', 'at'];
+const THREAD_TEXT_MAX = 4000;
+const base = (p) => String(p).split('/').filter(Boolean).at(-1) ?? String(p);
+const cut = (s, max = THREAD_TEXT_MAX) => (typeof s === 'string' && s.length > max ? `${s.slice(0, max)}…` : s);
+const newestFirst = (a, b) => b.created_at - a.created_at || b.id - a.id;
+
+function publicThread(store, t) {
+  const from = t.from_member == null ? null : store.member(t.from_member);
+  const owner = t.owner_member == null ? null : store.member(t.owner_member);
+  return {
+    ...pick({ ...t, task: cut(t.task) }, THREAD_FIELDS),
+    from_member: from ? { id: from.id, name: from.name } : null,
+    owner: owner ? { id: owner.id, name: owner.name } : null,
+    pair: `${base(t.from_project)} → ${base(t.to_project)}`,
+    result: t.result ? { status: t.result.status ?? null, summary: cut(t.result.summary ?? null) } : null
+  };
+}
+
+export function threadsView(store, { project = null } = {}) {
+  const rows = store.threads({ project: project == null ? null : real(project), limit: 1000 }).sort(newestFirst);
+  const pairs = new Map();
+  for (const t of rows) {
+    const p = publicThread(store, t);
+    if (!pairs.has(p.pair)) pairs.set(p.pair, []);
+    pairs.get(p.pair).push(p);
+  }
+  // Rows are newest first, so the map is already ordered by each pair's newest thread.
+  return { pairs: [...pairs].map(([pair, threads]) => ({ pair, threads })) };
+}
+
+export function threadDetail(store, id) {
+  const t = store.thread(id);
+  if (!t) return null;
+  return {
+    thread: publicThread(store, t),
+    posts: store.threadPosts(id).map((p) => pick({ ...p, text: cut(p.text) }, THREAD_POST_FIELDS))
+  };
+}
