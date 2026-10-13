@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, realpathSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runLogPath } from '../src/workspace.js';
@@ -130,5 +131,47 @@ test('the report merges the run log with the store, oldest first', () => {
   assert.deepEqual(runs.map((r) => r.v), [1, 2]);
   assert.match(renderReport(project, { store }), /fix the login bug/);
   assert.match(renderReport(project, { store, all: true }), /2 delegation\(s\)/);
+  store.close();
+});
+
+function gitRepo(prefix) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const git = (...a) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { stdio: 'pipe' });
+  git('init', '-q');
+  git('commit', '-q', '--allow-empty', '-m', 'init');
+  return { dir, git };
+}
+
+test('store runs match by repo, so a subdirectory or a worktree sees its repo\'s runs', () => {
+  const a = gitRepo('at-report-a-');
+  const b = gitRepo('at-report-b-');
+  const sub = join(a.dir, 'sub');
+  mkdirSync(sub);
+  const wt = join(realpathSync(mkdtempSync(join(tmpdir(), 'at-report-wt-'))), 'wt');
+  a.git('worktree', 'add', '-q', wt);
+  const { store } = storeWithRun(sub);
+  assert.equal(storeRuns(store, a.dir).length, 1, 'recorded from a subdirectory, asked from the root');
+  assert.equal(storeRuns(store, wt).length, 1, 'asked from a worktree');
+  const second = storeWithRun(a.dir);
+  assert.equal(storeRuns(second.store, sub).length, 1, 'recorded at the root, asked from a subdirectory');
+  assert.deepEqual(storeRuns(store, b.dir), [], 'another repo is left out');
+  store.close();
+  second.store.close();
+});
+
+test('a member of a finished run that never reached an end state shows as stopped', () => {
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project: '/p', task: 't' });
+  const lead = store.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+  const kid = store.addMember({ runId, parentId: lead.id, name: 'kid', task: 't', depth: 1 });
+  const dead = store.addMember({ runId, parentId: lead.id, name: 'dead', task: 't', depth: 1 });
+  store.setRunRoot(runId, lead.id);
+  store.setState(lead.id, 'failed');
+  store.setState(kid.id, 'running');
+  store.setState(dead.id, 'cancelled');
+  store.finishRun(runId, 'failed');
+  const [run] = storeRuns(store, '/p');
+  assert.deepEqual(run.tree.delegated.map((n) => [n.member, n.status]), [['kid', 'stopped'], ['dead', 'cancelled']]);
+  assert.equal(run.tree.status, 'failed');
   store.close();
 });

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { runLogPath } from './workspace.js';
+import { mainCheckoutRoot, runLogPath } from './workspace.js';
 
 // Every record in the run log, oldest first. A line that does not parse (a write cut short)
 // is skipped rather than failing the whole report.
@@ -20,7 +20,8 @@ function storeTree(store, runId) {
   const rows = store.members(runId);
   const nodes = new Map(rows.map((m) => {
     const span = store.memberSpan(m.id);
-    const status = m.result?.status ?? (m.state === 'done' ? 'ok' : m.state);
+    // storeTree only sees finished runs, so a member still queued, running or paused was stopped with it.
+    const status = m.result?.status ?? (m.state === 'done' ? 'ok' : ['failed', 'cancelled'].includes(m.state) ? m.state : m.state ? 'stopped' : 'unknown');
     return [m.id, {
       member: m.name, ...(m.agent === 'team' ? { team: m.name } : {}),
       agent: m.agent ?? null, model: m.model ?? null, advisor: null,
@@ -42,8 +43,13 @@ function storeTree(store, runId) {
 // Finished runs of this project in the store, oldest first. Live runs never reach the run
 // log, which only dispatch() writes.
 export function storeRuns(store, projectRoot) {
-  return store.listRuns({ project: resolve(projectRoot), limit: -1 })
-    .filter((r) => r.status !== 'running')
+  // The run log is keyed by the repo's main checkout, so match the same way: a run recorded
+  // from a subdirectory or a worktree belongs to the repo. One git call per distinct path.
+  const roots = new Map();
+  const repoOf = (p) => { if (!roots.has(p)) roots.set(p, mainCheckoutRoot(p) ?? resolve(p)); return roots.get(p); };
+  const repo = repoOf(projectRoot);
+  return store.listRuns({ limit: -1 })
+    .filter((r) => r.status !== 'running' && repoOf(r.project) === repo)
     .reverse()
     .map((r) => ({ v: 2, id: r.id, at: new Date(r.created_at).toISOString(), project: r.project, task: r.task, tree: storeTree(store, r.id) }))
     .filter((r) => r.tree);
