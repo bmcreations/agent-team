@@ -8,7 +8,7 @@ import { resolveCaps, prepareMember, runMember, teamKeys, teamRoot, teamEntry, r
 import { pruneWorkspace } from './workspace.js';
 import { MemberSession } from './sessions.js';
 import { serveRpc, isListening } from './rpc.js';
-import { TEAM_NOTE } from './team-tools.js';
+import { liveNotes } from './team-tools.js';
 import { knownTeams, resolveTeam, scopeProject } from './teams.js';
 import { teamStatus } from './view.js';
 import { DEFAULT_TIMEOUT_MS } from './adapter.js';
@@ -818,7 +818,7 @@ export class Supervisor {
       skillText: prep.skillText, dialectText: prep.dialectText,
       timeoutSec: Math.floor(run.timeoutMs / 1000), depth: m.depth, maxDepth: scope.config.defaults.max_depth
     });
-    brief.task += TEAM_NOTE;
+    brief.task += liveNotes(brief);
     rt.session = new MemberSession({
       execPath: adapterPath(this.adapterDir, resolved.agent), cwd: prep.workspace.dir,
       env: { ...this.env, AGENT_TEAM_TEAM_SOCKET: this.socketPath, AGENT_TEAM_TEAM_TOKEN: m.token },

@@ -92,3 +92,18 @@ Use request to ask another team for help; their replies arrive through wait_for.
 If another team opens a thread with you, answer it with reply: state "accepted" before you delegate its task, "declined" with a reason, or "done" to answer a question.
 Give your final answer only after your reports have finished.
 `;
+
+// A read-only claude member runs in --permission-mode plan, whose own prompt tells the model to
+// write a plan and wait for approval. A lead on loupe did exactly that: it wrote its plan, ended
+// its turn without delegating, and the run finished with nothing done. Nothing approves that plan.
+export const PLAN_NOTE = `
+You are read-only so that you cannot edit files. Nobody reviews or approves a plan you write, and
+ExitPlanMode reaches no one: do not call it. Delegating with the team tools is how you act, and it
+is allowed while you are read-only. If you need a human's decision before going on, call ask_human
+and wait for the answer; ending your turn ends your part of the run.
+`;
+
+// What a live member is told after its brief: the team tools, and for a read-only lead, PLAN_NOTE.
+export function liveNotes(brief) {
+  return TEAM_NOTE + (brief.read_only && brief.can_delegate ? PLAN_NOTE : '');
+}
