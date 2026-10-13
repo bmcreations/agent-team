@@ -31,7 +31,7 @@ export function publicRun(store, row, ownSocket) {
 
 export const publicMessage = (row) => ({
   id: row.id, run_id: row.run_id, to_member: row.to_member, to_name: row.to_name,
-  from_kind: row.from_kind, from_name: row.from_name, report_id: row.report_id,
+  from_kind: row.from_kind, from_name: row.from_name, report_id: row.report_id, thread_id: row.thread_id ?? null,
   text: row.text, state: row.state, at: row.at
 });
 
@@ -178,7 +178,7 @@ function publicThread(store, t) {
     from_member: from ? { id: from.id, name: from.name } : null,
     owner: owner ? { id: owner.id, name: owner.name } : null,
     pair: `${base(t.from_project)} → ${base(t.to_project)}`,
-    result: t.result ? { status: t.result.status ?? null, summary: cut(t.result.summary ?? null) } : null
+    result: t.result ? { status: cut(t.result.status ?? null, 100), summary: cut(t.result.summary ?? null) } : null
   };
 }
 
