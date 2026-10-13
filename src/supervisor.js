@@ -89,8 +89,10 @@ export class Supervisor {
   send({ member_id, text, from = 'local' }) {
     const m = this.store.member(member_id);
     if (!m) throw new Error(`unknown member ${member_id}`);
-    // A stopping member has been told to stop and will not read another message.
-    if (TERMINAL.has(m.state) || this.#live.get(member_id)?.stopping) throw new Error(`"${m.name}" has finished — delegate a new task`);
+    // A stopping or cancelling member will not read another message. A pausing or paused one
+    // will, after it is resumed.
+    const rt = this.#live.get(member_id);
+    if (TERMINAL.has(m.state) || rt?.stopping || rt?.halt?.kind === 'cancel') throw new Error(`"${m.name}" has finished — delegate a new task`);
     if (typeof text !== 'string' || !text.trim()) throw new Error('a message needs text');
     const id = this.store.enqueue({ to: member_id, fromKind: 'human', fromName: from, text });
     this.#pump(member_id);
@@ -111,6 +113,116 @@ export class Supervisor {
   // Re-check the queue, e.g. after raising maxRunning.
   kick() {
     this.#drain();
+  }
+
+  // ---- intervention ----
+
+  // Pause: stop after the current turn (now: interrupt it). Cancel: interrupt and end as
+  // cancelled. Either keeps the workspace. With subtree, every unfinished member below too;
+  // members that cannot be stopped are listed in `skipped` instead of failing the call.
+  pause(p = {}) { return this.#intervene(p, 'pause'); }
+  cancel(p = {}) { return this.#intervene(p, 'cancel'); }
+
+  #intervene({ subtree = false, now = false, by = 'local', ...who } = {}, kind) {
+    const top = this.#target(who);
+    if (!subtree) {
+      this.#halt(top, kind, { now, by });
+      return { members: [{ id: top.id, name: top.name }], skipped: [] };
+    }
+    const members = [];
+    const skipped = [];
+    // Deepest first, so a report's notice is in its manager's inbox before the manager stops.
+    for (const m of this.#subtree(top.id).reverse()) {
+      try {
+        this.#halt(m, kind, { now, by });
+        members.push({ id: m.id, name: m.name });
+      } catch (err) {
+        skipped.push({ id: m.id, name: m.name, reason: err.message });
+      }
+    }
+    return { members, skipped };
+  }
+
+  // A member by id, or by run and name. Names repeat when a manager delegates to the same
+  // report twice; the latest unfinished one is meant.
+  #target({ member_id, run_id, member } = {}) {
+    if (member_id != null) {
+      const m = this.store.member(Number(member_id));
+      if (!m) throw new Error(`unknown member ${member_id}`);
+      return m;
+    }
+    if (run_id == null || typeof member !== 'string') throw new Error('name a member: member_id, or run_id and member');
+    const matches = this.store.members(Number(run_id)).filter((m) => m.name === member);
+    if (!matches.length) throw new Error(`run ${run_id} has no member "${member}"`);
+    return matches.filter((m) => !TERMINAL.has(m.state)).at(-1) ?? matches.at(-1);
+  }
+
+  #subtree(id) {
+    const out = [];
+    const walk = (mid) => { out.push(this.store.member(mid)); for (const c of this.store.children(mid)) walk(c.id); };
+    walk(id);
+    return out;
+  }
+
+  // | state                    | pause                              | cancel                      |
+  // | queued                   | paused at once                     | cancelled at once           |
+  // | paused                   | error                              | cancelled at once           |
+  // | launching (no session)   | marked; #launch stops before spawn | same                        |
+  // | running or waiting       | blocked call settled, then stop    | blocked call settled, then  |
+  // |                          | (now: interrupt)                   | interrupt                   |
+  // | one-shot (v1), stopping, finished, already halting: an error, nothing changes        |
+  #halt(m, kind, { now, by }) {
+    const verb = kind === 'pause' ? 'paused' : 'cancelled';
+    if (TERMINAL.has(m.state)) throw new Error(`"${m.name}" has already finished (${m.state})`);
+    const rt = this.#live.get(m.id);
+    if (!rt) {
+      if (kind === 'pause' && m.state === 'paused') throw new Error(`"${m.name}" is already paused`);
+      const i = this.#pending.indexOf(m.id);
+      if (i >= 0) this.#pending.splice(i, 1);
+      if (kind === 'cancel') return this.#conclude(m, 'cancelled', { status: 'failed', summary: `cancelled by ${by}` });
+      return this.#paused(m, { by, now: false });
+    }
+    if (rt.oneShot) throw new Error(`"${m.name}" runs one-shot and cannot be ${verb} — wait for its result`);
+    if (rt.halt?.kind === 'cancel') throw new Error(`"${m.name}" is already being cancelled`);
+    if (rt.halt && kind === 'pause' && (!now || rt.halt.now)) throw new Error(`"${m.name}" is already being paused`);
+    if (rt.stopping && !rt.halt) throw new Error(`"${m.name}" has finished its work and is stopping`);
+    rt.halt = { kind, now: now || kind === 'cancel', by };
+    // A harness cannot end its turn while a tool call is pending.
+    const note = this.#haltNote(rt);
+    if (rt.waiter) this.#settle(rt, { messages: [], timed_out: false, note });
+    if (rt.question) this.#settle(rt, { answer: null, timed_out: false, note });
+    if (!rt.session) return;   // still launching: #launch checks rt.halt before it spawns
+    if (rt.halt.now) rt.session.end(this.graceMs);
+    else rt.session.send({ type: 'stop' });
+  }
+
+  #haltNote(rt) {
+    return `${rt.halt.kind === 'pause' ? 'paused' : 'cancelled'} by ${rt.halt.by} — end your turn now`;
+  }
+
+  // A halting member's adapter has exited, or it never spawned.
+  #halted(id, rt) {
+    this.#live.delete(id);
+    for (const mid of rt.offered) this.store.requeue(mid);
+    this.#settle(rt, { error: 'member stopped' });
+    const { kind, by, now } = rt.halt;
+    if (kind === 'cancel') {
+      return this.#conclude(rt.member, 'cancelled', { status: 'failed', summary: `cancelled by ${by}` }, rt.workspace);
+    }
+    this.#paused(rt.member, { by, now });
+  }
+
+  #paused(m, { by, now }) {
+    this.store.setState(m.id, 'paused');
+    this.store.addEvent(m.id, 'paused', { by, now });
+    this.#notifyManager(m, `paused by ${by}`);
+    this.#drain();
+  }
+
+  #notifyManager(m, text) {
+    if (m.parent_id == null) return;
+    this.store.enqueue({ to: m.parent_id, fromKind: 'report', fromName: m.name, reportId: m.id, text });
+    this.#pump(m.parent_id);
   }
 
   // ---- scheduling ----
@@ -180,6 +292,7 @@ export class Supervisor {
     const ctx = this.#ctx(m);
     const r = await this.#resolve(m);
     if (r.error) throw r.error;
+    if (rt.halt) return this.#halted(id, rt);   // paused or cancelled while resolving
     // Teams in other projects and v1 adapters keep today's one-shot loop, with no session
     // for send_to to deliver to.
     if (r.team || r.caps.protocol !== 2) {
@@ -240,6 +353,8 @@ export class Supervisor {
       for (const mid of rt.offered) this.store.requeue(mid);
       return;
     }
+    // Pausing or cancelling wins over whatever the adapter reported on its way out.
+    if (rt.halt) return this.#halted(id, rt);
     this.#finish(id, rt.result ?? {
       status: 'failed',
       summary: `adapter exited with code ${code} before a result: ${stderr.trim().slice(-1000)}`
@@ -253,20 +368,24 @@ export class Supervisor {
     this.#live.delete(id);
     for (const mid of rt.offered) this.store.requeue(mid);
     this.#settle(rt, { error: 'member finished' });
-    const state = result.status === 'ok' ? 'done' : 'failed';
+    this.#conclude(rt.member, result.status === 'ok' ? 'done' : 'failed', result, rt.workspace);
+  }
+
+  // Records a member's terminal state, tells its manager or ends the run, and frees its slot.
+  // Also used for members that are not live: a cancelled queued or paused member.
+  #conclude(m, state, result, workspace = null) {
+    const id = m.id;
     this.store.setState(id, state);
     this.store.setResult(id, result);
-    this.store.addEvent(id, 'finished', { status: result.status });
-    if (state === 'done' && rt.workspace) pruneWorkspace(rt.workspace);
+    this.store.addEvent(id, 'finished', { status: result.status, state });
+    if (state === 'done' && workspace) pruneWorkspace(workspace);
 
-    const m = rt.member;
     if (m.parent_id != null) {
       const stat = result.artifacts?.diff_stat ? `\n${result.artifacts.diff_stat}` : '';
-      this.store.enqueue({
-        to: m.parent_id, fromKind: 'report', fromName: m.name, reportId: id,
-        text: `finished ${result.status}: ${result.summary ?? ''}${stat}`
-      });
-      this.#pump(m.parent_id);
+      // Every terminal notice opens with "finished ", so a manager waiting for its reports
+      // stops waiting on a cancelled one too.
+      const outcome = state === 'cancelled' ? 'cancelled' : result.status;
+      this.#notifyManager(m, `finished ${outcome}: ${result.summary ?? ''}${stat}`);
     } else {
       this.store.finishRun(m.run_id, state);
       for (const resolve of this.#runWaiters.get(m.run_id) ?? []) resolve(this.store.member(id).result);
@@ -291,7 +410,8 @@ export class Supervisor {
       if (msgs.length) this.#resolveWaiter(id, { messages: msgs.map(render), timed_out: false });
       return;
     }
-    if (rt.stopping) return;
+    // A halting member's messages wait in the inbox for its resume.
+    if (rt.stopping || rt.halt) return;
     const msgs = this.store.offerQueued(id);
     for (const m of msgs) {
       rt.offered.add(m.id);
@@ -352,7 +472,9 @@ export class Supervisor {
       submit: (p) => this.submit(p),
       wait_run: (p) => this.waitRun(p.run_id),
       send: (p) => this.send(p),
-      answer: (p) => this.answer(p)
+      answer: (p) => this.answer(p),
+      pause: (p) => this.pause(p),
+      cancel: (p) => this.cancel(p)
     };
     if (Object.hasOwn(admin, method)) return admin[method](params);
 
@@ -384,6 +506,7 @@ export class Supervisor {
     const rt = this.#live.get(id);
     const m = rt.member;
     const { config, budget } = this.#runs.get(m.run_id);
+    if (rt.halt) throw new Error(`delegation refused: ${this.#haltNote(rt)}`);
     if (typeof to !== 'string' || typeof task !== 'string' || !task.trim()) {
       throw new Error('delegate needs "to" (a report\'s name) and "task"');
     }
@@ -439,6 +562,7 @@ export class Supervisor {
   #waitFor(id, { report_ids = null, timeout_s } = {}) {
     const rt = this.#live.get(id);
     this.#assertNotBlocked(rt);
+    if (rt.halt) return { messages: [], timed_out: false, note: this.#haltNote(rt) };
     // Models often send ids as strings.
     const reportIds = Array.isArray(report_ids) ? report_ids.map(Number).filter(Number.isInteger) : null;
     const msgs = this.#claim(rt, id, reportIds);
@@ -475,6 +599,7 @@ export class Supervisor {
     if (typeof question !== 'string' || !question.trim()) throw new Error('ask_human needs "question"');
     const rt = this.#live.get(id);
     this.#assertNotBlocked(rt);
+    if (rt.halt) return { answer: null, timed_out: false, note: this.#haltNote(rt) };
     const opts = Array.isArray(options) ? options.filter((o) => typeof o === 'string') : null;
     const questionId = this.store.addQuestion({ memberId: id, question, options: opts });
     const seconds = clampSeconds(timeout_s, ASK_DEFAULT_S, ASK_MAX_S);

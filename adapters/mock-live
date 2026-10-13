@@ -26,8 +26,23 @@ if (sub === 'probe') {
 function session() {
   const queue = [];
   let wake = null;
+  // `interrupt` stands in for a harness's turn interrupt: a sleep is cut short, and at the
+  // next step boundary the adapter reports an interrupted idle and exits without a result.
+  // A tool call in flight is not abandoned: the supervisor settles blocking calls before it
+  // interrupts, so their results are still recorded.
+  let interrupted = false;
+  let onInterrupt;
+  const interruption = new Promise((r) => { onInterrupt = r; });
+  const quit = () => {
+    out({ type: 'idle', interrupted: true });
+    process.stdout.write('', () => process.exit(0));
+  };
   const rl = createInterface({ input: process.stdin });
-  rl.on('line', (line) => { queue.push(JSON.parse(line)); wake?.(); wake = null; });
+  rl.on('line', (line) => {
+    const m = JSON.parse(line);
+    if (m.type === 'interrupt') { interrupted = true; onInterrupt(); }
+    queue.push(m); wake?.(); wake = null;
+  });
   rl.on('close', () => { queue.push({ type: 'stop' }); wake?.(); wake = null; });
   const next = async () => {
     while (queue.length === 0) await new Promise((r) => { wake = r; });
@@ -71,9 +86,11 @@ function session() {
     };
 
     for (const step of entry.steps ?? []) {
+      if (interrupted) return quit();
       drainMessages();
       if (step.say) out({ type: 'event', kind: 'text', text: step.say });
-      if (step.sleep_ms) await new Promise((r) => setTimeout(r, step.sleep_ms));
+      if (step.sleep_ms) await Promise.race([new Promise((r) => setTimeout(r, step.sleep_ms)), interruption]);
+      if (interrupted) return quit();
       if (step.tool) {
         const args = subst(step.args ?? {});
         out({ type: 'event', kind: 'tool_call', name: step.tool, args });
@@ -92,6 +109,7 @@ function session() {
               if (m.text.startsWith('finished ')) done.add(m.report_id);
             }
             if (r.messages.length === 0 && !r.timed_out) break;   // nothing left to wait on
+            if (interrupted) break;
           }
           res = error ? { messages, error } : { messages };
         } else {
@@ -102,12 +120,14 @@ function session() {
         toolResults.push({ tool: step.tool, result: res });
       }
     }
+    if (interrupted) return quit();
     drainMessages();
     out({ type: 'idle' });
     for (;;) {
       const m = await next();
       if (m.type === 'message') { accept(m); out({ type: 'idle' }); continue; }
-      if (m.type === 'stop' || m.type === 'interrupt') break;
+      if (m.type === 'interrupt') return quit();
+      if (m.type === 'stop') break;
     }
     out({
       type: 'result',
