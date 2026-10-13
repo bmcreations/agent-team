@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary } from '../src/web/feed.js';
+import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary } from '../src/web/feed.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
 const XSS = '<img src=x onerror="alert(1)"></script><script>alert(2)</script>';
@@ -148,4 +148,19 @@ test('summary names who is working, paused and asking in one sentence', () => {
   assert.equal(summary(live, { questions: [{ member: 'lead' }] }), 'Engineer is working, 1 teammate is paused and lead needs you.');
   const many = ['a', 'b', 'c', 'd'].map((name) => ({ name, state: 'running' }));
   assert.equal(summary(many, { questions: [] }), 'A, b and 2 others are working.');
+});
+
+test('progress folds into one running task per member, not a line per update', () => {
+  const ev = (id, member_id, kind, text, at) => ({ id, member_id, member: `m${member_id}`, run_id: 1, kind, at, body: { text } });
+  const events = [ev(1, 1, 'progress', 'reading', 10), ev(2, 2, 'progress', 'spec', 11), ev(3, 1, 'tool_call', null, 12),
+                  ev(4, 1, 'progress', 'writing', 13), ev(5, 1, 'progress', '', 14)];
+  const t = tasks(events);
+  assert.deepEqual(t.map((x) => [x.member, x.latest.text, x.count]), [['m1', 'writing', 2], ['m2', 'spec', 1]]);
+  const feed = activity(events);
+  const mine = feed.find((e) => e.member_id === 1).items.filter((it) => it.kind === 'progress');
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].count, 3);
+  assert.equal(countLabel(3, 'progress'), '3 updates');
+  assert.equal(countLabel(3, 'tool_call'), '3 times');
+  assert.ok(!conversation({ events, messages: [] }).some((r) => r.kind === 'progress'));
 });

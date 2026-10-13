@@ -1,4 +1,4 @@
-import { describe, memberTree, activity, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, TERMINAL } from './feed.js';
+import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, TERMINAL } from './feed.js';
 
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
@@ -28,7 +28,7 @@ const ICONS = {
   pause: 'M9 6v12M15 6v12', now: 'M7 6v12M12 6v12M17 9l3 3-3 3', play: 'M8 5.5v13l10-6.5z', x: 'M6 6l12 12M18 6 6 18',
   tool: 'M14.5 6.5a4 4 0 0 0 5 5L13 18a2.1 2.1 0 0 1-3-3l6.5-6.5a4 4 0 0 0-2-2z', term: 'M5 7l5 5-5 5M12 17h7',
   lock: 'M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z', spark: 'M12 3v5M12 16v5M3 12h5M16 12h5M5.6 5.6l3.5 3.5M14.9 14.9l3.5 3.5M5.6 18.4l3.5-3.5M14.9 9.1l3.5-3.5',
-  device: 'M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM11 18h2', ext: 'M14 5h5v5M19 5l-8 8M17 14v5H5V7h5'
+  check: 'M5 12.5l4.5 4.5L19 7', device: 'M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM11 18h2', ext: 'M14 5h5v5M19 5l-8 8M17 14v5H5V7h5'
 };
 function icon(name, cls = '') {
   const svg = document.createElementNS(SVG, 'svg');
@@ -305,7 +305,7 @@ function drawActivity() {
           PHRASE[it.kind] && it.kind !== 'progress'
             ? h('span', { class: 'what note' }, PHRASE[it.kind](it.label === it.kind ? '' : it.label ?? ''))
             : h('span', { class: 'what' }, it.label || it.kind),
-          it.count > 1 ? h('span', { class: 'count' }, countLabel(it.count)) : null))),
+          it.count > 1 ? h('span', { class: 'count' }, countLabel(it.count, it.kind)) : null))),
         items.length > 4 ? h('button', { type: 'button', class: 'more', onclick: () => {
           if (S.open.has(e.member_id)) S.open.delete(e.member_id); else S.open.add(e.member_id);
           schedule();
@@ -357,17 +357,38 @@ function convoRow(r, run) {
     when(r.at));
 }
 
+// A running task, as Claude shows a subagent: one status line that updates in place, with a
+// spinner while the member works and the earlier updates folded behind a count.
+function glyph(state) {
+  if (state === 'running' || state === 'waiting') return h('span', { class: 'spin', role: 'img', 'aria-label': 'working' });
+  if (state === 'done') return icon('check', 'ok');
+  if (state === 'failed' || state === 'cancelled') return icon('x', 'bad');
+  return dot(state);
+}
+
+function taskLine({ state, who, steps, open }) {
+  const latest = steps.at(-1);
+  const shown = S.open.has(open);
+  return [glyph(state),
+    h('div', { class: 'body' },
+      h('div', { class: 'line' }, who ? [who, ' '] : null, h('span', { class: 'what' }, latest.text ?? describe(latest))),
+      h('div', { class: 'meta' }, when(latest.at), steps.length > 1 ? [' · ', h('button', { type: 'button', class: 'more', 'aria-expanded': String(shown),
+        onclick: () => { if (S.open.has(open)) S.open.delete(open); else S.open.add(open); schedule(); } },
+        shown ? 'Hide earlier' : `${steps.length - 1} earlier ${steps.length === 2 ? 'update' : 'updates'}`)] : null),
+      shown ? h('ol', { class: 'steps' }, steps.slice(0, -1).slice(-30).map((st) => h('li', {}, h('span', {}, st.text ?? describe(st)), ' ', when(st.at)))) : null)];
+}
+
 function drawRun() {
   const run = S.state?.run?.id === S.route.run ? S.state.run : S.detail?.run;
   if (!run) return $('view').replaceChildren(h('p', { class: 'loading' }, 'Loading…'));
   const members = S.state?.run?.id === S.route.run ? S.state.members : S.detail.members;
   if (!S.panel) {
-    S.panel = { head: h('header', { class: 'run-head' }), tree: h('ul', { class: 'tree' }), talk: h('ol', { class: 'talk' }),
+    S.panel = { head: h('header', { class: 'run-head' }), tree: h('ul', { class: 'tree' }), talk: h('ol', { class: 'talk' }), tasks: h('ul', { class: 'tasks' }),
                 member: h('aside', { class: 'card member' }), wrap: null, controls: null };
     S.panel.wrap = h('div', { class: 'run' },
       h('div', { class: 'run-main' },
         h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Team')), S.panel.tree),
-        h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Conversation')), S.panel.talk)),
+        h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Conversation')), S.panel.tasks, S.panel.talk)),
       h('div', { class: 'run-side' }, S.panel.member));
     $('view').replaceChildren(S.panel.head, S.panel.wrap);
   }
@@ -388,6 +409,13 @@ function drawRun() {
       pill(m.state)),
     m.children.length ? h('ul', {}, m.children.map(node)) : null);
   S.panel.tree.replaceChildren(...memberTree(members).map(node));
+  const states = new Map(members.map((x) => [x.id, x.state]));
+  const running = tasks(S.model.events).filter((t) => states.has(t.member_id))
+    .sort((a, b) => Number(TERMINAL.has(states.get(a.member_id))) - Number(TERMINAL.has(states.get(b.member_id))) || b.latest.at - a.latest.at);
+  S.panel.tasks.hidden = !running.length;
+  S.panel.tasks.replaceChildren(...running.map((t) => h('li', { class: `task${TERMINAL.has(states.get(t.member_id)) ? ' ended' : ''}` },
+    taskLine({ state: states.get(t.member_id), who: h('a', { href: memberHref(run.id, t.member_id) }, h('b', {}, t.member)),
+               steps: t.steps, open: `t${t.member_id}` }))));
   const talk = conversation(S.model).slice(-300);
   const atEnd = S.panel.talk.scrollHeight - S.panel.talk.scrollTop - S.panel.talk.clientHeight < 40;
   if (talk.length) keyed(S.panel.talk, talk, (r) => r.key, (r) => convoRow(r, run));
@@ -413,11 +441,12 @@ function drawMember(run, m) {
     p.result = h('div', { class: 'result' });
     p.facts = h('dl', { class: 'facts' });
     p.transcript = h('ol', { class: 'transcript' });
+    p.task = h('div', { class: 'progress now' });
     p.member.replaceChildren(
       h('a', { class: 'back', href: `#/run/${run.id}` }, icon('back'), 'Team'),
       p.mhead, p.mtask, p.result, p.controls.el,
       h('details', { class: 'more-facts' }, h('summary', {}, icon('chevron'), 'Details'), p.facts),
-      ...extras(m), h('h3', { class: 'subhead' }, 'Transcript'), p.transcript);
+      ...extras(m), h('h3', { class: 'subhead' }, 'Transcript'), p.task, p.transcript);
   }
   const hn = harness(m.agent);
   p.mhead.replaceChildren(avatar(m.name, { agent: m.agent, size: 'lg' }),
@@ -436,10 +465,13 @@ function drawMember(run, m) {
     ['cost', money(m.cost_usd) ?? '—'], ['tokens', m.tokens ? String(m.tokens) : '—']
   ].flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
   p.controls.update(run, m);
+  const mine = tasks(S.model.events.filter((e) => e.member_id === m.id))[0];
+  p.task.hidden = !mine;
+  if (mine) p.task.replaceChildren(...taskLine({ state: m.state, steps: mine.steps, open: `s${m.id}` }));
   const rows = [
-    ...S.model.events.filter((e) => e.member_id === m.id && e.kind !== 'tool_result'
+    ...S.model.events.filter((e) => e.member_id === m.id && e.kind !== 'tool_result' && e.kind !== 'progress' && !isProgressEcho(e)
       && !(e.kind === 'tool_call' && /^report_progress\b/.test(describe(e)))).map((e) => ({ at: e.at, key: `e${e.id}`, e })),
-    ...S.model.messages.filter((x) => x.to_member === m.id).map((x) => ({ at: x.at, key: `m${x.id}`, x }))
+    ...S.model.messages.filter((x) => x.to_member === m.id && !isProgressReport(x)).map((x) => ({ at: x.at, key: `m${x.id}`, x }))
   ].sort((a, b) => a.at - b.at).slice(-400);
   if (rows.length) keyed(p.transcript, rows, (r) => r.key, (r) => (r.e ? eventRow(r.e) : messageRow(r.x)));
   else p.transcript.replaceChildren(h('li', { class: 'sys' }, h('span', { class: 'what' }, 'Nothing yet.')));
@@ -450,7 +482,6 @@ function eventRow(e) {
   if (e.kind === 'text' || e.kind === 'user') {
     return h('li', { class: 'say' }, h('span', { class: 'what' }, said), h('span', { class: 'stamp' }, when(e.at)));
   }
-  if (e.kind === 'progress') return h('li', { class: 'progress' }, said);
   if (e.kind === 'tool_call' || e.kind === 'command') {
     const full = h('pre', { hidden: true });
     const li = h('li', { class: 'tool', role: 'button', tabindex: '0', 'aria-expanded': 'false' },

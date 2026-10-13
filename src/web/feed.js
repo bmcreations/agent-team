@@ -45,6 +45,13 @@ export function activity(events) {
       entries.set(e.member_id, entry);
     }
     const label = describe(e);
+    if (e.kind === 'progress') {
+      // A member's progress is one status that updates in place, not a line per update.
+      const i = entry.items.findIndex((it) => it.kind === 'progress');
+      const count = i < 0 ? 1 : entry.items.splice(i, 1)[0].count + 1;
+      entry.items.push({ id: e.id, kind: e.kind, label, count, at: e.at });
+      continue;
+    }
     const last = entry.items.at(-1);
     if (e.kind === 'tool_call' && last?.kind === 'tool_call' && last.label === label) {
       last.count++;
@@ -56,7 +63,21 @@ export function activity(events) {
   return [...entries.values()];
 }
 
-export const countLabel = (n) => (n > 1 ? `${n} times` : '');
+export const countLabel = (n, kind) => (n > 1 ? (kind === 'progress' ? `${n} updates` : `${n} times`) : '');
+
+// Each member's progress as one running task: the latest status, and the earlier ones behind it.
+export function tasks(events) {
+  const out = new Map();
+  for (const e of events) {
+    if (e.kind !== 'progress') continue;
+    const text = describe(e);
+    if (!text) continue;
+    let t = out.get(e.member_id);
+    if (!t) out.set(e.member_id, t = { member_id: e.member_id, member: e.member, run_id: e.run_id, steps: [] });
+    t.steps.push({ id: e.id, text, at: e.at });
+  }
+  return [...out.values()].map((t) => ({ ...t, latest: t.steps.at(-1), count: t.steps.length }));
+}
 
 export function todayCount(events, now = Date.now()) {
   const start = new Date(now);
@@ -112,7 +133,13 @@ export function mergeTimeline(model, batch, cap = 2000) {
   return { events: merge(model.events, batch.events), messages: merge(model.messages, batch.messages), cursor: batch.cursor ?? model.cursor };
 }
 
-const TEAM_KINDS = new Set(['started', 'delegated', 'progress', 'paused', 'resumed', 'interrupted', 'stalled',
+// The supervisor also passes each progress update up to the parent as a report message.
+export const isProgressReport = (m) => m.from_kind === 'report' && /^progress: /.test(m.text ?? '');
+// ...and the member's own transcript echoes it back when the parent reads it.
+export const isProgressEcho = (e) => e.kind === 'user' && /^\[from: [^\]\n]* \(report\)\] progress: /.test(e.body?.text ?? '');
+
+// Progress is left out: it shows as each member's running task above the conversation.
+const TEAM_KINDS = new Set(['started', 'delegated', 'paused', 'resumed', 'interrupted', 'stalled',
                             'timed_out', 'cost_cap', 'taken_over', 'handed_back', 'finished']);
 
 // The run as a team conversation: messages between members and humans, and the events the
@@ -124,7 +151,7 @@ export function conversation({ events, messages }) {
       return { type: 'event', at: e.at, key: `e${e.id}`, who: e.member, text: said ? `${e.kind}: ${said}` : e.kind,
                kind: e.kind, said };
     }),
-    ...messages.map((m) => ({ type: 'message', at: m.at, key: `m${m.id}`, who: `${m.from_name} (${m.from_kind}) → ${m.to_name}`, text: m.text,
+    ...messages.filter((m) => !isProgressReport(m)).map((m) => ({ type: 'message', at: m.at, key: `m${m.id}`, who: `${m.from_name} (${m.from_kind}) → ${m.to_name}`, text: m.text,
                               from: m.from_name, from_kind: m.from_kind, to: m.to_name }))
   ];
   return rows.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
