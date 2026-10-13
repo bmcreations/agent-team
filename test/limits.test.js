@@ -98,3 +98,17 @@ test('a resume that fails leaves the run cost cap as it was', async () => {
                   /max_cost_usd must be a positive number/);
   } finally { await sup.close(); }
 });
+
+test('a member pausing at the end of its turn still times out if the turn runs on', async () => {
+  const { root, script } = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ say: 'working' }, { sleep_ms: 30_000 }] } } });
+  const { sup, store } = await supervise(script, { graceMs: 200 });
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go', timeoutMs: 1000 });
+    await until(() => store.events(memberId).some((e) => e.kind === 'text'));
+    sup.pause({ member_id: memberId });
+    const result = await Promise.race([sup.waitRun(runId), sleep(8000).then(() => 'still pausing')]);
+    assert.deepEqual(result, { status: 'failed', summary: 'timed out after 1s of work' });
+    assert.equal(store.member(memberId).state, 'failed');
+    assert.ok(store.events(memberId).some((e) => e.kind === 'timed_out'));
+  } finally { await sup.close(); }
+});

@@ -430,7 +430,8 @@ export class Supervisor {
 
   // Every tickMs. Only a member doing work counts toward its timeout and its stall clock: one
   // blocked in wait_for or ask_human, idle between turns, or already stopping is waiting on
-  // someone else. The timeout counts from each launch, so a resumed member gets it afresh.
+  // someone else. A plain pause waits for the current turn, which still counts: a turn that
+  // runs past the timeout is ended and the member fails as timed out, not paused. The timeout counts from each launch, so a resumed member gets it afresh.
   #tick() {
     const at = Date.now();
     // One late tick (a busy event loop) must not charge a burst of work at once.
@@ -438,7 +439,9 @@ export class Supervisor {
     this.#lastTick = at;
     for (const [id, rt] of this.#live) {
       if (!rt.session) continue;
-      if (rt.waiter || rt.question || rt.idle || rt.halt || rt.stopping) { rt.quietSince = at; continue; }
+      // A member pausing at the end of its turn is still working that turn.
+      const finishingTurn = rt.halt?.kind === 'pause' && !rt.halt.now;
+      if (rt.waiter || rt.question || rt.idle || (rt.halt && !finishingTurn) || rt.stopping) { rt.quietSince = at; continue; }
       rt.activeMs += elapsed;
       const { timeoutMs, config } = this.#runs.get(rt.member.run_id);
       if (rt.activeMs >= timeoutMs) {
