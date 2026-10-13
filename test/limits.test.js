@@ -15,9 +15,9 @@ test('a quiet working member is reported stalled to its manager, once', async ()
   const { root, script } = project({ lead: LIVE(), worker: LIVE({ reports_to: 'lead' }) }, {
     by_member: {
       lead: { steps: [{ tool: 'delegate', args: { to: 'worker', task: 'w' } }, { tool: 'wait_for', args: {} }] },
-      worker: { steps: [{ sleep_ms: 1500 }] }
+      worker: { steps: [{ sleep_ms: 3500 }] }
     }
-  }, { stall_minutes: 0.005 });   // 0.3 s
+  }, { stall_minutes: 0.02 });   // 1.2 s: longer than an adapter takes to start under load
   const { sup, store } = await supervise(script);
   try {
     const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
@@ -46,9 +46,9 @@ test('time blocked in wait_for does not count toward the timeout', async () => {
   const { root, script } = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }] } } });
   const { sup, store } = await supervise(script);
   try {
-    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go', timeoutMs: 300 });
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go', timeoutMs: 2000 });
     await until(() => store.member(memberId).state === 'waiting');
-    await sleep(600);
+    await sleep(3000);
     sup.send({ member_id: memberId, text: 'done waiting' });
     assert.equal((await sup.waitRun(runId)).status, 'ok');
   } finally { await sup.close(); }

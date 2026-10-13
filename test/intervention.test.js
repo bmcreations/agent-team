@@ -105,7 +105,7 @@ test('a queued member is paused or cancelled at once', async () => {
 
 test('verbs out of order are refused and change nothing', async () => {
   const { root, script } = project({ solo: LIVE(), old: { agent: 'mock', isolation: 'none' } }, {
-    by_member: { solo: { steps: [] }, old: { hang: true } }
+    by_member: { solo: { steps: [] }, old: [{ hang: true }] }
   });
   const { sup, store } = await supervise(script);
   try {
@@ -115,8 +115,9 @@ test('verbs out of order are refused and change nothing', async () => {
     assert.equal(store.member(done.memberId).state, 'done');
 
     // A v1 adapter that never answers; the run's timeout ends it after the assertions.
-    const v1 = sup.submit({ projectRoot: root, member: 'old', task: 'go', timeoutMs: 1500 });
-    await new Promise((r) => setTimeout(r, 500));   // past resolution, into the one-shot run
+    const v1 = sup.submit({ projectRoot: root, member: 'old', task: 'go', timeoutMs: 3000 });
+    // The mock writes its call counter when it runs, which is past resolution, in the one-shot run.
+    await until(() => existsSync(`${script}.calls.json`));
     assert.throws(() => sup.pause({ member_id: v1.memberId }), /"old" runs one-shot and cannot be paused/);
     assert.equal(store.member(v1.memberId).state, 'running');
     await sup.waitRun(v1.runId);

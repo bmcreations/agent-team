@@ -433,7 +433,8 @@ export class Supervisor {
   // someone else. The timeout counts from each launch, so a resumed member gets it afresh.
   #tick() {
     const at = Date.now();
-    const elapsed = at - (this.#lastTick ?? at);
+    // One late tick (a busy event loop) must not charge a burst of work at once.
+    const elapsed = Math.min(at - (this.#lastTick ?? at), 2 * this.tickMs);
     this.#lastTick = at;
     for (const [id, rt] of this.#live) {
       if (!rt.session) continue;
@@ -600,7 +601,7 @@ export class Supervisor {
     // Registered before any await, so #drain counts this member against the caps at once.
     const rt = { member: m, session: null, resolved: null, caps: null, workspace: null, result: null,
                  offered: new Set(), staleOffers: new Set(), idle: false, stopping: false, waiter: null, question: null,
-                 activeMs: 0, quietSince: Date.now(), stalled: false };
+                 activeMs: 0, quietSince: null, stalled: false };
     this.#live.set(id, rt);
     this.store.setState(id, 'running');
     this.store.addEvent(id, 'started', {});
@@ -640,6 +641,7 @@ export class Supervisor {
       onLine: (msg) => this.#onLine(id, msg),
       onExit: (code, stderr) => this.#onExit(id, code, stderr)
     });
+    rt.quietSince = Date.now();   // resolving and preparing the workspace are not quiet time
     // With no harness session to resume, the note rides along with the task instead.
     if (resume && !m.resume) brief.task += `\n\n${resume.note}`;
     rt.session.send({
