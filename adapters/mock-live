@@ -33,10 +33,13 @@ function session() {
   let interrupted = false;
   let onInterrupt;
   const interruption = new Promise((r) => { onInterrupt = r; });
-  const quit = () => {
+  // `interrupt_linger_ms` in the member's script holds the exit back, so a test can act while
+  // the member is being halted.
+  let lingerMs = 0;
+  const quit = () => setTimeout(() => {
     out({ type: 'idle', interrupted: true });
     process.stdout.write('', () => process.exit(0));
-  };
+  }, lingerMs);
   const rl = createInterface({ input: process.stdin });
   rl.on('line', (line) => {
     const m = JSON.parse(line);
@@ -72,6 +75,7 @@ function session() {
     const brief = start.brief;
     const script = JSON.parse(readFileSync(process.env.AGENT_TEAM_MOCK_SCRIPT, 'utf8'));
     const entry = script.by_member?.[brief.member] ?? script;
+    lingerMs = entry.interrupt_linger_ms ?? 0;
     // A resumed session keeps the id it was given; a fresh one makes its own. On resume the
     // member plays `on_resume.steps` instead of `steps`.
     out({ type: 'session', harness_id: `mock-live-${brief.member}-${process.pid}`,

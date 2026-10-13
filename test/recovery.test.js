@@ -117,6 +117,44 @@ test('a mid-level cancel in flight when the supervisor closes takes its reports 
   } finally { await sup.close(); }
 });
 
+// Same window for a mid-level timeout: live, a failed manager's reports are cancelled, so close()
+// must do the same. The worker waits on a human, so only the busy mid accrues work time, and mid
+// lingers after its interrupt so the close() lands while the timeout is in flight.
+test('a mid-level timeout in flight when the supervisor closes takes its reports with it', async () => {
+  const { root, script } = project({
+    lead: LIVE(), mid: LIVE({ reports_to: 'lead' }), worker: LIVE({ reports_to: 'mid' })
+  }, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'mid', task: 'm' }, save: 'r' },
+        { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }
+      ], on_resume: { steps: [] } },
+      mid: { steps: [{ tool: 'delegate', args: { to: 'worker', task: 'w' } }, { sleep_ms: 30_000 }],
+             interrupt_linger_ms: 2000 },
+      worker: { steps: [{ tool: 'ask_human', args: { question: 'a or b?' } }], on_resume: { steps: [] } }
+    }
+  });
+  const first = await supervise(script);
+  const { store } = first;
+  const { runId, memberId: leadId } = first.sup.submit({ projectRoot: root, member: 'lead', task: 'go', timeoutMs: 4000 });
+  const mid = () => store.children(leadId)[0];
+  const worker = () => mid() && store.children(mid().id)[0];
+  try {
+    await until(() => mid() && store.events(mid().id).some((e) => e.kind === 'timed_out'), 20_000);
+    // Only mid may have timed out: the lead's own boot under load must not reach the limit too.
+    assert.equal(store.member(leadId).state, 'waiting', JSON.stringify([store.member(leadId), mid(), worker()].map((m) => m && m.state)));
+  } finally { await first.sup.close(); }
+  assert.equal(store.member(mid().id).state, 'failed');
+  assert.equal(store.member(worker().id).state, 'cancelled');
+
+  const { sup } = await supervise(script, { store });
+  try {
+    assert.deepEqual(await sup.recover(), { recovered: [runId], failed: [] });
+    await sup.waitRun(runId);
+    assert.equal(store.events(worker().id).filter((e) => e.kind === 'started').length, 1, 'the worker was relaunched');
+  } finally { await sup.close(); }
+});
+
 test('a run whose project config is gone fails with the reason; other runs still recover', async () => {
   const a = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } } });
   const b = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } } });

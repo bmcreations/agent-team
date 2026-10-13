@@ -420,13 +420,11 @@ export class Supervisor {
       this.store.addEvent(x.id, 'finished', { status: res.status, state: st });
     };
     record(m, state, result);
-    // A root's reports always go with it. A mid-level manager's go with it only on a cancel:
-    // a mid-level timeout recorded here leaves them `running`, and recover() relaunches them.
-    if (m.parent_id == null || kind === 'cancel') {
-      const cascaded = { status: 'failed', summary: `cancelled by ${cascadeBy(m, state, kind === 'cancel' ? by : null)}` };
-      for (const d of this.#subtree(m.id).slice(1)) {
-        if (!TERMINAL.has(d.state)) record(d, 'cancelled', cascaded);
-      }
+    // A cancelled or failed manager's reports go with it, as they do live; otherwise recover()
+    // relaunches them under a manager that has finished.
+    const cascaded = { status: 'failed', summary: `cancelled by ${cascadeBy(m, state, kind === 'cancel' ? by : null)}` };
+    for (const d of this.#subtree(m.id).slice(1)) {
+      if (!TERMINAL.has(d.state)) record(d, 'cancelled', cascaded);
     }
     if (m.parent_id != null) {
       this.#enqueueNotice(m, `finished ${kind === 'cancel' ? 'cancelled' : 'failed'}: ${result.summary}`);
