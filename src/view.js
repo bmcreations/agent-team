@@ -178,7 +178,7 @@ function publicThread(store, t) {
   return {
     ...pick({ ...t, task: cut(t.task) }, THREAD_FIELDS),
     from_member: from ? { id: from.id, name: from.name } : null,
-    owner: owner ? { id: owner.id, name: owner.name } : null,
+    owner: owner ? { id: owner.id, name: owner.name, run_id: owner.run_id } : null,
     pair: `${base(t.from_project)} → ${base(t.to_project)}`,
     result: t.result ? { status: cut(t.result.status ?? null, 100), summary: cut(t.result.summary ?? null) } : null
   };

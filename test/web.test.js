@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount, threadTouched, canPostToThread } from '../src/web/feed.js';
+import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount, threadTouched, canPostToThread, threadRunIds } from '../src/web/feed.js';
 import { publicMessage } from '../src/view.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
@@ -215,13 +215,19 @@ test('threadTouched: a thread message for this thread, any thread on the list, o
 
 test('canPostToThread: only an open thread with a steerable run on a side', () => {
   const live = { id: 1, status: 'running', steerable: true };
-  assert.equal(canPostToThread({ state: 'open' }, [live]), true);
-  assert.equal(canPostToThread({ state: 'accepted' }, [{ id: 2, status: 'done', steerable: false }, live]), true);
-  assert.equal(canPostToThread({ state: 'open' }, [{ id: 2, status: 'done', steerable: false }]), false, 'finished');
-  assert.equal(canPostToThread({ state: 'open' }, [{ id: 2, status: 'running', steerable: false }]), false, 'not serve\'s');
-  assert.equal(canPostToThread({ state: 'open' }, []), false, 'runs missing');
-  assert.equal(canPostToThread({ state: 'done' }, [live]), false, 'closed');
-  assert.equal(canPostToThread({ state: 'declined' }, [live]), false, 'closed');
+  const done = { id: 2, status: 'done', steerable: false };
+  const mine = { id: 3, status: 'running', steerable: false };
+  assert.equal(canPostToThread({ state: 'open', from_run: 1 }, [live]), true);
+  assert.equal(canPostToThread({ state: 'accepted', from_run: 2, run_id: 1 }, [done, live]), true);
+  assert.equal(canPostToThread({ state: 'open', from_run: 2 }, [done, live]), false, 'a live run on neither side');
+  assert.equal(canPostToThread({ state: 'open', from_run: 2, owner: { run_id: 1 } }, [done, live]), true, 'a live lead owns it');
+  assert.equal(canPostToThread({ state: 'open', from_run: 2 }, [done]), false, 'finished');
+  assert.equal(canPostToThread({ state: 'open', from_run: 3 }, [mine]), false, 'not serve\'s');
+  assert.equal(canPostToThread({ state: 'open', from_run: 1 }, []), false, 'runs missing');
+  assert.equal(canPostToThread({ state: 'done', from_run: 1 }, [live]), false, 'closed');
+  assert.equal(canPostToThread({ state: 'declined', from_run: 1 }, [live]), false, 'closed');
+  assert.deepEqual(threadRunIds({ from_run: 1, run_id: 1, owner: { run_id: 4 } }), [1, 4]);
+  assert.deepEqual(threadRunIds({ from_run: 1, run_id: null, owner: null }), [1]);
 });
 
 test('a thread result status is cut to 100 characters', async () => {

@@ -236,6 +236,19 @@ test('threads group by team pair, newest pair first, with no chain and only allo
   } finally { await web.close(); store.close(); }
 });
 
+test('a thread exposes the run of the lead that owns it', async () => {
+  const { store, t2 } = seededThreads();
+  const run = store.createRun({ project: '/b', task: 'own work' });
+  const lead = store.addMember({ runId: run, parentId: null, name: 'lead', task: 't', depth: 0 });
+  store.setThreadOwner(t2, lead.id ?? lead.memberId ?? lead);
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const d = (await get(web.url, `/api/threads/${t2}`)).json.thread;
+    assert.deepEqual(d.owner, { id: lead.id ?? lead.memberId ?? lead, name: 'lead', run_id: run });
+    assert.equal((await get(web.url, '/api/threads/3')).json.thread.owner, null);
+  } finally { await web.close(); store.close(); }
+});
+
 test('thread text is clipped in the view and kept whole in the store', async () => {
   const { store, t1 } = seededThreads();
   const long = 'x'.repeat(10_000);

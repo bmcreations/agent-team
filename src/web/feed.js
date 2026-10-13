@@ -176,7 +176,12 @@ export const threadTouched = (batch, id = null) =>
   (batch.messages ?? []).some((m) => m.thread_id != null && (id == null || m.thread_id === id))
   || (batch.events ?? []).some((e) => e.kind === 'thread_opened');
 
+// The runs a thread involves: the requester's, the run started for it, and the run of the lead
+// that owns it (the same as the second when it started one).
+export const threadRunIds = (t) => [...new Set([t.from_run, t.run_id, t.owner?.run_id].filter((r) => r != null))];
+
 // Humans post only to an open or accepted thread, and only through the serve process that owns a
-// live run on one side; `runs` are those runs' public rows, absent ones left out.
+// live run on one side; `runs` are the page's public run rows, any that are absent left out.
 export const canPostToThread = (thread, runs) =>
-  (thread.state === 'open' || thread.state === 'accepted') && runs.some((r) => r.steerable === true);
+  (thread.state === 'open' || thread.state === 'accepted') &&
+  threadRunIds(thread).some((id) => runs.find((r) => r.id === id)?.steerable === true);
