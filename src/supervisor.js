@@ -397,9 +397,9 @@ export class Supervisor {
 
   // A halt under way when the supervisor closes, written straight to the store: #halted would
   // drain the queue and pump inboxes, launching work on a supervisor that is going away. The
-  // manager's notice waits in its inbox. A member that ends takes its unfinished reports with
-  // it, as #conclude does, or recover() would relaunch them under a manager that is gone (or,
-  // for a root, they would sit `running` in a finished run that recover() never looks at).
+  // manager's notice waits in its inbox. A root that ends, or a member that is cancelled, takes
+  // its unfinished reports with it, as #conclude does, or recover() would relaunch them under a
+  // manager that is gone (or, for a root, they would sit `running` in a finished run).
   #recordHalt(rt) {
     const m = rt.member;
     const { kind, by, now } = rt.halt;
@@ -420,9 +420,13 @@ export class Supervisor {
       this.store.addEvent(x.id, 'finished', { status: res.status, state: st });
     };
     record(m, state, result);
-    const cascaded = { status: 'failed', summary: `cancelled by ${cascadeBy(m, state, kind === 'cancel' ? by : null)}` };
-    for (const d of this.#subtree(m.id).slice(1)) {
-      if (!TERMINAL.has(d.state)) record(d, 'cancelled', cascaded);
+    // A root's reports always go with it. A mid-level manager's go with it only on a cancel:
+    // a mid-level timeout recorded here leaves them `running`, and recover() relaunches them.
+    if (m.parent_id == null || kind === 'cancel') {
+      const cascaded = { status: 'failed', summary: `cancelled by ${cascadeBy(m, state, kind === 'cancel' ? by : null)}` };
+      for (const d of this.#subtree(m.id).slice(1)) {
+        if (!TERMINAL.has(d.state)) record(d, 'cancelled', cascaded);
+      }
     }
     if (m.parent_id != null) {
       this.#enqueueNotice(m, `finished ${kind === 'cancel' ? 'cancelled' : 'failed'}: ${result.summary}`);
