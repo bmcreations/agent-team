@@ -688,7 +688,7 @@ export class Supervisor {
       type: 'start', brief,
       resume: resume ? m.resume : null,
       note: resume && m.resume ? resume.note : null,
-      ...(resume && m.resume ? { cost_usd: m.cost_usd } : {})
+      ...(resume && m.resume ? { cost_usd: m.cost_usd, tokens: m.tokens } : {})
     });
     this.#pump(id);   // anything sent while the member was queued
   }
@@ -718,6 +718,7 @@ export class Supervisor {
       rt.staleOffers = new Set(rt.offered);
       rt.idle = true;
       if (msg.cost_usd) this.#spend(rt.member.run_id, id, msg.cost_usd);
+      if (msg.tokens) this.store.addTokens(rt.member.run_id, id, msg.tokens);   // never counts toward the cost cap
       this.#pump(id);
     } else if (msg.type === 'result') rt.result = msg;
   }

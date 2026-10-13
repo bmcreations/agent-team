@@ -57,3 +57,14 @@ test('session.resume and the idle fields are shape-checked', () => {
   bad({ type: 'idle', cost_usd: -1 });
   bad({ type: 'idle', cost_usd: 'NaN' });
 });
+
+test('idle.tokens must be a non-negative integer', () => {
+  const ok = (m) => assert.ok(parseAdapterLine(JSON.stringify(m)), JSON.stringify(m));
+  const bad = (m) => assert.equal(parseAdapterLine(JSON.stringify(m)), null, JSON.stringify(m));
+  ok({ type: 'idle', tokens: 5 });
+  ok({ type: 'idle', tokens: 0 });
+  ok({ type: 'idle', tokens: null });
+  bad({ type: 'idle', tokens: -1 });
+  bad({ type: 'idle', tokens: 1.5 });
+  bad({ type: 'idle', tokens: '5' });
+});

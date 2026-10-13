@@ -223,7 +223,7 @@ export function runCodexSession({ artifacts }) {
 
   function onServerExit(code, signal) {
     // An interrupt answers with idle, not a result.
-    if (interrupting && !startError) return log.end(() => process.exit(0));
+    if (interrupting && !startError) return log.end(() => process.stdout.write('', () => process.exit(0)));
     const usage = { tokens: reported, session_id: threadId, turns };
     let outcome;
     if (startError) outcome = { status: 'failed', summary: startError };

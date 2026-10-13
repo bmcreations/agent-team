@@ -41,7 +41,10 @@ const MIGRATIONS = [
   // listens there any more.
   `ALTER TABLE runs ADD COLUMN owner TEXT;`,
   // What each member has spent, handed to its adapter as the cost baseline on resume.
-  `ALTER TABLE members ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;`
+  `ALTER TABLE members ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;`,
+  // Token usage, for harnesses that report tokens and no dollar cost (codex).
+  `ALTER TABLE members ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE runs ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0;`
 ];
 
 function migrate(db) {
@@ -92,6 +95,10 @@ export function openStore(path) {
     runsWithStatus: (status) => q('SELECT * FROM runs WHERE status = ? ORDER BY id').all(status),
     setBudget: (id, left) => q('UPDATE runs SET budget = ? WHERE id = ?').run(left, id),
     setRunCap: (id, usd) => q('UPDATE runs SET max_cost_usd = ? WHERE id = ?').run(usd, id),
+    addTokens(id, memberId, n) {
+      q('UPDATE runs SET tokens = tokens + ? WHERE id = ?').run(n, id);
+      q('UPDATE members SET tokens = tokens + ? WHERE id = ?').run(n, memberId);
+    },
     // Adds to the run's spend and, given a member, to that member's. Returns the run's total.
     addRunCost(id, usd, memberId = null) {
       q('UPDATE runs SET cost_usd = cost_usd + ? WHERE id = ?').run(usd, id);

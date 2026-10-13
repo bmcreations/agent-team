@@ -185,3 +185,25 @@ test('runs record their owner, and recovery queries find running runs and offere
   store.requeueOffered(lead.id);
   assert.equal(store.message(a).state, 'queued');
 });
+
+test('a version 3 database gains token columns at 0, and reopening changes nothing', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig4-')), 's.db');
+  const first = openStore(path);
+  const runId = first.createRun({ project: '/p', task: 't' });
+  const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+  first.close();
+  const raw = new DatabaseSync(path);   // rewind to version 3: no token columns
+  raw.exec('ALTER TABLE members DROP COLUMN tokens; ALTER TABLE runs DROP COLUMN tokens; PRAGMA user_version = 3');
+  raw.close();
+  const store = openStore(path);
+  assert.equal(store.member(lead.id).tokens, 0);
+  assert.equal(store.run(runId).tokens, 0);
+  store.addTokens(runId, lead.id, 7);
+  store.addTokens(runId, lead.id, 5);
+  assert.equal(store.member(lead.id).tokens, 12);
+  assert.equal(store.run(runId).tokens, 12);
+  store.close();
+  const again = openStore(path);
+  assert.equal(again.run(runId).tokens, 12);
+  again.close();
+});
