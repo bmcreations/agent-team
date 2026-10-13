@@ -236,6 +236,16 @@ The dispatcher loads that project's config and runs its entry member at depth 0 
 team, so the other team's `max_depth` bounds the tree below it. Each of its members works in
 a filtered clone of its own repository, built with its own `deny_paths`.
 
+Under `agent-team serve`, a `team:` member that names a local repository joins the run live.
+Delegating to it starts that repository's entry member as a report of the manager: it shows in
+the run's tree, can be messaged (by the name the manager knows, or its own), paused, resumed,
+cancelled and taken over like any member, and its own reports work under that repository's
+config — its `deny_paths` build their workspaces and its `max_depth` bounds the tree below the
+entry member. Every delegation inside it spends the run's `max_delegations` and the entered
+team's own, whichever runs out first. A team the run has already passed through is refused.
+Without `serve` (a CLI run with its own in-process supervisor), a team member still runs
+one-shot, as below. Teams named by GitHub repository always run one-shot.
+
 Its runs still spend this dispatch's `max_delegations`. The other team starts with whichever
 is smaller, its own `max_delegations` or what this dispatch has left, and what it uses comes
 off this dispatch's budget.
