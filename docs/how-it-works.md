@@ -51,6 +51,25 @@ relaunched.
 rest queue. It is per manager, not per run, so a run with several managers can have more
 members running. `serve` also caps running members across all runs at 6.
 
+### Steering a live run
+
+These verbs reach only a supervisor started with `agent-team serve`; a run that a CLI started
+in-process cannot be steered from another terminal. Members are named by run id and name.
+
+```
+agent-team pause <run> <member> [--now] [--subtree]
+agent-team resume <run> <member> [--subtree] [--note <text>] [--max-cost-usd <usd>]
+agent-team cancel <run> <member> [--subtree]
+agent-team questions [<run>] [--json]
+agent-team answer <question-id> <answer>
+```
+
+`pause` lets the current turn finish; `--now` interrupts it, so a command it started may have
+partly run. `resume` starts the member again from its harness session in the same workspace
+and delivers anything sent to it while paused. `cancel` keeps the workspace. `--subtree`
+applies the verb to the member and every report under it. Each verb is signed with your OS
+user name, which is what the member and its manager are told.
+
 ## Resolving the agent
 
 The dispatcher runs `adapters/<agent> probe`. A zero exit within 30 seconds means the agent is

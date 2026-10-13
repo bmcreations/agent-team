@@ -11,6 +11,7 @@ import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
+import { adminCall, memberArgs, whoAmI, renderQuestions } from '../src/admin.js';
 import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,7 +25,11 @@ const { values, positionals } = parseArgs({
     timeout: { type: 'string', default: '900' },
     all: { type: 'boolean', default: false },
     json: { type: 'boolean', default: false },
-    session: { type: 'string' }
+    session: { type: 'string' },
+    now: { type: 'boolean', default: false },
+    subtree: { type: 'boolean', default: false },
+    note: { type: 'string' },
+    'max-cost-usd': { type: 'string' }
   }
 });
 
@@ -36,7 +41,12 @@ const USAGE =
   '       agent-team serve\n' +
   '       agent-team channel enable|disable [--project <dir>]\n' +
   '       agent-team channel list [--json]\n' +
-  '       agent-team channel ask --task <text> [--session <id>] [--project <dir>] [--timeout <sec>]\n';
+  '       agent-team channel ask --task <text> [--session <id>] [--project <dir>] [--timeout <sec>]\n' +
+  '       agent-team pause <run> <member> [--now] [--subtree]\n' +
+  '       agent-team resume <run> <member> [--subtree] [--note <text>] [--max-cost-usd <usd>]\n' +
+  '       agent-team cancel <run> <member> [--subtree]\n' +
+  '       agent-team questions [<run>] [--json]\n' +
+  '       agent-team answer <question-id> <answer>\n';
 
 // Any throw here — a broken config, a bad org chart, a member resolution failure — must
 // reach the caller (the delegate skill included) as the same JSON shape a normal run
@@ -153,6 +163,39 @@ if (positionals[0] === 'channel') {
   }
   process.stderr.write(USAGE);
   process.exit(2);
+}
+
+// Steering verbs: each is one admin RPC to the `agent-team serve` supervisor.
+const usd = (v) => {
+  if (v == null) return null;
+  if (!(Number(v) > 0 && Number.isFinite(Number(v)))) throw new Error(`--max-cost-usd must be a positive number of dollars, got "${v}"`);
+  return Number(v);
+};
+const ADMIN = {
+  pause: (p) => ['pause', { ...memberArgs(p), now: values.now, subtree: values.subtree, by: whoAmI() }],
+  cancel: (p) => ['cancel', { ...memberArgs(p), subtree: values.subtree, by: whoAmI() }],
+  resume: (p) => ['resume', {
+    ...memberArgs(p), subtree: values.subtree, by: whoAmI(), note: values.note ?? null,
+    max_cost_usd: usd(values['max-cost-usd'])
+  }],
+  questions: ([run]) => ['questions', { run_id: run == null ? null : Number(run) }],
+  answer: ([id, ...text]) => {
+    if (!Number.isInteger(Number(id)) || !text.length) throw new Error('usage: agent-team answer <question-id> <answer>');
+    return ['answer', { question_id: Number(id), answer: text.join(' '), by: whoAmI() }];
+  }
+};
+if (Object.hasOwn(ADMIN, positionals[0])) {
+  try {
+    const [method, params] = ADMIN[positionals[0]](positionals.slice(1));
+    const result = await adminCall(method, params);
+    process.stdout.write(method === 'questions' && !values.json
+      ? renderQuestions(result)
+      : JSON.stringify(result, null, 2) + '\n');
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(`agent-team: ${err.message}\n`);
+    process.exit(1);
+  }
 }
 
 if (!values.member || !values.task) {
