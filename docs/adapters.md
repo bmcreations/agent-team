@@ -23,7 +23,7 @@ on an unknown subcommand.
 
 A `run` result needs `status`, one of `ok`, `failed`, `timeout` or `delegating`, and on `ok`,
 a string `summary`. An optional `usage` object is copied into the run log; only the claude
-adapter sets it, so codex and grok members show `—` in the report. `delegating` also needs `delegations`; see
+adapter sets it (a codex session reports `tokens` in its `usage`), so codex `run` and grok members show `—` in the report. `delegating` also needs `delegations`; see
 [Delegation](how-it-works.md#delegation). Everything else in the object is passed through to
 the caller. The brief's fields are listed in [The brief](how-it-works.md#the-brief).
 
@@ -45,18 +45,27 @@ The supervisor enforces the run's timeout on a session by counting only the time
 time blocked in `wait_for` or `ask_human`, or idle between turns, does not count, and a resumed
 session starts a fresh count. Past the timeout it sends `interrupt` and fails the member.
 
+An adapter that can hand its sessions to a human also reports `takeover: {notice}` from
+`capabilities` (`notice` is a string, or null; `{cwd}` is filled in) and implements
+`<adapter> attach <resume>`. `agent-team attach` runs `[<adapter>, 'attach', <resume>]` in the
+member's workspace with the terminal inherited, after the member's session has ended. The
+subcommand runs the harness's own interactive session on that resume id and exits with its
+status; exit `3` means the harness never started, so the handback does not say the human drove
+it. The supervisor offers take-over for any member whose adapter declares the capability.
+`claude` and `codex` do; see each adapter below.
+
 `session` speaks newline-delimited JSON on stdin and stdout.
 
 | Direction | Message | Meaning |
 |---|---|---|
-| in | `start {brief, resume, note, cost_usd?}` | Begin. `resume` is null for a fresh start; otherwise it is the string this adapter sent in `session {resume}`, and `note` is the first user turn to send after resuming. With a `resume`, `cost_usd` is what the supervisor has recorded for this member so far; an adapter whose harness reports cost cumulatively across a resumed session takes each `idle`'s `cost_usd` from it. Adapters that report per-turn cost ignore it. |
+| in | `start {brief, resume, note, cost_usd?, tokens?}` | Begin. `resume` is null for a fresh start; otherwise it is the string this adapter sent in `session {resume}`, and `note` is the first user turn to send after resuming. With a `resume`, `cost_usd` is what the supervisor has recorded for this member so far; an adapter whose harness reports cost cumulatively across a resumed session takes each `idle`'s `cost_usd` from it. Adapters that report per-turn cost ignore it. `tokens` is the same for a harness that reports tokens: the member's recorded total, the baseline for the first `idle`'s `tokens`. |
 | in | `message {id, from, text}` | Inbox delivery. |
 | in | `stop` | Finish after the current turn. |
 | in | `interrupt` | End the turn now and exit: send `idle {interrupted: true}` and no `result`. |
 | out | `session {harness_id, resume}` | The harness session id and how to resume it. Sent first. |
 | out | `event {kind, ...}` | Text, tool call, tool result, or turn end, normalized across harnesses. |
 | out | `ack {message_id}` | The harness consumed the message. For `claude`, that is the user message echoed back by `--replay-user-messages`. Writing it to stdin is not enough. |
-| out | `idle {interrupted?, cost_usd?}` | The turn ended. `cost_usd` is this turn's cost in dollars, if the harness reports one; the supervisor sums it against `max_cost_usd`. |
+| out | `idle {interrupted?, cost_usd?, tokens?}` | The turn ended. `cost_usd` is this turn's cost in dollars, if the harness reports one; the supervisor sums it against `max_cost_usd`. `tokens` is this turn's tokens (a non-negative integer), for a harness that reports no dollar figure. The supervisor records it on the member and the run but it counts toward no cap. |
 | out | `result {status, summary, usage}` | Final outcome. |
 
 Adapter output is untrusted, and the supervisor shape-checks every line.
@@ -212,12 +221,70 @@ maximum. A read-only member runs in plan mode; the team tools work there because
 Resume works only on the same machine and in the same directory: claude keeps sessions per
 working directory under `~/.claude/projects`.
 
+`takeover` is `{notice: "claude may first ask whether to trust {cwd}."}`, and `adapters/claude attach <session>`
+runs `claude --resume <session>` with the terminal inherited, exiting `3` if claude cannot be run.
+
 If the adapter's stdin closes, its supervisor is gone. The adapter interrupts claude's open
 turn, or closes claude's stdin if it is between turns, then sends claude SIGTERM after 2 seconds
 and SIGKILL after 4 if it is still running. A restarted supervisor resumes the session, and
 two claude processes must not write it at once.
 
 ### codex
+
+`adapters/codex` speaks protocol 2: `session` runs the member as one long-lived
+`codex app-server` over stdio (newline-delimited JSON-RPC, one app-server per member), and the
+`run` form below is the one-shot path for a v1 caller.
+
+| Contract message | codex app-server |
+|---|---|
+| `start {brief}` | `initialize`, then `thread/start` with `approvalPolicy: "never"`, `sandbox` (`read-only` for a read-only brief, else `workspace-write`), `model` and `model_reasoning_effort` from the brief, and the config below; the task is the first `turn/start`. |
+| `start {resume, note, tokens}` | `thread/resume {threadId, excludeTurns: true, ...}` with the same config sent again, because it is not part of the thread's history and the team tools are missing without it. The note is the first turn. |
+| `message {from, text}` | `turn/steer` into the running turn, or `turn/start` between turns. `[from: <from>] <text>`. A steer that loses the race with the end of the turn runs as the next turn. Acked once, when codex accepts it. |
+| `interrupt` | `turn/interrupt`, then `idle {interrupted: true}`, then the adapter kills the app-server and exits without a `result`. `turn/interrupt` leaves shell commands the turn started running, so the process is ended to stop them. |
+| `stop` | The app-server is ended after the current turn; the adapter then sends `result`. |
+| `idle {tokens}` | Each `turn/completed`; `tokens` is the change in the thread's cumulative `totalTokens` (from `thread/tokenUsage/updated`) since the previous turn, omitted when zero. |
+| `session {resume}` | The thread id. |
+
+The member's team tools reach codex through per-thread config, not through its own environment
+(the adapter removes `AGENT_TEAM_TEAM_SOCKET` and `AGENT_TEAM_TEAM_TOKEN` from the app-server's
+env, so the token is only inside the `thread/start` and `thread/resume` params):
+
+    config.mcp_servers['agent-team'] = {
+      command: <node>, args: [<bin/agent-team.js>, 'mcp'],
+      env: { AGENT_TEAM_TEAM_SOCKET, AGENT_TEAM_TEAM_TOKEN },
+      default_tools_approval_mode: 'approve', tool_timeout_sec: 7500 }
+
+`default_tools_approval_mode: 'approve'` is needed because under `approvalPolicy: "never"` every
+MCP call otherwise fails with "MCP tool call requires approval". `tool_timeout_sec` is 7500
+because codex's default of 300 s is shorter than `ask_human`'s 7200 s maximum. The user's own
+`~/.codex/config.toml` servers still load. Server-initiated approval requests should not occur
+under that policy; each is answered so a turn cannot hang, and none approves anything (the
+`agent-team` MCP elicitation is accepted, commands and patches are declined).
+
+**Tokens, not dollars.** codex reports no dollar figure. `idle.tokens` is the turn's tokens,
+and `start.tokens` is the member's recorded total: `thread/resume` re-emits the restored total
+once, and the baseline keeps it out of the first `idle`. The supervisor records both on the
+member and the run (`members.tokens`, `runs.tokens`) and adds nothing to `max_cost_usd`.
+
+If the adapter's stdin closes, its supervisor is gone: the open turn is interrupted and the
+app-server is killed within a few seconds, so a recovering supervisor's resume is the only
+writer.
+
+**Take-over.** `capabilities` reports `takeover: {notice: null}`. `adapters/codex attach
+<thread>` is run by `agent-team attach` after the member's app-server has exited. It starts a
+private app-server on a loopback websocket
+(`codex app-server --listen ws://127.0.0.1:0 --ws-auth capability-token --ws-token-file <file>`),
+reads the port from its `listening on:` line on stderr, and runs
+`codex resume <thread> --remote ws://127.0.0.1:<port> --remote-auth-token-env
+AGENT_TEAM_CODEX_REMOTE_TOKEN` with the terminal inherited. The random token is in a `0600`
+file in a `0700` temporary directory for the server and in the TUI's environment, never in argv.
+The server runs in its own process group and is stopped, and the directory removed, however the
+TUI ends, including SIGINT, SIGTERM and SIGHUP to `attach`. The exit status is the TUI's; `3`
+means the server or the TUI never started. Because the thread never changes writer, a later
+`thread/resume` in a fresh app-server works and recalls the human's turns, which the live test
+checks.
+
+Brief fields for the v1 `run` form:
 
 | Brief field | Becomes |
 |---|---|

@@ -22,10 +22,12 @@ only `serve` listens on the shared path. The `claude` adapter speaks protocol 2,
 `wait_for` or `ask_human` or idle between turns; past it the supervisor interrupts the session
 and fails the member. A working member with no events for `defaults.stall_minutes` (default
 10) is reported to its manager as `stalled`. `defaults.max_cost_usd` (default none) caps what a
-run may spend, summed from the costs harnesses report; past it the whole run is paused, and
+run may spend, summed from the dollar costs harnesses report; past it the whole run is paused, and
 `resume` needs a higher cap. Each member's spend is recorded too: a resumed claude session
 reports its cost from the start of the session, so the supervisor hands the member's spend to
-the adapter and only the new turns are added. A member that has finished its work and does not exit within
+the adapter and only the new turns are added. Codex reports tokens, not dollars: a codex session's
+tokens are recorded on the member and the run, and add nothing to `max_cost_usd`, so a run of
+codex members is never paused by the cap. A member that has finished its work and does not exit within
 10 seconds of being told to stop is ended and fails. Its reports are
 started with the `delegate` tool and run in parallel, each in its own workspace. A v1 member
 keeps the `{"status":"delegating"}` loop described under [Delegation](#delegation).
@@ -85,10 +87,12 @@ working. A one-shot (v1) report that is already running cannot be cancelled and 
 finishes. Each verb is signed with your OS
 user name, which is what the member and its manager are told.
 
-`attach` hands a claude member to you: its turn is interrupted, and once its process has
-exited, `claude --resume <session>` starts in its workspace in your terminal. Its manager is
-told it was taken over. Claude may first ask whether to trust the workspace folder. When you
-exit claude, however you exit, the member resumes headless and is told that you drove the
+`attach` hands a claude or codex member to you: its turn is interrupted, and once its process
+has exited, the adapter's `attach` starts in its workspace in your terminal: `claude --resume
+<session>`, or for codex a private app-server on a loopback websocket with `codex resume
+<thread> --remote` against it (the token is in a `0600` file and the TUI's environment, and the
+server stops when you exit). Its manager is told it was taken over. Claude may first ask whether
+to trust the workspace folder. When you exit the harness, however you exit, the member resumes headless and is told that you drove the
 session; your turns are in its history. While you have it, `pause` refuses it and a
 supervisor restart leaves it alone; a cancel still reaches it, including one that cascades from
 its manager or the run, and `attach` then says there is nothing to hand back. If `attach` dies before it can hand back (a closed
@@ -97,7 +101,7 @@ same session, or `agent-team handback <run> <member>` to resume it headless. If 
 at its `max_cost_usd` cap when you hand back, the member stays paused and `attach` or
 `handback` says so; resume it with `--max-cost-usd`. Your own turns count toward the cap
 too, but only from the member's next turn after it resumes, when its claude session reports
-what it has cost since the member last reported. Taking over a codex member comes in a later plan.
+what it has cost since the member last reported. A codex member's turns add tokens, not dollars, so they never count toward the cap.
 
 ## Resolving the agent
 

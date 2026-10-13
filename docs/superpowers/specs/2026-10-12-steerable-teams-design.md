@@ -90,8 +90,10 @@ These were checked on 2026-10-12 before committing to the design.
   after the TUI exits. A headless `thread/resume` then fails with "thread … already has an
   active writer" until `codex app-server daemon stop`; after that, hand-back works and recalls
   the human's turns. Stopping the daemon would also cut off the user's other Codex sessions, so
-  plan 1b should instead run take-over as `codex --remote` against the app-server the adapter
-  already owns, so the thread never changes writer. That path is not yet tested.
+  take-over instead runs `codex resume <id> --remote` against a private websocket app-server
+  started by `adapters/codex attach` (loopback, capability token in a `0600` file), stopped when
+  the TUI exits, so no daemon is left holding the lock. Built; a headless `thread/resume`
+  afterwards recalls the human's turns, checked by `test/live/codex.test.js`.
 - `codex app-server proxy` (stdio to the daemon's control socket) answered nothing, not even
   `initialize`, in the probe.
 - `app-server` uses the saved CLI login.
@@ -131,14 +133,14 @@ A v2 adapter is a long-lived process speaking newline-delimited JSON in both dir
 
 | Direction | Message | Meaning |
 |---|---|---|
-| in | `start {brief, resume, note, cost_usd?}` | Begin, with the brief composed as today. `resume` is null for a fresh start; otherwise it is the string the adapter sent in `session {resume}`, `note` is the first user turn after resuming, and `cost_usd` is the member's recorded spend, the baseline for a harness whose cost is cumulative across a resumed session. |
+| in | `start {brief, resume, note, cost_usd?, tokens?}` | Begin, with the brief composed as today. `resume` is null for a fresh start; otherwise it is the string the adapter sent in `session {resume}`, `note` is the first user turn after resuming, `cost_usd` is the member's recorded spend, the baseline for a harness whose cost is cumulative across a resumed session, and `tokens` is the same for a harness that reports tokens. |
 | in | `message {id, from, text}` | Inbox delivery. |
 | in | `stop` | Finish after the current turn. |
 | in | `interrupt` | Finish now. |
 | out | `session {harness_id, resume}` | The harness session id and how to resume it. Sent first. |
 | out | `event {kind, …}` | Text, tool call, tool result, or turn end, normalized across harnesses. |
 | out | `ack {message_id}` | The harness consumed the message: for `claude`, the user message echoed back by `--replay-user-messages`. Writing it to stdin is not enough. A message written but not acked by the end of the turn goes back to the queue. |
-| out | `idle {interrupted?, cost_usd?}` | The turn ended. `cost_usd` is the turn's cost, if the harness reports one; the supervisor sums it against `max_cost_usd`. |
+| out | `idle {interrupted?, cost_usd?, tokens?}` | The turn ended. `cost_usd` is the turn's cost, if the harness reports one; the supervisor sums it against `max_cost_usd`. `tokens` is the turn's tokens, for a harness that reports no dollar figure; it is recorded, not capped. |
 | out | `result {status, summary, usage}` | Final outcome. |
 
 v2 adapters in this spec:
@@ -212,7 +214,8 @@ its session id, and resume that session either headless or interactively.
   fails also cancels its unfinished reports, and a root that ends for any reason cancels the rest of its
   run. Pausing a manager alone leaves its reports working.
 - **Take-over** is `agent-team attach <run> <member>`. It pauses the member and runs
-  `claude --resume <sid>` or `codex resume <id>` in the workspace, in the user's own terminal.
+  the adapter's `attach` subcommand (`adapters/claude attach <sid>`, `adapters/codex attach <id>`)
+  in the workspace, in the user's own terminal.
   On exit the member resumes headless with a note that a human drove it. The web view's "Take
   over" button shows that command.
 - A manager in `wait_for` is told when a report is paused, taken over, or cancelled.
@@ -367,7 +370,8 @@ but cannot `attach` until the fleet spec adds a browser terminal.
 - **Expired or revoked access.** A cached GitHub role that comes back lower on refresh takes
   effect at once, and open web sessions drop to the new role.
 - **Cost.** An optional run-level `max_cost_usd` sums the per-turn cost the harnesses report
-  and pauses the run when reached, so the human can raise it and resume.
+  and pauses the run when reached, so the human can raise it and resume. A harness that reports
+  only tokens (codex) is recorded but not capped.
 
 ## Testing
 
@@ -380,7 +384,7 @@ but cannot `attach` until the fleet spec adds a browser terminal.
 - Unit tests cover the store, delivery, and policy checks: reporting line, budgets, caps.
 - HTTP and SSE tests run under `node --test` with the rest of the suite.
 - An opt-in live smoke test, behind an environment flag, runs real `claude` on Haiku and turns
-  the steering probe into an assertion. Codex gets the same once it is installed.
+  the steering probe into an assertion. Codex's is `test/live/codex.test.js`.
 - Thread tests cover open, accept, decline, question-only threads, the loop guard, and
   `wait_for` waking on thread events and new published versions.
 - Auth tests use fake Tailscale headers and a fake GitHub API: role mapping, the cache and its
