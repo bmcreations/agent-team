@@ -389,8 +389,9 @@ export class Supervisor {
 
   // A halt under way when the supervisor closes, written straight to the store: #halted would
   // drain the queue and pump inboxes, launching work on a supervisor that is going away. The
-  // manager's notice waits in its inbox. A root that ends takes its unfinished members with it,
-  // or they would sit `running` in a finished run that recover() never looks at again.
+  // manager's notice waits in its inbox. A member that ends takes its unfinished reports with
+  // it, as #conclude does, or recover() would relaunch them under a manager that is gone (or,
+  // for a root, they would sit `running` in a finished run that recover() never looks at).
   #recordHalt(rt) {
     const m = rt.member;
     const { kind, by, now } = rt.halt;
@@ -411,12 +412,12 @@ export class Supervisor {
       this.store.addEvent(x.id, 'finished', { status: res.status, state: st });
     };
     record(m, state, result);
+    for (const d of this.#subtree(m.id).slice(1)) {
+      if (!TERMINAL.has(d.state)) record(d, 'cancelled', { status: 'failed', summary: `cancelled: ${m.name} ended` });
+    }
     if (m.parent_id != null) {
       this.#enqueueNotice(m, `finished ${kind === 'cancel' ? 'cancelled' : 'failed'}: ${result.summary}`);
       return;
-    }
-    for (const d of this.#subtree(m.id).slice(1)) {
-      if (!TERMINAL.has(d.state)) record(d, 'cancelled', { status: 'failed', summary: `cancelled: ${m.name} ended` });
     }
     this.store.finishRun(m.run_id, state);
     for (const resolve of this.#runWaiters.get(m.run_id) ?? []) resolve(this.store.member(m.id).result);

@@ -78,6 +78,43 @@ test('a member adopted after a restart is passed its recorded spend as the cost 
   } finally { await sup.close(); }
 });
 
+// lead -> mid -> worker. The cascade to a cancelled manager's reports runs once its adapter has
+// exited, so a close() in that window must record it, or recover() relaunches the reports.
+test('a mid-level cancel in flight when the supervisor closes takes its reports with it', async () => {
+  const { root, script } = project({
+    lead: LIVE(), mid: LIVE({ reports_to: 'lead' }), worker: LIVE({ reports_to: 'mid' })
+  }, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'mid', task: 'm' }, save: 'r' },
+        { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }
+      ], on_resume: { steps: [] } },
+      mid: { steps: [
+        { tool: 'delegate', args: { to: 'worker', task: 'w' }, save: 'r' },
+        { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }
+      ] },
+      worker: { steps: [{ say: 'working' }, { sleep_ms: 30_000 }], on_resume: { steps: [] } }
+    }
+  });
+  const first = await supervise(script);
+  const { store } = first;
+  const { runId, memberId: leadId } = first.sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+  const mid = () => store.children(leadId)[0];
+  const worker = () => mid() && store.children(mid().id)[0];
+  await until(() => worker() && store.events(worker().id).some((e) => e.kind === 'text'));
+  first.sup.cancel({ member_id: mid().id });
+  await first.sup.close();
+  assert.equal(store.member(mid().id).state, 'cancelled');
+  assert.equal(store.member(worker().id).state, 'cancelled');
+
+  const { sup } = await supervise(script, { store });
+  try {
+    assert.deepEqual(await sup.recover(), { recovered: [runId], failed: [] });
+    assert.equal((await sup.waitRun(runId)).status, 'ok');
+    assert.equal(store.events(worker().id).filter((e) => e.kind === 'started').length, 1, 'the worker was relaunched');
+  } finally { await sup.close(); }
+});
+
 test('a run whose project config is gone fails with the reason; other runs still recover', async () => {
   const a = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } } });
   const b = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } } });
