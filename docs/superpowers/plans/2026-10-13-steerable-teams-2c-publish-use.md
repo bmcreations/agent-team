@@ -4,7 +4,7 @@
 
 **Goal:** A member can snapshot a file or directory from its workspace as a new read-only version (`publish(name, path)`), any member can copy a published version into its own workspace (`use(team, name, version?)`), members using an older version hear about a newer one through `wait_for`, and a scripted two-team demo (an `android` repo and a `loupe` repo, mock-live members, temp store) shows the Android team opening a task thread with loupe, loupe's lead accepting and fixing, the thread closing, and Android picking up the fix — visible in the web view.
 
-**Architecture:** Migration 8 adds `publications` (one metadata row per version) and `uses` (which member copied which version). Snapshot content lives on disk in a `published/` directory beside the store, passed to the `Supervisor` as `publishDir`; a new `src/publish.js` owns the bounded, symlink-free, deny-path-aware walk and the copy. The supervisor's `publish`/`use` tools call it. `scripts/demo-threads.mjs` wires a temp store, a shared supervisor, and `startHttp` on a port from the environment (default `0`).
+**Architecture:** Migration 9 adds `publications` (one metadata row per version) and `uses` (which member copied which version). Snapshot content lives on disk in a `published/` directory beside the store, passed to the `Supervisor` as `publishDir`; a new `src/publish.js` owns the bounded, symlink-free, deny-path-aware walk and the copy. The supervisor's `publish`/`use` tools call it. `scripts/demo-threads.mjs` wires a temp store, a shared supervisor, and `startHttp` on a port from the environment (default `0`).
 
 **Tech Stack:** Node >= 22.13, ES modules, `node:sqlite`, `node:http`, `node --test`. No dependencies, no build step.
 
@@ -16,7 +16,7 @@
 
 These hold for plans 2a, 2b and 2c alike; each plan repeats them.
 
-- Stdlib only: the plugin has no install step. `package.json` `engines.node` stays `>=22.13`. The store is `node:sqlite`. Every store change is a new entry in `MIGRATIONS` in `src/store.js`, applied through `PRAGMA user_version`. The database is at version 5 before 2a; **2a adds migration 6, 2b migration 7, 2c migration 8.** (The brief suggested threads as migration 6; live cross-team delegation needs member columns first, so the numbers follow the plan order.) Every migration task also updates the rewind tests in `test/store.test.js` so they drop the new columns and tables before setting an older `user_version`.
+- Stdlib only: the plugin has no install step. `package.json` `engines.node` stays `>=22.13`. The store is `node:sqlite`. Every store change is a new entry in `MIGRATIONS` in `src/store.js`, applied through `PRAGMA user_version`. The database is at version 5 before 2a; **2a adds migration 6, 2b migration 7 and then 8 (an index added in the final fix batch), 2c migration 9.** (The brief suggested threads as migration 6; live cross-team delegation needs member columns first, so the numbers follow the plan order.) Every migration task also updates the rewind tests in `test/store.test.js` so they drop the new columns and tables before setting an older `user_version`.
 - Every new member tool (`team_status`, `request`, `reply`, `publish`, `use`) is in `TOOL_SCHEMAS` with `annotations: RO` (`readOnlyHint: true`), so plan-mode (read-only) members can call it. None of them lets the *member* write its workspace; where a tool writes (`use`), the supervisor does it.
 - Threads and live cross-team delegation need `agent-team serve`. A `Supervisor` gets `shared: true` only in `serve`; in-process supervisors (a CLI with no `serve`) keep `team:` members one-shot (`runTeam`) and refuse `request` with "threads need `agent-team serve`". In-process runs stay read-only in the web view (1c's ruling, unchanged).
 - A thread-run is a separate run owned by the receiving team, under the receiving team's config, `max_delegations`, `max_cost_usd`, and `deny_paths`. GitHub-named (cloud) teams stay one-shot: they are never live members and cannot be sent threads.
@@ -56,7 +56,7 @@ These hold for plans 2a, 2b and 2c alike; each plan repeats them.
 
 | File | Task | Responsibility |
 |---|---|---|
-| `src/store.js` | 1, 2 | Migration 8; `addPublication`, `publication`, `publications`, `addUse`, `staleUses`, `deletePublication` |
+| `src/store.js` | 1, 2 | Migration 9; `addPublication`, `publication`, `publications`, `addUse`, `staleUses`, `deletePublication` |
 | `src/publish.js` | 2, 3 | `snapshot`, `writeSnapshot`, `removeTree`, `copyOut`, `excludeUsed`, `publishPath` |
 | `src/supervisor.js` | 2, 3 | `publishDir` option; `publish` and `use` tools; newer-version notices |
 | `src/team-tools.js` | 2, 3 | `publish` and `use` schemas; `TEAM_NOTE` |
@@ -68,7 +68,7 @@ These hold for plans 2a, 2b and 2c alike; each plan repeats them.
 
 ---
 
-### Task 1: Migration 8, publications and uses
+### Task 1: Migration 9, publications and uses
 
 **Files:**
 - Modify: `src/store.js` (`MIGRATIONS`; new methods)
@@ -83,16 +83,16 @@ These hold for plans 2a, 2b and 2c alike; each plan repeats them.
   - `addUse({ memberId, project, name, version })`.
   - `staleUses(project, name, version): { member_id, version }[]` — uses of an older version by members not in a terminal state, latest use per member.
 
-- [ ] **Step 1: Make every rewind test drop migration 8's tables, and write the store tests**
+- [ ] **Step 1: Make every rewind test drop migration 9's tables, and write the store tests**
 
 Every rewind test in `test/store.test.js` prepends `'DROP TABLE uses; DROP TABLE publications; ' +` to its drops. Then append:
 
 ```js
-test('a version 7 database gains publications and uses', () => {
-  const path = join(mkdtempSync(join(tmpdir(), 'at-mig8-')), 's.db');
+test('a version 8 database gains publications and uses', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig9-')), 's.db');
   openStore(path).close();
   const raw = new DatabaseSync(path);
-  raw.exec('DROP TABLE uses; DROP TABLE publications; PRAGMA user_version = 7');
+  raw.exec('DROP TABLE uses; DROP TABLE publications; PRAGMA user_version = 8');
   raw.close();
   const store = openStore(path);
   assert.deepEqual(store.publications('/b'), []);
@@ -129,7 +129,7 @@ Fill in the stubs: the race test opens two handles on one file and alternates 20
 Run: `node --import ./test/helpers/guard.js --test test/store.test.js`
 Expected: FAIL — `no such table: uses`.
 
-- [ ] **Step 3: Add migration 8 and the methods**
+- [ ] **Step 3: Add migration 9 and the methods**
 
 ```js
   // publish/use: one row per published version (the content is on disk beside the store),
@@ -156,7 +156,7 @@ Expected: PASS.
 
 ```bash
 git add src/store.js test/store.test.js
-git commit -m "feat(store): migration 8 records published versions and their uses"
+git commit -m "feat(store): migration 9 records published versions and their uses"
 ```
 
 ---

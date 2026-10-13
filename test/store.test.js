@@ -342,6 +342,20 @@ test('a version 6 database gains threads, posts, and the thread columns', () => 
   check.close();
 });
 
+test('a version 7 database gains the open-thread index', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig8-')), 's.db');
+  openStore(path).close();
+  const raw = new DatabaseSync(path);
+  raw.exec('DROP INDEX threads_state; PRAGMA user_version = 7');
+  raw.close();
+  openStore(path).close();
+  const check = new DatabaseSync(path);
+  assert.equal(check.prepare('PRAGMA user_version').get().user_version, 8);
+  const plan = check.prepare("EXPLAIN QUERY PLAN SELECT * FROM threads WHERE state IN ('open','accepted') ORDER BY id").all();
+  assert.ok(plan.some((r) => /threads_state/.test(r.detail)), JSON.stringify(plan));
+  check.close();
+});
+
 const mkThread = (store, run, m, over = {}) => store.addThread({
   kind: 'task', fromProject: '/a', fromRun: run, fromMember: m.id, toProject: '/b', toMember: 'lead',
   parentThread: null, chain: ['/a'], text: 'hello', task: 'do it', ...over });
