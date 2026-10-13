@@ -45,6 +45,13 @@ shows the `agent-team attach <run> <member>` command to copy. A run started by a
 read-only, and `send` and `answer` refuse it too, because only the supervisor running a member
 can deliver to it.
 
+`agent-team send <run> <member> <text>` puts one message in the member's inbox and needs
+`serve`, like `pause`, `resume`, `cancel` and `answer`.
+
+`agent-team watch <run> [--json]` prints a run's events and messages and follows it until it
+ends. It reads the store, so it works with or without `serve`, including for a run a CLI
+started in-process.
+
 The page's sidebar lists recent runs by project, with each running member's harness and state.
 "Needs you" holds open `ask_human` questions, members reported stalled, and runs paused by the
 cost cap, each answerable in place. Activity is the default view: each member's task with its

@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
+import { watchRun } from '../src/watch.js';
 import { startHttp, DEFAULT_PORT } from '../src/http.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
 import { adminCall, attach, memberArgs, whoAmI, renderQuestions, handbackNotice } from '../src/admin.js';
@@ -48,6 +49,8 @@ const USAGE =
   '       agent-team pause <run> <member> [--now] [--subtree]\n' +
   '       agent-team resume <run> <member> [--subtree] [--note <text>] [--max-cost-usd <usd>]\n' +
   '       agent-team cancel <run> <member> [--subtree]\n' +
+  '       agent-team send <run> <member> <text>\n' +
+  '       agent-team watch <run> [--json]\n' +
   '       agent-team questions [<run>] [--json]\n' +
   '       agent-team answer <question-id> <answer>\n' +
   '       agent-team attach <run> <member>\n' +
@@ -204,6 +207,10 @@ const ADMIN = {
     ...memberArgs(p), subtree: values.subtree, by: whoAmI(), note: values.note ?? null,
     max_cost_usd: usd(values['max-cost-usd'])
   }],
+  send: ([run, member, ...text]) => {
+    if (!text.join(' ').trim()) throw new Error('usage: agent-team send <run> <member> <text>');
+    return ['send', { ...memberArgs([run, member]), text: text.join(' '), from: whoAmI() }];
+  },
   handback: (p) => ['handback', { ...memberArgs(p), by: whoAmI() }],
   questions: ([run]) => {
     if (run != null && !(Number.isInteger(Number(run)) && Number(run) > 0)) throw new Error('usage: agent-team questions [<run>]');
@@ -214,6 +221,25 @@ const ADMIN = {
     return ['answer', { question_id: Number(id), answer: text.join(' '), by: whoAmI() }];
   }
 };
+if (positionals[0] === 'watch') {
+  const runId = Number(positionals[1]);
+  if (!Number.isInteger(runId) || runId <= 0) {
+    process.stderr.write('usage: agent-team watch <run> [--json]\n');
+    process.exit(2);
+  }
+  const store = openStore(defaultStorePath());
+  const stop = new AbortController();
+  process.once('SIGINT', () => stop.abort());
+  try {
+    const status = await watchRun({ store, runId, json: values.json, signal: stop.signal, write: (s) => process.stdout.write(s) });
+    if (!values.json) process.stderr.write(`agent-team: run ${runId} ${status}\n`);
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(`agent-team: ${err.message}\n`);
+    process.exit(1);
+  } finally { store.close(); }
+}
+
 if (positionals[0] === 'attach') {
   try {
     const back = await attach(memberArgs(positionals.slice(1)));

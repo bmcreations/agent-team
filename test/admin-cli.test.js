@@ -103,3 +103,23 @@ test('bad steering arguments fail before reaching the supervisor', async () => {
   assert.match((await cli(['answer', '0', 'yes'], sock)).stderr, /^agent-team: usage: agent-team answer <question-id> <answer>/);
   assert.match((await cli(['questions', 'abc'], sock)).stderr, /^agent-team: usage: agent-team questions \[<run>\]/);
 });
+
+test('send from the CLI puts a message in the member\'s inbox', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    await until(() => store.member(memberId).state === 'waiting');
+    const sent = await cli(['send', String(runId), 'solo', 'use', 'tabs'], sup.socketPath);
+    assert.equal(sent.code, 0, sent.stderr);
+    const { message_id } = JSON.parse(sent.stdout);
+    const msg = store.timeline({ memberId }).messages.find((m) => m.id === message_id);
+    assert.deepEqual([msg.from_name, msg.text], [ME, 'use tabs']);
+    const bad = await cli(['send', String(runId), 'solo'], sup.socketPath);
+    assert.equal(bad.code, 1);
+    assert.match(bad.stderr, /usage: agent-team send <run> <member> <text>/);
+    await sup.cancel({ run_id: runId, member: 'solo', subtree: true });
+  } finally { await sup.close(); }
+});
