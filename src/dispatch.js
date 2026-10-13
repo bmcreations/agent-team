@@ -133,7 +133,10 @@ export function refuseCycle(member, team, keys, teams) {
 
 // The member another team is entered through: the one named, else that team's only root.
 export function teamEntry(teamConfig, entry, root, member) {
-  if (entry) return entry;
+  if (entry) {
+    if (!teamConfig.members[entry]) throw new Error(`member "${member}": team ${root} has no member "${entry}"`);
+    return entry;
+  }
   if (teamConfig.org.roots.length !== 1) {
     throw new Error(
       `member "${member}": team at ${root} has ${teamConfig.org.roots.length} top-level members ` +

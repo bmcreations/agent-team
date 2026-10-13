@@ -133,7 +133,7 @@ test('a team stops at its own max_delegations and spends the run\'s too', async 
     const lead = store.members(runId).find((m) => m.name === 'b-lead');
     const [first, second] = toolResults(store, lead.id).map((e) => e.body.result);
     assert.ok(first.report_id);
-    assert.match(second.error, /delegation budget exhausted/);
+    assert.match(second.error, /max_delegations of the team at/);
     assert.equal(store.run(runId).budget, 3);          // 5 - manager->loupe - b-lead->b-dev
     assert.equal(store.member(lead.id).scope_budget, 0);
   } finally { await sup.close(); store.close(); }
@@ -272,5 +272,88 @@ test('team_status lists the teams a member can name and reports another team\'s 
     assert.ok(names.includes('b-lead'));
     assert.ok(!names.includes('manager'));
     assert.match(missing.body.result.error, /not found: no agent-team config/);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('a member name shared by two entered teams is ambiguous; an alias names the entry', async () => {
+  const script = { by_member: { lead: { steps: [
+    { tool: 'delegate', args: { to: 'loupe', task: 'go' } },
+    { sleep_ms: 30_000 }
+  ] } } };
+  const b = project({ lead: LIVE() }, script);
+  const a = project({ lead: LIVE(), loupe: { team: b.root, reports_to: 'lead' } }, script);
+  const { sup, store } = await supervise(a.script, { shared: true });
+  try {
+    const { runId } = sup.submit({ projectRoot: a.root, member: 'lead', task: 'ship' });
+    await until(() => store.members(runId).filter((m) => m.state === 'running' || m.state === 'waiting').length === 2);
+    const [root, entry] = store.members(runId);
+    await assert.rejects(async () => sup.cancel({ run_id: runId, member: 'lead' }),
+      new RegExp(`ambiguous.*${root.id}.*${entry.id}`));
+    assert.equal(store.member(root.id).state, 'running', 'nothing was cancelled');
+    assert.equal(store.member(entry.id).state, 'running');
+    await sup.cancel({ run_id: runId, member: 'loupe' });   // the alias names B's entry
+    await until(() => ['cancelled', 'stopping'].includes(store.member(entry.id).state) || store.member(entry.id).state === 'cancelled');
+    assert.notEqual(store.member(root.id).state, 'cancelled');
+  } finally { await sup.close(); store.close(); }
+});
+
+test('send_to refuses a name that two of the manager\'s reports share', async () => {
+  const script = { by_member: {
+    boss: { steps: [
+      { tool: 'delegate', args: { to: 'dev', task: 'one' } },
+      { tool: 'delegate', args: { to: 'loupe', task: 'two' } },
+      { tool: 'send_to', args: { to: 'dev', text: 'hi' } },
+      { sleep_ms: 500 }
+    ] },
+    dev: { steps: [{ sleep_ms: 5_000 }] }
+  } };
+  const b = project({ dev: LIVE() }, script);
+  const a = project({ boss: LIVE(), dev: LIVE({ reports_to: 'boss' }), loupe: { team: b.root, reports_to: 'boss' } }, script);
+  const { sup, store } = await supervise(a.script, { shared: true });
+  try {
+    const { runId } = sup.submit({ projectRoot: a.root, member: 'boss', task: 'ship' });
+    await until(() => toolResults(store, store.members(runId)[0].id).length >= 3);
+    const res = toolResults(store, store.members(runId)[0].id)[2].body.result;
+    assert.match(res.error, /ambiguous/);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('a team member naming an entry member the team lacks is a clear error and spends nothing', async () => {
+  const script = { by_member: { manager: { steps: [
+    { tool: 'delegate', args: { to: 'loupe', task: 'go' } }
+  ] } } };
+  const b = project({ lead: LIVE() }, script);
+  const a = project({ manager: LIVE(), loupe: { team: b.root, member: 'ghost', reports_to: 'manager' } }, script);
+  const { sup, store } = await supervise(a.script, { shared: true });
+  try {
+    const { runId } = sup.submit({ projectRoot: a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(runId);
+    const res = toolResults(store, store.members(runId)[0].id)[0].body.result;
+    assert.match(res.error, /member "loupe": team .* has no member "ghost"/);
+    assert.doesNotMatch(res.error, /undefined/);
+    assert.equal(store.members(runId).length, 1);
+  } finally { await sup.close(); store.close(); }
+});
+
+test('recovery ignores an entered team that already finished, even if its repo is gone', async () => {
+  const script = { by_member: {
+    manager: {
+      steps: [{ tool: 'delegate', args: { to: 'loupe', task: 'go' }, save: 'd' }, { tool: 'wait_for', args: {} }],
+      on_resume: { steps: [{ tool: 'wait_for', args: {} }] }
+    },
+    'b-lead': { steps: [{ say: 'done' }] }
+  } };
+  const b = project({ 'b-lead': LIVE() }, script);
+  const a = project({ manager: LIVE(), loupe: { team: b.root, reports_to: 'manager' } }, script);
+  const first = await supervise(a.script, { shared: true });
+  const { store } = first;
+  const { runId } = first.sup.submit({ projectRoot: a.root, member: 'manager', task: 'ship' });
+  await until(() => store.members(runId).find((m) => m.name === 'b-lead')?.state === 'done');
+  await first.sup.close();
+  renameSync(join(b.root, '.claude', 'agent-team.json'), join(b.root, '.claude', 'agent-team.gone'));
+  const { sup } = await supervise(a.script, { shared: true, store });
+  try {
+    const out = await sup.recover();
+    assert.deepEqual(out.failed, []);
   } finally { await sup.close(); store.close(); }
 });

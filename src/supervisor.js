@@ -9,7 +9,7 @@ import { pruneWorkspace } from './workspace.js';
 import { MemberSession } from './sessions.js';
 import { serveRpc, isListening } from './rpc.js';
 import { TEAM_NOTE } from './team-tools.js';
-import { knownTeams, resolveTeam } from './teams.js';
+import { knownTeams, resolveTeam, scopeProject } from './teams.js';
 import { teamStatus } from './view.js';
 import { DEFAULT_TIMEOUT_MS } from './adapter.js';
 
@@ -338,9 +338,17 @@ export class Supervisor {
       return this.#owned(m);
     }
     if (run_id == null || typeof member !== 'string') throw new Error('name a member: member_id, or run_id and member');
-    const matches = this.store.members(Number(run_id)).filter((m) => m.name === member);
+    const matches = this.store.members(Number(run_id)).filter((m) => m.name === member || m.alias === member);
     if (!matches.length) throw new Error(`run ${run_id} has no member "${member}"`);
-    return this.#owned(matches.filter((m) => !TERMINAL.has(m.state)).at(-1) ?? matches.at(-1));
+    const live = matches.filter((m) => !TERMINAL.has(m.state));
+    // The same role twice is the latest one; different teams sharing a name are not.
+    if (new Set(live.map((m) => scopeProject(this.store, m))).size > 1) {
+      throw new Error(
+        `member "${member}" is ambiguous in run ${run_id}: ` +
+        `${live.map((m) => `id ${m.id} (${scopeProject(this.store, m)})`).join(', ')} — name it by id`
+      );
+    }
+    return this.#owned(live.at(-1) ?? matches.at(-1));
   }
 
   // Another supervisor (a CLI's in-process one) may be running this member's run. A finished
@@ -550,9 +558,10 @@ export class Supervisor {
         configs: new Map(), keys: new Map()
       };
       this.#runs.set(run.id, entry);
-      // Every entered team's config is loaded up front; one that no longer loads fails the run.
+      // Every config a live member's path needs is loaded up front; one that no longer loads fails
+      // the run. Finished members need none.
       try {
-        for (const m of this.store.members(run.id)) if (m.project != null) this.#teamConfig(entry, m.project);
+        for (const m of this.store.members(run.id)) if (!TERMINAL.has(m.state)) this.#scope(m);
       } catch (err) {
         this.#runs.delete(run.id);
         this.#failRun(run, `could not recover after a supervisor restart: ${err.message}`);
@@ -1074,7 +1083,11 @@ export class Supervisor {
       fromKind = 'report';
     } else {
       const matches = this.store.children(id).filter((c) => c.id === to || c.name === to || c.alias === to);
-      target = matches.find((c) => !TERMINAL.has(c.state)) ?? matches.at(-1);
+      const live = matches.filter((c) => !TERMINAL.has(c.state));
+      if (new Set(live.map((c) => c.alias ?? c.name)).size > 1) {
+        throw new Error(`"${to}" is ambiguous: ${live.map((c) => `id ${c.id} (${c.alias ?? c.name})`).join(', ')} — use the id`);
+      }
+      target = live[0] ?? matches.at(-1);
       fromKind = 'manager';
     }
     if (!target) throw new Error(`"${to}" is not your manager or one of your reports`);
