@@ -767,6 +767,9 @@ test('peers takes non-empty strings, at most 50', () => {
   assert.throws(() => parseConfig({ ...minimalPeers(), peers: Array(51).fill('a') }, 'x'), /at most 50/);
   assert.throws(() => parseConfig({ ...minimalPeers(), peers: ['github:me/loupe'] }, 'x'), /local directory/);
   assert.throws(() => parseConfig({ ...minimalPeers(), peers: ['https://github.com/me/loupe'] }, 'x'), /local directory/);
+  for (const url of ['ssh://host/me/loupe', 'git://host/me/loupe', 'HTTP://host/x']) {
+    assert.throws(() => parseConfig({ ...minimalPeers(), peers: [url] }, 'x'), /local directory/, url);
+  }
 });
 
 test('a peer that does not exist does not stop the config loading', () => {
