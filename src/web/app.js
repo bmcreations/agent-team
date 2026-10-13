@@ -542,20 +542,77 @@ function taskLine({ state, who, steps, open }) {
       shown ? h('ol', { class: 'steps' }, steps.slice(0, -1).slice(-30).map((st) => h('li', {}, h('span', {}, st.text ?? describe(st)), ' ', when(st.at)))) : null)];
 }
 
+const DEPLOY_EVERY_MS = 2000;
+
+// The project's deploy button, for a human only: it shows the command, asks before running it,
+// then follows the deploy. Like the changes panel it looks again when a 'deploy' event arrives
+// (the server writes one when a deploy starts, makes progress and ends); there is no polling.
+function deployPanel(runId) {
+  const el = h('section', { class: 'card deploy', hidden: true });
+  const c = { cue: null, at: 0, timer: null, busy: false, dead: false, d: null, readOnly: false };
+  const key = `deploy${runId}`;
+  const label = { running: 'Deploying…', ok: 'Deployed', failed: 'Deploy failed', idle: '' };
+  function draw() {
+    const d = c.d;
+    el.hidden = !d?.command;
+    if (el.hidden) return;
+    const running = d.state === 'running';
+    const open = S.expanded.has(key);
+    el.replaceChildren(
+      h('div', { class: 'card-head' }, h('h2', {}, 'Deploy'),
+        d.state !== 'idle' ? pill(d.state === 'ok' ? 'done' : d.state) : null),
+      h('p', { class: 'deploy-cmd' }, h('code', {}, d.command)),
+      ...present(c.readOnly ? h('p', { class: 'note' }, 'Read-only here; deploy from the serve that owns this run.') : null),
+      h('div', { class: 'deploy-row' },
+        h('button', { type: 'button', class: 'btn primary small', disabled: running || c.readOnly, onclick: start }, running ? 'Deploying…' : 'Deploy'),
+        d.state !== 'idle' ? h('span', { class: 'muted' }, label[d.state], d.exit != null && d.state === 'failed' ? ` (exit ${d.exit})` : '',
+          d.finished_at ? [' ', when(d.finished_at)] : null, d.by ? ` by ${d.by}` : '') : null),
+      ...present(d.output ? [
+        h('pre', { class: `deploy-out${open ? '' : ' clamped'}` }, d.output),
+        isLongText(d.output) ? h('button', { type: 'button', class: 'show-more', onclick: () => {
+          if (S.expanded.has(key)) S.expanded.delete(key); else S.expanded.add(key);
+          draw();
+        } }, open ? 'Show less' : 'Show more') : null] : null));
+  }
+  async function start() {
+    const d = c.d;
+    if (!confirm(`Run this in ${shortPath(S.state?.run?.project ?? S.detail?.run?.project ?? '')}?\n\n${d.command}`)) return;
+    try { c.d = await api(`/api/runs/${runId}/deploy`, { command: d.command }); draw(); } catch (err) { flash(err.message); look(); }
+  }
+  async function look() {
+    c.timer = null;
+    if (c.busy || c.dead) return;
+    c.busy = true;
+    c.at = Date.now();
+    try { c.d = await api(`/api/runs/${runId}/deploy`); draw(); } catch { /* the panel stays as it was */ } finally { c.busy = false; }
+  }
+  return {
+    el,
+    stop: () => { c.dead = true; clearTimeout(c.timer); },
+    update(cue, readOnly) {
+      if (readOnly !== c.readOnly) { c.readOnly = readOnly; if (c.d) draw(); }
+      if (cue === c.cue || c.timer) return;
+      c.cue = cue;
+      c.timer = setTimeout(look, Math.max(0, c.at + DEPLOY_EVERY_MS - Date.now()));
+    }
+  };
+}
+
 function drawRun() {
   const run = S.state?.run?.id === S.route.run ? S.state.run : S.detail?.run;
   if (!run) return $('view').replaceChildren(h('p', { class: 'loading' }, 'Loading…'));
   const members = S.state?.run?.id === S.route.run ? S.state.members : S.detail.members;
   if (!S.panel) {
     S.panel = { head: h('header', { class: 'run-head' }), tree: h('ul', { class: 'tree' }), talk: h('ol', { class: 'talk' }), tasks: h('ul', { class: 'tasks' }),
-                member: h('aside', { class: 'card member' }), wrap: null, controls: null };
+                member: h('aside', { class: 'card member' }), wrap: null, controls: null, deploy: deployPanel(run.id) };
     S.panel.wrap = h('div', { class: 'run' },
       h('div', { class: 'run-main' },
         h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Team')), S.panel.tree),
         h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Conversation')), S.panel.tasks, S.panel.talk)),
       h('div', { class: 'run-side' }, S.panel.member));
-    $('view').replaceChildren(S.panel.head, S.panel.wrap);
+    $('view').replaceChildren(S.panel.head, S.panel.deploy.el, S.panel.wrap);
   }
+  S.panel.deploy.update(S.model.events.findLast((e) => e.kind === 'deploy')?.id ?? 0, Boolean(run.read_only_note));
   S.panel.wrap.classList.toggle('has-member', S.route.member != null);
   S.panel.head.replaceChildren(...present(
     h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Activity'), icon('chevron'), h('span', { title: run.project }, shortPath(run.project)),

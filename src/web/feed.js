@@ -18,6 +18,7 @@ export function describe(e) {
     case 'delegated': return `delegated to ${b.to}`;
     case 'stalled': return `quiet for ${Math.round((b.quiet_s ?? 0) / 60)} min`;
     case 'cost_cap': return `cost cap: $${(b.cost_usd ?? 0).toFixed(2)} of $${(b.max_cost_usd ?? 0).toFixed(2)}`;
+    case 'deploy': return `deploy ${b.state ?? ''}${b.by ? ` by ${b.by}` : ''}`.trim();
     case 'finished': return [b.state ?? b.status, b.summary].filter(Boolean).join(': ');
     default: return b.by ? `by ${b.by}` : '';
   }

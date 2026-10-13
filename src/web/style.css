@@ -439,3 +439,11 @@ details.more-facts[open] summary .icon { transform: rotate(90deg); }
 .changes .dl.hunk { color: var(--blue); background: var(--blue-soft); }
 .changes .dl.meta { color: var(--muted); }
 .changes .note { color: var(--muted); font-size: 13px; }
+
+.deploy { margin-bottom: 16px; min-width: 0; }
+.deploy-cmd { margin: 0 0 10px; }
+.deploy-cmd code { display: block; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--sunk); font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.deploy-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.deploy-out { margin: 10px 0 0; padding: 8px 12px; max-width: 100%; max-height: 60vh; overflow: auto; border-radius: var(--radius-sm); background: var(--sunk); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.deploy-out.clamped { max-height: 9.5em; overflow: hidden; }
+.deploy .note { color: var(--muted); font-size: 13px; }
