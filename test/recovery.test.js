@@ -447,7 +447,7 @@ test('a run that starts in the receiving project picks up an open thread nobody 
   const t = twoTeams();
   const script = t.write(() => ({ by_member: {
     manager: { steps: [] },
-    'b-lead': { steps: [{ tool: 'reply', args: { thread: '$brief.threads.0.id', text: 'seen', state: 'done' } }] }
+    'b-lead': { steps: [{ tool: 'reply', args: { thread: 1, text: 'seen', state: 'done' } }] }
   } }));
   const { sup, store } = await supervise(script, { shared: true });
   try {

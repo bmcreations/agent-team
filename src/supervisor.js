@@ -1259,10 +1259,12 @@ export class Supervisor {
     const m = this.store.member(id);
     const side = this.#sideOf(t, m);
     if (!side) throw new Error(`reply refused: member "${m.name}" is not on thread #${t.id}`);
+    if (t.state === 'done' || t.state === 'declined') throw new Error(`reply refused: thread #${t.id} is closed`);
     let started = null;
     if (state) {
       if (side !== 'receiver') throw new Error(`reply refused: only the receiving lead on thread #${t.id} can change its state`);
       if (state === 'declined' && !text.trim()) throw new Error('declining a thread needs a reason in "text"');
+      if (state === 'done' && t.kind === 'question' && !text.trim()) throw new Error('answering a question needs the answer in "text"');
       started = this.#moveThread(t, state, { text, author: m.name,
         result: state === 'done' ? { status: 'ok', summary: text } : null });
     } else {
@@ -1322,17 +1324,22 @@ export class Supervisor {
     }
     for (const id of ids) {
       try {
-        this.#closeThread(this.store.thread(id), state, result);
+        this.#closeThread(this.store.thread(id), state, result, id === served);
       } catch { /* a concurrent move already closed it */ }
     }
   }
 
-  #closeThread(t, state, result) {
+  // `served`: the finished run was started for this thread, so its summary answers it. A live
+  // lead's run is about other work, so a question it never answered is declined.
+  #closeThread(t, state, result, served = true) {
     if (t.state === 'done' || t.state === 'declined') return;
     const status = state === 'done' ? result.status : 'failed';
     const summary = result.summary ?? '';
     if (t.kind === 'task' && t.state === 'open') {
       return this.#moveThread(t, 'declined', { text: 'the lead finished without accepting', author: 'agent-team' });
+    }
+    if (t.kind === 'question' && !served) {
+      return this.#moveThread(t, 'declined', { text: 'the lead finished without answering', author: 'agent-team' });
     }
     if (t.kind === 'question' && state !== 'done') {
       return this.#moveThread(t, 'declined', { text: `the lead's run ${state}`, author: 'agent-team' });
