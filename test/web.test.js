@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, openThreadCount, threadTouched, canPostToThread, threadRunIds } from '../src/web/feed.js';
+import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, threadRunIds } from '../src/web/feed.js';
 import { publicMessage } from '../src/view.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
@@ -254,4 +254,12 @@ test('task titles: the first line of a brief, without heading marks, and whether
   assert.equal(taskTitle('x'.repeat(200)).length, 121);
   assert.equal(hasMoreThanTitle('x'.repeat(200)), false);
   assert.equal(taskTitle(null), '');
+});
+
+test('a conversation message is clipped past 480 characters or 6 lines', () => {
+  assert.equal(isLongText('finished ok: done'), false);
+  assert.equal(isLongText('a\nb\nc\nd\ne\nf'), false);
+  assert.equal(isLongText('a\nb\nc\nd\ne\nf\ng'), true);
+  assert.equal(isLongText('x'.repeat(481)), true);
+  assert.equal(isLongText(null), false);
 });

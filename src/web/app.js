@@ -1,9 +1,9 @@
-import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, openThreadCount, threadTouched, canPostToThread, TERMINAL } from './feed.js';
+import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, TERMINAL } from './feed.js';
 
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
 const $ = (id) => document.getElementById(id);
-const S = { gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null,
+const S = { expanded: new Set(), gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null,
             query: '', panel: null, open: new Set(), threads: null, thread: null };
 
 const safeHref = (v) => { const s = String(v); return s.startsWith('#') || (s.startsWith('/') && !s.startsWith('//')) ? s : '#'; };
@@ -379,13 +379,28 @@ function threadComposer(id) {
   return { el, text, send };
 }
 
+// A message bubble, clipped to its first lines when long. Which ones are open is kept in
+// S.expanded by row key, so a live re-render does not close one someone is reading.
+function bubble(key, text) {
+  const el = h('div', { class: 'bubble' }, text);
+  if (!isLongText(text)) return el;
+  const label = () => (S.expanded.has(key) ? 'Show less' : 'Show more');
+  el.classList.toggle('clamped', !S.expanded.has(key));
+  const more = h('button', { type: 'button', class: 'show-more', onclick: () => {
+    if (S.expanded.has(key)) S.expanded.delete(key); else S.expanded.add(key);
+    el.classList.toggle('clamped', !S.expanded.has(key));
+    more.textContent = label();
+  } }, label());
+  return [el, more];
+}
+
 function postRow(p) {
   const mine = p.side === 'human';
   return h('li', { class: `message${mine ? ' mine' : ''}` }, avatar(p.author, { human: mine }),
     h('div', { class: 'msg' },
       h('div', { class: 'who-line' }, present(h('b', {}, p.author), ` · ${p.side} · `, when(p.at),
         p.state ? [' ', pill(p.state === 'declined' ? 'bad' : p.state === 'accepted' ? 'running' : 'ok', stateLabel(p.state))] : null)),
-      h('div', { class: 'bubble' }, p.text)));
+      bubble(`p${p.id}`, p.text)));
 }
 
 function drawThread() {
@@ -496,7 +511,7 @@ function convoRow(r, run) {
       avatar(r.from, { human: mine }),
       h('div', { class: 'msg' },
         h('div', { class: 'who-line' }, h('b', {}, r.from), ` to ${r.to} · `, when(r.at)),
-        h('div', { class: 'bubble' }, r.text)));
+        bubble(r.key, r.text)));
   }
   const member = (S.detail?.members ?? []).find((m) => m.name === r.who);
   const say = (PHRASE[r.kind] ?? ((s) => s || r.kind.replace(/_/g, ' ')))(r.said ?? '');
@@ -671,7 +686,7 @@ function eventRow(e) {
 
 const messageRow = (x) => h('li', { class: 'inbox' }, avatar(x.from_name, { human: x.from_kind === 'human', size: 'sm' }),
   h('div', { class: 'msg' }, h('div', { class: 'who-line' }, h('b', {}, x.from_name), ` · ${x.from_kind} · `, when(x.at)),
-    h('div', { class: 'bubble' }, x.text)));
+    bubble(`m${x.id}`, x.text)));
 
 function memberControls(m) {
   const base = `/api/members/${m.id}`;

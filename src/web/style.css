@@ -263,6 +263,8 @@ time { font-variant-numeric: tabular-nums; }
 .talk .msg .who-line { margin: 0 4px 3px; }
 .talk li.mine .who-line { text-align: right; }
 .bubble { padding: 9px 14px; border-radius: 18px; background: var(--sunk); white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
+.show-more { align-self: flex-start; margin: 4px 10px 0; padding: 2px 0; border: 0; background: none; color: var(--clay-ink); font: inherit; font-size: 13px; cursor: pointer; }
 .talk li:not(.mine) .bubble { border-bottom-left-radius: 6px; }
 .talk li.mine .bubble { background: var(--clay-soft); border-bottom-right-radius: 6px; }
 .talk li.event { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); padding: 0 4px; }
