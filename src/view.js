@@ -29,10 +29,12 @@ export function publicRun(store, row, ownSocket) {
   };
 }
 
+// Thread text is cut like a tool result is; the store keeps all of it.
 export const publicMessage = (row) => ({
   id: row.id, run_id: row.run_id, to_member: row.to_member, to_name: row.to_name,
   from_kind: row.from_kind, from_name: row.from_name, report_id: row.report_id, thread_id: row.thread_id ?? null,
-  text: row.text, state: row.state, at: row.at
+  text: row.thread_id != null && row.text.length > THREAD_TEXT_MAX ? `${row.text.slice(0, THREAD_TEXT_MAX)}…` : row.text,
+  state: row.state, at: row.at
 });
 
 // A tool result can be megabytes. Each long field is cut to `max` characters; the full event

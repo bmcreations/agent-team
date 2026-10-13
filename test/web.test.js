@@ -194,6 +194,14 @@ test('stream messages carry only the thread id of a thread, so the page can refe
   assert.equal(publicMessage({ ...row, thread_id: undefined }).thread_id, null);
 });
 
+test('thread message text is clipped like the thread pages clip it', () => {
+  const row = { id: 1, run_id: 1, to_member: 2, to_name: 'b', from_kind: 'team', from_name: 'x/y', report_id: null, thread_id: 7,
+                text: 'y'.repeat(10000), state: 'delivered', at: 1 };
+  assert.equal(publicMessage(row).text, `${'y'.repeat(4000)}…`);
+  assert.equal(publicMessage({ ...row, text: 'short' }).text, 'short');
+  assert.equal(publicMessage({ ...row, thread_id: null }).text.length, 10000);
+});
+
 test('threadTouched: a thread message for this thread, any thread on the list, or a new thread', () => {
   const msg = (thread_id) => ({ messages: [{ id: 1, thread_id }], events: [] });
   assert.equal(threadTouched(msg(3), 3), true);
