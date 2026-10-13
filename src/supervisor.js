@@ -42,6 +42,7 @@ export class Supervisor {
   #pending = [];              // memberIds waiting for a slot
   #runs = new Map();          // runId -> { projectRoot, config, budget }
   #runWaiters = new Map();    // runId -> [resolve]
+  #resumes = new Map();       // memberId -> { note } for a paused member's next launch
   #closing = false;
   #resolutions = new Map();   // memberId -> Promise of { resolved, caps } | { team: true } | { error }
 
@@ -122,6 +123,42 @@ export class Supervisor {
   // members that cannot be stopped are listed in `skipped` instead of failing the call.
   pause(p = {}) { return this.#intervene(p, 'pause'); }
   cancel(p = {}) { return this.#intervene(p, 'cancel'); }
+
+  // Relaunches paused members in their own workspaces, with their harness session resumed
+  // and `note` as the first user turn. Queued messages are delivered once the session is up.
+  resume({ subtree = false, note = null, by = 'local', ...who } = {}) {
+    const top = this.#target(who);
+    if (!subtree) {
+      this.#unpause(top, { note, by });
+      return { members: [{ id: top.id, name: top.name }], skipped: [] };
+    }
+    const members = [];
+    const skipped = [];
+    for (const m of this.#subtree(top.id)) {
+      try {
+        this.#unpause(m, { note, by });
+        members.push({ id: m.id, name: m.name });
+      } catch (err) {
+        skipped.push({ id: m.id, name: m.name, reason: err.message });
+      }
+    }
+    return { members, skipped };
+  }
+
+  #unpause(m, { note, by }) {
+    if (m.state !== 'paused') throw new Error(`"${m.name}" is not paused (${m.state})`);
+    const paused = this.store.events(m.id).findLast((e) => e.kind === 'paused')?.body ?? {};
+    const lines = [`Resumed by ${by}.`];
+    if (paused.now) {
+      lines.push('Your last turn was interrupted: a command it started may have partly run. ' +
+                 'Check the workspace before repeating work.');
+    }
+    if (typeof note === 'string' && note.trim()) lines.push(`${by}: ${note}`);
+    this.#resumes.set(m.id, { note: lines.join('\n') });
+    this.store.setState(m.id, 'queued');
+    this.store.addEvent(m.id, 'resumed', { by });
+    this.#schedule(m.id);
+  }
 
   #intervene({ subtree = false, now = false, by = 'local', ...who } = {}, kind) {
     const top = this.#target(who);
@@ -282,6 +319,8 @@ export class Supervisor {
   async #launch(id) {
     const m = this.store.member(id);
     const run = this.#runs.get(m.run_id);
+    const resume = this.#resumes.get(id) ?? null;
+    this.#resumes.delete(id);
     // Registered before any await, so #drain counts this member against the caps at once.
     const rt = { member: m, session: null, resolved: null, caps: null, workspace: null, result: null,
                  offered: new Set(), staleOffers: new Set(), idle: false, stopping: false, waiter: null, question: null };
@@ -303,7 +342,8 @@ export class Supervisor {
     const { resolved, caps } = r;
     rt.resolved = resolved;
     rt.caps = caps;
-    const prep = prepareMember(ctx, { resolved, caps });
+    // A member paused before its adapter ever ran has no workspace yet and starts fresh.
+    const prep = prepareMember(ctx, { resolved, caps }, { workspaceDir: resume ? m.workspace : null });
     rt.workspace = prep.workspace;
     this.store.setWorkspace(id, prep.workspace.dir);
     const brief = buildBrief({
@@ -318,7 +358,13 @@ export class Supervisor {
       onLine: (msg) => this.#onLine(id, msg),
       onExit: (code, stderr) => this.#onExit(id, code, stderr)
     });
-    rt.session.send({ type: 'start', brief });
+    // With no harness session to resume, the note rides along with the task instead.
+    if (resume && !m.resume) brief.task += `\n\n${resume.note}`;
+    rt.session.send({
+      type: 'start', brief,
+      resume: resume ? m.resume : null,
+      note: resume && m.resume ? resume.note : null
+    });
     this.#pump(id);   // anything sent while the member was queued
   }
 
@@ -327,7 +373,10 @@ export class Supervisor {
   #onLine(id, msg) {
     const rt = this.#live.get(id);
     if (!rt) return;
-    if (msg.type === 'session') this.store.setHarness(id, msg.harness_id);
+    if (msg.type === 'session') {
+      this.store.setHarness(id, msg.harness_id);
+      if (msg.resume != null) this.store.setResume(id, msg.resume);
+    }
     else if (msg.type === 'event') this.store.addEvent(id, msg.kind, msg);
     else if (msg.type === 'ack') {
       if (rt.offered.delete(msg.message_id)) this.store.ackMessage(msg.message_id);
@@ -474,7 +523,8 @@ export class Supervisor {
       send: (p) => this.send(p),
       answer: (p) => this.answer(p),
       pause: (p) => this.pause(p),
-      cancel: (p) => this.cancel(p)
+      cancel: (p) => this.cancel(p),
+      resume: (p) => this.resume(p)
     };
     if (Object.hasOwn(admin, method)) return admin[method](params);
 

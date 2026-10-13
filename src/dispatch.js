@@ -289,7 +289,7 @@ export async function resolveCaps(ctx) {
   return { resolved, caps };
 }
 
-export function prepareMember(ctx, { resolved, caps }) {
+export function prepareMember(ctx, { resolved, caps }, { workspaceDir = null } = {}) {
   const { config, projectRoot, member, skillsDir } = ctx;
   const dialectText = loadDialect(caps.tool_dialect ?? resolved.agent);
 
@@ -308,7 +308,11 @@ export function prepareMember(ctx, { resolved, caps }) {
   let workspace;
   let cloud = null;
   let session = null;
-  if (caps.live_session === true) {
+  if (workspaceDir) {
+    // A resumed session goes back to the directory it ran in; claude keys its sessions by cwd.
+    if (!existsSync(workspaceDir)) throw new Error(`cannot resume "${member}": its workspace ${workspaceDir} is gone`);
+    workspace = { dir: workspaceDir, branch: null, kind: 'resumed' };
+  } else if (caps.live_session === true) {
     ({ workspace, session } = prepareSession(ctx, resolved));
   } else if (caps.remote === true) {
     ({ workspace, cloud } = prepareCloud(ctx, resolved));

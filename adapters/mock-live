@@ -72,7 +72,15 @@ function session() {
     const brief = start.brief;
     const script = JSON.parse(readFileSync(process.env.AGENT_TEAM_MOCK_SCRIPT, 'utf8'));
     const entry = script.by_member?.[brief.member] ?? script;
-    out({ type: 'session', harness_id: `mock-live-${brief.member}-${process.pid}`, resume: null });
+    // A resumed session keeps the id it was given; a fresh one makes its own. On resume the
+    // member plays `on_resume.steps` instead of `steps`.
+    out({ type: 'session', harness_id: `mock-live-${brief.member}-${process.pid}`,
+          resume: start.resume ?? `mock-session-${brief.member}-${process.pid}` });
+    if (start.resume) {
+      received.push(`[resume ${start.resume}] ${start.note}`);
+      out({ type: 'event', kind: 'user', text: start.note });
+    }
+    const steps = start.resume ? entry.on_resume?.steps ?? [] : entry.steps ?? [];
 
     const vars = {};
     const subst = (v) => {
@@ -85,7 +93,7 @@ function session() {
       return v;
     };
 
-    for (const step of entry.steps ?? []) {
+    for (const step of steps) {
       if (interrupted) return quit();
       drainMessages();
       if (step.say) out({ type: 'event', kind: 'text', text: step.say });
