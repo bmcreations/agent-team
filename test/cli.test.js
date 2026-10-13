@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { openStore } from '../src/store.js';
 
 const execFileAsync = promisify(execFile);
 const BIN = new URL('../bin/agent-team.js', import.meta.url).pathname;
@@ -83,18 +84,39 @@ test('"org" on a broken config gives exit 1 and parseable JSON, not a stack trac
 
 test('`agent-team report` prints a plain message, not JSON, when nothing has been logged', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'at-cli-report-'));
-  const prev = process.env.AGENT_TEAM_WORKSPACE_ROOT;
-  process.env.AGENT_TEAM_WORKSPACE_ROOT = mkdtempSync(join(tmpdir(), 'at-cli-report-ws-'));
-  try {
-    const text = await runCli(['report', '--project', dir]);
-    assert.equal(text.code, 0);
-    assert.match(text.stdout, /No delegations logged/);
-    const json = await runCli(['report', '--json', '--project', dir]);
-    assert.deepEqual(JSON.parse(json.stdout), []);
-  } finally {
-    if (prev === undefined) delete process.env.AGENT_TEAM_WORKSPACE_ROOT;
-    else process.env.AGENT_TEAM_WORKSPACE_ROOT = prev;
-  }
+  const env = {
+    ...process.env,
+    AGENT_TEAM_WORKSPACE_ROOT: mkdtempSync(join(tmpdir(), 'at-cli-report-ws-')),
+    AGENT_TEAM_SUPERVISOR_DB: join(mkdtempSync(join(tmpdir(), 'at-cli-report-db-')), 'supervisor.db')
+  };
+  const text = await runCli(['report', '--project', dir], env);
+  assert.equal(text.code, 0);
+  assert.match(text.stdout, /No delegations recorded/);
+  const json = await runCli(['report', '--json', '--project', dir], env);
+  assert.deepEqual(JSON.parse(json.stdout), []);
+  assert.equal(existsSync(env.AGENT_TEAM_SUPERVISOR_DB), false);   // report never creates a store
+});
+
+test('`agent-team report` includes a finished run from the store', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'at-cli-report-'));
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'at-cli-report-db-')), 'supervisor.db');
+  const store = openStore(dbPath);
+  const runId = store.createRun({ project: dir, task: 'live task' });
+  const lead = store.addMember({ runId, parentId: null, name: 'lead', task: 'go', depth: 0 });
+  store.setRunRoot(runId, lead.id);
+  store.setResult(lead.id, { status: 'ok', summary: 'done' });
+  store.setState(lead.id, 'done');
+  store.finishRun(runId, 'done');
+  store.close();
+  const env = {
+    ...process.env,
+    AGENT_TEAM_WORKSPACE_ROOT: mkdtempSync(join(tmpdir(), 'at-cli-report-ws-')),
+    AGENT_TEAM_SUPERVISOR_DB: dbPath
+  };
+  const text = await runCli(['report', '--project', dir], env);
+  assert.equal(text.code, 0);
+  assert.match(text.stdout, /live task/);
+  assert.equal(JSON.parse((await runCli(['report', '--json', '--project', dir], env)).stdout)[0].v, 2);
 });
 
 test('a v1 member whose agent cannot be resolved is still recorded in the run log', async () => {

@@ -5,8 +5,9 @@ import { dirname, join } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
 import { loadConfig } from '../src/config.js';
 import { renderOrg } from '../src/org.js';
-import { readRuns, renderReport } from '../src/report.js';
+import { allRuns, renderReport } from '../src/report.js';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
@@ -138,10 +139,15 @@ if (positionals[0] === 'org') {
 // run log records for anyone building on them.
 if (positionals[0] === 'report') {
   try {
-    const out = values.json
-      ? JSON.stringify(values.all ? readRuns(values.project) : readRuns(values.project).slice(-1), null, 2)
-      : renderReport(values.project, { all: values.all });
-    process.stdout.write(out + '\n');
+    // Open the store only if it exists, so `report` never creates one.
+    const dbPath = defaultStorePath();
+    const store = existsSync(dbPath) ? openStore(dbPath) : null;
+    try {
+      const out = values.json
+        ? JSON.stringify(values.all ? allRuns(values.project, { store }) : allRuns(values.project, { store }).slice(-1), null, 2)
+        : renderReport(values.project, { all: values.all, store });
+      process.stdout.write(out + '\n');
+    } finally { store?.close(); }
     process.exit(0);
   } catch (err) {
     fail(err);
@@ -230,14 +236,17 @@ if (positionals[0] === 'watch') {
   const store = openStore(defaultStorePath());
   const stop = new AbortController();
   process.once('SIGINT', () => stop.abort());
+  let code = 0;
   try {
     const status = await watchRun({ store, runId, json: values.json, signal: stop.signal, write: (s) => process.stdout.write(s) });
     if (!values.json) process.stderr.write(`agent-team: run ${runId} ${status}\n`);
-    process.exit(0);
   } catch (err) {
     process.stderr.write(`agent-team: ${err.message}\n`);
-    process.exit(1);
+    code = 1;
   } finally { store.close(); }
+  // Exit once stdout has flushed: exiting straight after a large write can cut it off.
+  process.stdout.write('', () => process.exit(code));
+  await new Promise(() => {});
 }
 
 if (positionals[0] === 'attach') {
