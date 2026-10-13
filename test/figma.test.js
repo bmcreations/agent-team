@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
-import { figmaRefs } from '../src/figma.js';
+import { figmaRefs, figmaImage } from '../src/figma.js';
 import { get } from './helpers/http.js';
 
 const TOKEN = 'figd_secret_91';
@@ -20,7 +20,7 @@ test('refs come from Figma links and from bare node ids with a default file', ()
 });
 
 // fetch stand-in: the images endpoint, then the rendered image's own URL.
-function fakeFetch(calls, { imageUrl = 'https://images.example/render.png' } = {}) {
+function fakeFetch(calls, { imageUrl = 'https://figma-alpha-api.s3.us-west-2.amazonaws.com/images/render.png' } = {}) {
   return async (url, opts = {}) => {
     calls.push({ url: String(url), token: opts.headers?.['X-Figma-Token'] ?? null });
     const u = new URL(url);
@@ -82,4 +82,36 @@ test('with no FIGMA_TOKEN the routes say how to turn previews on', async () => {
     assert.match(img.json.error, /FIGMA_TOKEN/);
     assert.equal(s.calls.length, 0);
   } finally { await s.close(); }
+});
+
+const API = (u) => new URL(u).hostname === 'api.figma.com';
+const apiReply = (id, src) => Response.json({ images: { [id]: src } });
+
+test('an image host outside Figma\'s is refused without being fetched', async () => {
+  const calls = [];
+  const fetchImpl = async (u) => { calls.push(String(u)); return API(u) ? apiReply('1:2', 'https://evil.example/x.png') : new Response(PNG); };
+  await assert.rejects(figmaImage({ token: TOKEN, fileKey: 'AbCdEf123456', nodeId: '1:2', fetchImpl }), /unexpected host/);
+  assert.equal(calls.length, 1);
+});
+
+test('a body past the cap stops being read, even with no content-length', async () => {
+  let pulled = 0;
+  const body = new ReadableStream({ pull(c) { pulled++; c.enqueue(new Uint8Array(4 * 1024 * 1024)); } });
+  const fetchImpl = async (u) => API(u)
+    ? apiReply('1:2', 'https://figma-alpha-api.s3.us-west-2.amazonaws.com/a.png')
+    : new Response(body);
+  await assert.rejects(figmaImage({ token: TOKEN, fileKey: 'AbCdEf123456', nodeId: '1:2', fetchImpl }), /over 10 MiB/);
+  assert.ok(pulled <= 5, `stopped early (pulled ${pulled})`);
+});
+
+test('the cache is bounded by bytes and evicts the oldest first', async () => {
+  const cache = new Map();
+  const fetchImpl = async (u) => {
+    if (API(u)) return apiReply(new URL(u).searchParams.get('ids'), 'https://figma-alpha-api.s3.us-west-2.amazonaws.com/a.png');
+    return new Response(new Uint8Array(400));
+  };
+  for (const n of ['1:1', '1:2', '1:3']) {
+    await figmaImage({ token: TOKEN, fileKey: 'AbCdEf123456', nodeId: n, fetchImpl, cache, maxCacheBytes: 1000 });
+  }
+  assert.deepEqual([...cache.keys()], ['AbCdEf123456/1:2', 'AbCdEf123456/1:3']);
 });
