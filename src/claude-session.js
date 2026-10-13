@@ -64,7 +64,11 @@ export function runClaudeSession({ artifacts }) {
   let inTurn = false;
   let stopping = false;
   let interrupting = false;
-  let cost = 0;                // claude's total_cost_usd is cumulative for the process
+  // claude's total_cost_usd is cumulative for the session, and a --resume restores it, so each
+  // idle reports the change from `cost`. On resume `cost` starts at the supervisor's record of
+  // the member's spend: turns made outside the supervisor (a human's take-over) are then
+  // counted at the next turn.
+  let cost = 0;
   let turns = 0;
   let lastText = '';
   let lastError = false;
@@ -138,8 +142,9 @@ export function runClaudeSession({ artifacts }) {
                            artifacts: art, log_path: logPath }));
   }
 
-  function start({ brief: b, resume = null, note = null }) {
+  function start({ brief: b, resume = null, note = null, cost_usd: baseline = null }) {
     brief = b;
+    if (resume && Number.isFinite(baseline) && baseline > 0) cost = baseline;
     if (!existsSync(brief.cwd)) return finish({ status: 'failed', summary: `cwd does not exist: ${brief.cwd}`, log_path: logPath });
     const mcpConfig = writeMcpConfig(logDir, process.env);
     claude = spawn('claude', claudeSessionArgs(brief, { resume, mcpConfig }), {

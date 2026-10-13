@@ -6,7 +6,8 @@
 // open until an interrupt or a message containing RELEASE; CRASH exits 3. Like claude, a turn
 // whose text contains LINGER runs on after stdin closes (until a signal ends it); otherwise
 // stdin closing ends the process. total_cost_usd is
-// cumulative, 0.25 per turn. Every start appends {argv, cwd, pid, mcp_tool_timeout, mcp} to
+// cumulative, 0.25 per turn; like claude, a --resume starts from the session's earlier total,
+// $FAKE_CLAUDE_RESUME_COST (default 0). Every start appends {argv, cwd, pid, mcp_tool_timeout, mcp} to
 // $FAKE_CLAUDE_LOG. Without -p it is a take-over: it records and exits $FAKE_CLAUDE_EXIT.
 import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -26,7 +27,7 @@ if (!argv.includes('-p')) process.exit(Number(process.env.FAKE_CLAUDE_EXIT ?? 0)
 const sid = flag('--resume') ?? `fake-sid-${process.pid}`;
 const replay = argv.includes('--replay-user-messages');
 const out = (m) => process.stdout.write(JSON.stringify(m) + '\n');
-let cost = 0;
+let cost = argv.includes('--resume') ? Number(process.env.FAKE_CLAUDE_RESUME_COST ?? 0) : 0;
 let turn = null;   // the first text of the open turn
 
 const endTurn = (error) => {

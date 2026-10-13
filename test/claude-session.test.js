@@ -15,13 +15,13 @@ const BIN = new URL('../bin/agent-team.js', import.meta.url).pathname;
 
 // `adapters/claude session` against test/fixtures/fake-claude. `next(type)` resolves with the
 // next adapter line of that type; `exit` with the exit code.
-function session() {
+function session(env = {}) {
   const log = join(mkdtempSync(join(tmpdir(), 'at-fc-')), 'claude.jsonl');
   const child = spawn(ADAPTER, ['session'], {
     stdio: ['pipe', 'pipe', 'inherit'],
     env: {
       ...process.env, PATH: `${FAKE_BIN}:${process.env.PATH}`, FAKE_CLAUDE_LOG: log,
-      AGENT_TEAM_TEAM_SOCKET: '/tmp/team.sock', AGENT_TEAM_TEAM_TOKEN: 'tok-1'
+      AGENT_TEAM_TEAM_SOCKET: '/tmp/team.sock', AGENT_TEAM_TEAM_TOKEN: 'tok-1', ...env
     }
   });
   const lines = [];
@@ -126,6 +126,34 @@ test('a resumed session passes --resume and opens with the note', { timeout: 500
   await s.next('result');
   const [run] = s.starts();
   assert.equal(run.argv[run.argv.indexOf('--resume') + 1], 'sid-7');
+});
+
+// claude restores a resumed session's total_cost_usd, so its first result counts the earlier
+// session again; the supervisor's cost_usd is the baseline that turn's delta is taken from.
+test('a resumed session with a cost_usd baseline reports only the new turn\'s cost', { timeout: 5000 }, async () => {
+  const s = session({ FAKE_CLAUDE_RESUME_COST: '1.5' });
+  try {
+    s.send({ type: 'start', brief: brief(), resume: 'sid-7', note: 'Resumed by ana.', cost_usd: 1.5 });
+    assert.deepEqual(await s.next('idle'), { type: 'idle', cost_usd: 0.25 });
+    s.send({ type: 'stop' });
+    assert.equal((await s.next('result')).usage.cost_usd, 1.75);
+  } finally { s.close(); }
+});
+
+test('a resumed session without cost_usd counts from zero, as before', { timeout: 5000 }, async () => {
+  const s = session({ FAKE_CLAUDE_RESUME_COST: '1.5' });
+  try {
+    s.send({ type: 'start', brief: brief(), resume: 'sid-7', note: 'Resumed by ana.' });
+    assert.deepEqual(await s.next('idle'), { type: 'idle', cost_usd: 1.75 });
+  } finally { s.close(); }
+});
+
+test('a baseline above claude\'s total never reports a negative cost', { timeout: 5000 }, async () => {
+  const s = session({ FAKE_CLAUDE_RESUME_COST: '1.5' });
+  try {
+    s.send({ type: 'start', brief: brief(), resume: 'sid-7', note: 'Resumed by ana.', cost_usd: 9 });
+    assert.deepEqual(await s.next('idle'), { type: 'idle' });
+  } finally { s.close(); }
 });
 
 test('claude dying mid-session fails the member with its exit', { timeout: 5000 }, async () => {
