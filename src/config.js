@@ -434,6 +434,8 @@ export function parseConfig(raw, path) {
     max_delegations: 20,
     max_parallel: 3,
     cloud_max_cost_usd: 5,
+    stall_minutes: 10,
+    max_cost_usd: null,
     ...(raw.defaults ?? {})
   };
   // Checked after the merge, not on raw.defaults, so a bad value baked into the hardcoded
@@ -454,6 +456,23 @@ export function parseConfig(raw, path) {
     throw new Error(
       `${path}: "defaults.cloud_max_cost_usd" must be a positive number of dollars — got ` +
       `${JSON.stringify(defaults.cloud_max_cost_usd)}`
+    );
+  }
+
+  // A working member with no events for this long is reported to its manager as stalled.
+  if (typeof defaults.stall_minutes !== 'number' || !Number.isFinite(defaults.stall_minutes) ||
+      defaults.stall_minutes <= 0) {
+    throw new Error(
+      `${path}: "defaults.stall_minutes" must be a positive number of minutes — got ` +
+      `${JSON.stringify(defaults.stall_minutes)}`
+    );
+  }
+  // What a supervisor run may spend, summed from what harnesses report; null is no cap.
+  if (defaults.max_cost_usd !== null && (typeof defaults.max_cost_usd !== 'number' ||
+      !Number.isFinite(defaults.max_cost_usd) || defaults.max_cost_usd <= 0)) {
+    throw new Error(
+      `${path}: "defaults.max_cost_usd" must be a positive number of dollars, or null — got ` +
+      `${JSON.stringify(defaults.max_cost_usd)}`
     );
   }
 

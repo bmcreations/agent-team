@@ -353,8 +353,7 @@ but cannot `attach` until the fleet spec adds a browser terminal.
   sees it finish as failed. There are no automatic retries.
 - **Stalls and timeouts.** A member with no events for `stall_minutes` (default 10) emits
   `stalled` to its manager and the web view. The existing wall-clock timeout interrupts, then
-  fails. Plan 1a does not enforce it on v2 members: `--timeout` only reaches the brief until
-  interrupt and cancel land in plan 1b. `wait_for` times out after 10 minutes by default and returns "nothing yet", leaving
+  fails. It counts only time the member is working, not time blocked in `wait_for` or `ask_human`. `wait_for` times out after 10 minutes by default and returns "nothing yet", leaving
   the manager to decide whether to keep waiting. `ask_human` defaults to 30 minutes. `wait_for`
   also returns on a paused report instead of waiting on it.
 - **Messages to finished members** are rejected back to the sender.

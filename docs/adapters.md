@@ -41,22 +41,22 @@ another member can steer while it works. An adapter opts in by reporting `"proto
 workspace, as for `run`. `probe` and `capabilities` are unchanged. An adapter that reports
 anything else, or nothing, stays v1.
 
-The dispatch timeout does not apply to a session yet. It reaches the brief, but the supervisor
-neither interrupts nor kills a session when it expires. Enforcement comes with `interrupt` and
-cancel in plan 1b.
+The supervisor enforces the run's timeout on a session by counting only the time it is working:
+time blocked in `wait_for` or `ask_human`, or idle between turns, does not count, and a resumed
+session starts a fresh count. Past the timeout it sends `interrupt` and fails the member.
 
 `session` speaks newline-delimited JSON on stdin and stdout.
 
 | Direction | Message | Meaning |
 |---|---|---|
-| in | `start {brief}` | Begin, with the brief composed as for `run`. |
+| in | `start {brief, resume, note}` | Begin. `resume` is null for a fresh start; otherwise it is the string this adapter sent in `session {resume}`, and `note` is the first user turn to send after resuming. |
 | in | `message {id, from, text}` | Inbox delivery. |
 | in | `stop` | Finish after the current turn. |
-| in | `interrupt` | Finish now. |
+| in | `interrupt` | End the turn now and exit: send `idle {interrupted: true}` and no `result`. |
 | out | `session {harness_id, resume}` | The harness session id and how to resume it. Sent first. |
 | out | `event {kind, ...}` | Text, tool call, tool result, or turn end, normalized across harnesses. |
 | out | `ack {message_id}` | The harness consumed the message. For `claude`, that is the user message echoed back by `--replay-user-messages`. Writing it to stdin is not enough. |
-| out | `idle` | The turn ended. |
+| out | `idle {interrupted?, cost_usd?}` | The turn ended. `cost_usd` is this turn's cost in dollars, if the harness reports one; the supervisor sums it against `max_cost_usd`. |
 | out | `result {status, summary, usage}` | Final outcome. |
 
 Adapter output is untrusted, and the supervisor shape-checks every line.
@@ -135,6 +135,9 @@ by `brief.member`; otherwise the script is the entry.
 Before each step it acks and records any queued message. After the last step it sends `idle`,
 then keeps accepting messages until `stop` or `interrupt`, and ends with a `result` that also
 carries `received` (the messages it saw) and `tool_results`.
+
+A member's script entry can also set `on_resume.steps`, played instead of `steps` when the
+session is started with a `resume` id, and `turn_cost_usd`, reported on every `idle`.
 
 ## Shipped adapters
 

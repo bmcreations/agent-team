@@ -44,32 +44,38 @@ export class Supervisor {
   #runWaiters = new Map();    // runId -> [resolve]
   #resumes = new Map();       // memberId -> { note } for a paused member's next launch
   #closing = false;
+  #ticker = null;
+  #lastTick = null;
   #resolutions = new Map();   // memberId -> Promise of { resolved, caps } | { team: true } | { error }
 
   constructor({ store, adapterDir, skillsDir = null, socketPath, env = {}, maxRunning = 6,
-                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000 }) {
-    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs });
+                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000 }) {
+    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs });
   }
 
   async start() {
     this.server = await serveRpc(this.socketPath, (req) => this.#handle(req));
+    this.#ticker = setInterval(() => this.#tick(), this.tickMs);
+    this.#ticker.unref();
   }
 
   // Ends every live adapter and leaves the members' states as they are, so the next start
   // can recover them. Blocked tool calls are settled first, or their RPC connections hang.
   async close() {
     this.#closing = true;
+    clearInterval(this.#ticker);
     const live = [...this.#live.values()];
     for (const rt of live) this.#settle(rt, { error: 'the agent-team supervisor is shutting down' });
     await Promise.all(live.map((rt) => rt.session?.end(this.graceMs)));
     await this.server?.close();
   }
 
-  submit({ projectRoot, member, task, timeoutMs }) {
+  submit({ projectRoot, member, task, timeoutMs, maxCostUsd }) {
     const config = loadConfig(projectRoot);
     if (!Object.hasOwn(config.members, member)) throw new Error(`unknown member "${member}"`);
     const limits = { budget: config.defaults.max_delegations,
-                     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : this.timeoutMs };
+                     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : this.timeoutMs,
+                     maxCostUsd: maxCostUsd ?? config.defaults.max_cost_usd };
     // Limits and owner are stored so a restarted supervisor can rebuild the run.
     const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath });
     this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs });
@@ -95,7 +101,7 @@ export class Supervisor {
     // A stopping or cancelling member will not read another message. A pausing or paused one
     // will, after it is resumed.
     const rt = this.#live.get(member_id);
-    if (TERMINAL.has(m.state) || rt?.stopping || rt?.halt?.kind === 'cancel') throw new Error(`"${m.name}" has finished — delegate a new task`);
+    if (TERMINAL.has(m.state) || rt?.stopping || (rt?.halt && rt.halt.kind !== 'pause')) throw new Error(`"${m.name}" has finished — delegate a new task`);
     if (typeof text !== 'string' || !text.trim()) throw new Error('a message needs text');
     const id = this.store.enqueue({ to: member_id, fromKind: 'human', fromName: from, text });
     this.#pump(member_id);
@@ -137,8 +143,9 @@ export class Supervisor {
 
   // Relaunches paused members in their own workspaces, with their harness session resumed
   // and `note` as the first user turn. Queued messages are delivered once the session is up.
-  resume({ subtree = false, note = null, by = 'local', ...who } = {}) {
+  resume({ subtree = false, note = null, by = 'local', max_cost_usd = null, ...who } = {}) {
     const top = this.#target(who);
+    this.#allowSpend(top.run_id, max_cost_usd);
     if (!subtree) {
       this.#unpause(top, { note, by });
       return { members: [{ id: top.id, name: top.name }], skipped: [] };
@@ -154,6 +161,19 @@ export class Supervisor {
       }
     }
     return { members, skipped };
+  }
+
+  // A run paused at its cost cap resumes only with a higher cap.
+  #allowSpend(runId, cap) {
+    if (cap != null) {
+      if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) throw new Error('max_cost_usd must be a positive number');
+      this.store.setRunCap(runId, cap);
+    }
+    const run = this.store.run(runId);
+    if (run.max_cost_usd != null && run.cost_usd >= run.max_cost_usd) {
+      throw new Error(`run ${runId} has spent $${run.cost_usd.toFixed(2)} of its $${run.max_cost_usd.toFixed(2)} cap — ` +
+                      'pass max_cost_usd to raise it');
+    }
   }
 
   #unpause(m, { note, by }) {
@@ -239,7 +259,9 @@ export class Supervisor {
       return this.#paused(m, { by, now: false });
     }
     if (rt.oneShot) throw new Error(`"${m.name}" runs one-shot and cannot be ${verb} — wait for its result`);
-    if (rt.halt?.kind === 'cancel') throw new Error(`"${m.name}" is already being cancelled`);
+    if (rt.halt && rt.halt.kind !== 'pause') {
+      throw new Error(`"${m.name}" is already being ${rt.halt.kind === 'cancel' ? 'cancelled' : 'stopped: it timed out'}`);
+    }
     if (rt.halt && kind === 'pause' && (!now || rt.halt.now)) throw new Error(`"${m.name}" is already being paused`);
     if (rt.stopping && !rt.halt) throw new Error(`"${m.name}" has finished its work and is stopping`);
     rt.halt = { kind, now: now || kind === 'cancel', by };
@@ -253,7 +275,8 @@ export class Supervisor {
   }
 
   #haltNote(rt) {
-    return `${rt.halt.kind === 'pause' ? 'paused' : 'cancelled'} by ${rt.halt.by} — end your turn now`;
+    const verb = { pause: 'paused', cancel: 'cancelled', timeout: 'stopped' }[rt.halt.kind];
+    return `${verb} by ${rt.halt.by} — end your turn now`;
   }
 
   // A halting member's adapter has exited, or it never spawned.
@@ -264,6 +287,9 @@ export class Supervisor {
     const { kind, by, now } = rt.halt;
     if (kind === 'cancel') {
       return this.#conclude(rt.member, 'cancelled', { status: 'failed', summary: `cancelled by ${by}` }, rt.workspace);
+    }
+    if (kind === 'timeout') {
+      return this.#conclude(rt.member, 'failed', { status: 'failed', summary: `timed out after ${rt.halt.seconds}s of work` }, rt.workspace);
     }
     this.#paused(rt.member, { by, now });
   }
@@ -279,6 +305,44 @@ export class Supervisor {
     if (m.parent_id == null) return;
     this.store.enqueue({ to: m.parent_id, fromKind: 'report', fromName: m.name, reportId: m.id, text });
     this.#pump(m.parent_id);
+  }
+
+  // ---- limits ----
+
+  // Every tickMs. Only a member doing work counts toward its timeout and its stall clock: one
+  // blocked in wait_for or ask_human, idle between turns, or already stopping is waiting on
+  // someone else. The timeout counts from each launch, so a resumed member gets it afresh.
+  #tick() {
+    const at = Date.now();
+    const elapsed = at - (this.#lastTick ?? at);
+    this.#lastTick = at;
+    for (const [id, rt] of this.#live) {
+      if (!rt.session) continue;
+      if (rt.waiter || rt.question || rt.idle || rt.halt || rt.stopping) { rt.quietSince = at; continue; }
+      rt.activeMs += elapsed;
+      const { timeoutMs, config } = this.#runs.get(rt.member.run_id);
+      if (rt.activeMs >= timeoutMs) {
+        this.store.addEvent(id, 'timed_out', { after_s: timeoutMs / 1000 });
+        rt.halt = { kind: 'timeout', now: true, by: 'timeout', seconds: timeoutMs / 1000 };
+        rt.session.end(this.graceMs);
+        continue;
+      }
+      if (!rt.stalled && at - rt.quietSince >= config.defaults.stall_minutes * 60_000) {
+        rt.stalled = true;
+        const quiet = Math.round((at - rt.quietSince) / 1000);
+        this.store.addEvent(id, 'stalled', { quiet_s: quiet });
+        this.#notifyManager(rt.member, `stalled: no events for ${quiet}s`);
+      }
+    }
+  }
+
+  // Harness-reported cost. Past the run's cap, the whole run pauses after its current turns.
+  #spend(runId, usd) {
+    const total = this.store.addRunCost(runId, usd);
+    const { max_cost_usd: cap, root_member: root } = this.store.run(runId);
+    if (cap == null || total < cap || TERMINAL.has(this.store.member(root).state)) return;
+    const { members } = this.#intervene({ member_id: root, subtree: true, by: 'cost cap' }, 'pause');
+    if (members.length) this.store.addEvent(root, 'cost_cap', { cost_usd: total, max_cost_usd: cap });
   }
 
   // ---- recovery ----
@@ -415,7 +479,8 @@ export class Supervisor {
     this.#resumes.delete(id);
     // Registered before any await, so #drain counts this member against the caps at once.
     const rt = { member: m, session: null, resolved: null, caps: null, workspace: null, result: null,
-                 offered: new Set(), staleOffers: new Set(), idle: false, stopping: false, waiter: null, question: null };
+                 offered: new Set(), staleOffers: new Set(), idle: false, stopping: false, waiter: null, question: null,
+                 activeMs: 0, quietSince: Date.now(), stalled: false };
     this.#live.set(id, rt);
     this.store.setState(id, 'running');
     this.store.addEvent(id, 'started', {});
@@ -469,6 +534,8 @@ export class Supervisor {
   #onLine(id, msg) {
     const rt = this.#live.get(id);
     if (!rt) return;
+    rt.quietSince = Date.now();
+    rt.stalled = false;
     if (msg.type === 'session') {
       this.store.setHarness(id, msg.harness_id);
       if (msg.resume != null) this.store.setResume(id, msg.resume);
@@ -486,6 +553,7 @@ export class Supervisor {
       }
       rt.staleOffers = new Set(rt.offered);
       rt.idle = true;
+      if (msg.cost_usd) this.#spend(rt.member.run_id, msg.cost_usd);
       this.#pump(id);
     } else if (msg.type === 'result') rt.result = msg;
   }

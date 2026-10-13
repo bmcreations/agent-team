@@ -130,10 +130,12 @@ function session() {
     }
     if (interrupted) return quit();
     drainMessages();
-    out({ type: 'idle' });
+    // `turn_cost_usd` is reported on every idle, as a harness reports a turn's cost.
+    const idle = () => out({ type: 'idle', ...(entry.turn_cost_usd ? { cost_usd: entry.turn_cost_usd } : {}) });
+    idle();
     for (;;) {
       const m = await next();
-      if (m.type === 'message') { accept(m); out({ type: 'idle' }); continue; }
+      if (m.type === 'message') { accept(m); idle(); continue; }
       if (m.type === 'interrupt') return quit();
       if (m.type === 'stop') break;
     }

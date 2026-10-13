@@ -733,3 +733,15 @@ test('defaults.max_parallel defaults to 3 and must be a positive integer', () =>
     /"defaults.max_parallel" must be an integer >= 1/
   );
 });
+
+test('defaults.stall_minutes defaults to 10 and max_cost_usd to no cap', () => {
+  const base = { members: { a: { agent: 'mock' } }, deny_paths: ['x'] };
+  const { defaults } = parseConfig(base, 'c.json');
+  assert.equal(defaults.stall_minutes, 10);
+  assert.equal(defaults.max_cost_usd, null);
+  assert.equal(parseConfig({ ...base, defaults: { stall_minutes: 0.5, max_cost_usd: 2 } }, 'c.json').defaults.max_cost_usd, 2);
+  assert.throws(() => parseConfig({ ...base, defaults: { stall_minutes: 0 } }, 'c.json'),
+    /"defaults.stall_minutes" must be a positive number of minutes/);
+  assert.throws(() => parseConfig({ ...base, defaults: { max_cost_usd: '5' } }, 'c.json'),
+    /"defaults.max_cost_usd" must be a positive number of dollars, or null/);
+});
