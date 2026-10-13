@@ -169,14 +169,19 @@ export class Supervisor {
     if (!t) throw new Error(`unknown thread #${thread_id}`);
     if (typeof text !== 'string' || !text.trim()) throw new Error('a reply needs text');
     if (t.state === 'done' || t.state === 'declined') throw new Error(`thread #${t.id} is ${t.state}`);
-    this.store.addThreadPost({ threadId: t.id, side: 'human', author: by, text });
-    const live = (id) => {
-      const m = id == null ? null : this.store.member(id);
-      return m && !TERMINAL.has(m.state) && this.#runs.has(m.run_id) ? m.id : null;
-    };
-    for (const to of new Set([live(this.#holder(t)), live(t.owner_member)])) {
-      if (to != null) this.#deliver(t.id, to, { side: 'human', author: by, text, record: false });
+    // Who can be reached comes first: a post nobody was given is not recorded.
+    const holders = [this.#holder(t), t.owner_member].filter((id) => id != null);
+    const reach = [...new Set(holders)].filter((id) => {
+      const m = this.store.member(id);
+      const rt = this.#live.get(id);
+      return !TERMINAL.has(m.state) && this.#runs.has(m.run_id) && !rt?.stopping && !(rt?.halt && rt.halt.kind !== 'pause');
+    });
+    if (!reach.length) {
+      for (const id of holders) this.#owned(this.store.member(id));   // another supervisor's run: the read-only error
+      throw new Error(`thread #${t.id} has no live member to reach`);
     }
+    this.store.addThreadPost({ threadId: t.id, side: 'human', author: by, text });
+    for (const to of reach) this.#deliver(t.id, to, { side: 'human', author: by, text, record: false });
     return { thread_id: t.id, state: t.state };
   }
 
