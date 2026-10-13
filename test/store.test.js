@@ -331,7 +331,15 @@ test('a version 6 database gains threads, posts, and the thread columns', () => 
   assert.deepEqual(store.threads({}), []);
   const runId = store.createRun({ project: '/b', task: 't', threadId: 7 });
   assert.equal(store.run(runId).thread_id, 7);
+  const mem = store.addMember({ runId, parentId: null, name: 'l', task: 't', depth: 0 });
+  const msg = store.enqueue({ to: mem.id, fromKind: 'team', fromName: 'x', text: 't', threadId: 3 });
+  assert.equal(store.message(msg).thread_id, 3);
   store.close();
+  const check = new DatabaseSync(path);
+  const names = check.prepare("SELECT name FROM sqlite_master").all().map((r) => r.name);
+  for (const n of ['threads', 'thread_posts', 'threads_to', 'threads_from', 'thread_posts_thread', 'threads_parent'])
+    assert.ok(names.includes(n), n);
+  check.close();
 });
 
 const mkThread = (store, run, m, over = {}) => store.addThread({
@@ -390,5 +398,42 @@ test('a message can carry its thread', () => {
   store.enqueue({ to: m.id, fromKind: 'team', fromName: 'b/lead', text: 'x', threadId: 5 });
   store.enqueue({ to: m.id, fromKind: 'human', fromName: 'h', text: 'y' });
   assert.deepEqual(store.takeQueued(m.id).map((x) => x.thread_id), [5, null]);
+  store.close();
+});
+
+test('moveThread allows only the legal moves and rejects the rest', () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'a', task: 't', depth: 0 });
+  const id = mkThread(store, run, m);
+  assert.equal(store.moveThread(id, 'open', 'done'), true);     // a question answered straight away
+  assert.equal(store.moveThread(id, 'done', 'open'), false);
+  const d = mkThread(store, run, m);
+  assert.equal(store.moveThread(d, 'open', 'declined'), true);
+  assert.equal(store.moveThread(d, 'declined', 'accepted'), false);
+  assert.equal(store.moveThread(d, 'declined', 'done'), false);
+  const x = mkThread(store, run, m);
+  assert.equal(store.moveThread(x, 'open', 'acepted'), false);
+  assert.equal(store.moveThread(x, 'open', 'open'), false);
+  assert.equal(store.thread(x).state, 'open');
+  store.close();
+});
+
+test('thread posts take a known side, and a human post carries no state', () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'a', task: 't', depth: 0 });
+  const id = mkThread(store, run, m);
+  assert.throws(() => store.addThreadPost({ threadId: id, side: 'robot', author: 'x', text: 'y' }), /side/);
+  assert.throws(() => store.addThreadPost({ threadId: id, side: 'human', author: 'x', text: 'y', state: 'accepted' }), /human/);
+  assert.ok(store.addThreadPost({ threadId: id, side: 'receiver', author: 'x', text: 'y', state: 'accepted' }));
+  assert.equal(store.threadPosts(id).length, 2);
+  store.close();
+});
+
+test('threads() caps its limit and threadsInState([]) is empty', () => {
+  const store = openStore(':memory:');
+  assert.deepEqual(store.threadsInState([]), []);
+  assert.deepEqual(store.threads({ limit: 1e12 }), []);
   store.close();
 });

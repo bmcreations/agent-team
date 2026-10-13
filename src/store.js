@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS questions (
 // Each entry upgrades the schema by one version. SCHEMA stays the 1a shape, so a fresh
 // database and a 1a one take the same path. BEGIN IMMEDIATE serializes two CLIs opening the
 // same file; the version is re-read inside the lock so the loser applies nothing twice.
+// Legal thread moves; the supervisor narrows them further by kind. declined and done are final.
+const THREAD_MOVES = { open: ['accepted', 'declined', 'done'], accepted: ['done'] };
+const POST_SIDES = ['requester', 'receiver', 'human'];
+
 const MIGRATIONS = [
   `ALTER TABLE members ADD COLUMN resume TEXT;
    ALTER TABLE runs ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
@@ -71,6 +75,7 @@ const MIGRATIONS = [
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
    CREATE INDEX threads_to ON threads(to_project, state);
    CREATE INDEX threads_from ON threads(from_member, state);
+   CREATE INDEX threads_parent ON threads(parent_thread);
    CREATE TABLE thread_posts (
      id INTEGER PRIMARY KEY, thread_id INTEGER NOT NULL REFERENCES threads(id),
      side TEXT NOT NULL, author TEXT NOT NULL, text TEXT NOT NULL, state TEXT, at INTEGER NOT NULL);
@@ -237,19 +242,22 @@ export function openStore(path) {
       if (project != null) { where.push('(from_project = ? OR to_project = ?)'); args.push(project, project); }
       if (state != null) { where.push('state = ?'); args.push(state); }
       return q(`SELECT * FROM threads ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`)
-        .all(...args, limit).map(threadRow);
+        .all(...args, Math.min(Math.max(1, Math.trunc(limit) || 200), 1000)).map(threadRow);
     },
     // Conditional on the current state, so two racing moves cannot both win.
-    moveThread: (id, from, to, { result = null } = {}) =>
+    moveThread: (id, from, to, { result = null } = {}) => !THREAD_MOVES[from]?.includes(to) ? false :
       q('UPDATE threads SET state = ?, result = COALESCE(?, result), updated_at = ? WHERE id = ? AND state = ?')
         .run(to, result == null ? null : JSON.stringify(result), now(), id, from).changes > 0,
     setThreadOwner: (id, memberId) =>
       q('UPDATE threads SET owner_member = ?, updated_at = ? WHERE id = ?').run(memberId, now(), id),
     setThreadRun: (id, runId) =>
       q('UPDATE threads SET run_id = ?, updated_at = ? WHERE id = ?').run(runId, now(), id),
-    addThreadPost: ({ threadId, side, author, text, state = null }) => Number(
-      q('INSERT INTO thread_posts (thread_id, side, author, text, state, at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(threadId, side, author, text, state, now()).lastInsertRowid),
+    addThreadPost({ threadId, side, author, text, state = null }) {
+      if (!POST_SIDES.includes(side)) throw new Error(`thread post side "${side}" is not one of ${POST_SIDES.join(', ')}`);
+      if (side === 'human' && state != null) throw new Error('a human post cannot carry a thread state');
+      return Number(q('INSERT INTO thread_posts (thread_id, side, author, text, state, at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(threadId, side, author, text, state, now()).lastInsertRowid);
+    },
     threadPosts: (threadId) => q('SELECT * FROM thread_posts WHERE thread_id = ? ORDER BY id').all(threadId),
     openThreadsFrom: (memberId) =>
       q("SELECT * FROM threads WHERE from_member = ? AND state IN ('open', 'accepted') ORDER BY id")
@@ -257,8 +265,8 @@ export function openStore(path) {
     unownedThreadsTo: (project, member) =>
       q("SELECT * FROM threads WHERE state = 'open' AND owner_member IS NULL AND to_project = ? AND to_member = ? ORDER BY id")
         .all(project, member).map(threadRow),
-    threadsInState: (states) => q(
-      `SELECT * FROM threads WHERE state IN (${states.map(() => '?').join(',') || "''"}) ORDER BY id`)
+    threadsInState: (states) => !states.length ? [] : q(
+      `SELECT * FROM threads WHERE state IN (${states.map(() => '?').join(',')}) ORDER BY id`)
       .all(...states).map(threadRow),
 
     addQuestion: ({ memberId, question, options = null }) => Number(
