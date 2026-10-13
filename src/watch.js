@@ -2,13 +2,14 @@ import { describe } from './web/feed.js';
 
 const pad = (n) => String(n).padStart(2, '0');
 const clock = (at) => { const d = new Date(at); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
-const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+// Agent output reaches a terminal here, so control characters (ESC, BEL, OSC) are dropped.
+const plain = (s) => String(s ?? '').replace(/\s+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
 
 export function formatRow(row) {
   if (row.type === 'message') {
-    return `${clock(row.at)}  ${row.from_name} → ${row.to_name}  message  ${oneLine(row.text)}`;
+    return `${clock(row.at)}  ${plain(row.from_name)} → ${plain(row.to_name)}  message  ${plain(row.text)}`;
   }
-  return `${clock(row.at)}  ${row.member}  ${row.kind}  ${oneLine(describe(row))}`.trimEnd();
+  return `${clock(row.at)}  ${plain(row.member)}  ${plain(row.kind)}  ${plain(describe(row))}`.trimEnd();
 }
 
 // Follows one run in the store: every write lands there, whichever supervisor made it, so

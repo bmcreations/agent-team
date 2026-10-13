@@ -19,6 +19,16 @@ test('a row reads as time, member, kind and the event\'s line', () => {
                '09:05:07  b → lead  message  use tabs');
 });
 
+test('terminal control sequences in agent output never reach the formatted line', () => {
+  const evil = '\x1b]52;c;ZXZpbA==\x07 hi \x1b[2J';
+  const at = Date.now();
+  const lines = [
+    formatRow({ type: 'event', at, member: `lead${evil}`, kind: 'text', body: { text: evil } }),
+    formatRow({ type: 'message', at, from_name: evil, to_name: evil, text: evil })
+  ];
+  for (const l of lines) assert.doesNotMatch(l, /[\u0000-\u001f\u007f-\u009f]/);
+});
+
 test('watch prints what is there, follows new rows, and returns when the run ends', async () => {
   const store = openStore(':memory:');
   const runId = store.createRun({ project: '/p', task: 't' });
