@@ -23,6 +23,11 @@ export function memberArgs([run, member]) {
 
 export const whoAmI = () => userInfo().username;
 
+// What a handback left paused instead of resuming, and how to resume it.
+export function handbackNotice({ skipped = [] } = {}) {
+  return skipped.map((s) => `agent-team: ${s.name} is still paused: ${s.reason}; resume with --max-cost-usd\n`).join('');
+}
+
 export function renderQuestions(questions) {
   if (!questions.length) return 'no open questions\n';
   return questions.map((q) => {
@@ -49,7 +54,9 @@ export async function attach(who, { call = adminCall, run = spawnSync, log = (s)
   }
   if (r.error) log(`agent-team: could not run ${t.argv[0]}: ${r.error.message}\n`);
   try {
-    return await call('handback', { member_id: t.member_id, by, drove: !r.error });
+    const back = await call('handback', { member_id: t.member_id, by, drove: !r.error });
+    log(handbackNotice(back));
+    return back;
   } catch (err) {
     log(`agent-team: ${t.name} is still taken over: ${err.message}\n` +
         `agent-team: hand it back with \`agent-team handback <run> ${t.name}\` once \`agent-team serve\` is up.\n`);

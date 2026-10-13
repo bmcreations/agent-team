@@ -167,3 +167,32 @@ test('handback after a claude that never started carries no "drove" note', async
     assert.doesNotMatch(result.summary, /drove this session/);
   } finally { await sup.close(); }
 });
+
+test('handback leaves a member paused when its run is at its cost cap, and says so', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go', maxCostUsd: 1 });
+    await until(() => store.member(memberId).state === 'waiting');
+    sup.pause({ member_id: memberId });
+    await until(() => store.member(memberId).state === 'paused');
+    // Stands in for a human's claude session spending past the cap while it was taken over.
+    const call = async (method, params) => {
+      if (method === 'handback') return sup.handback(params);
+      store.setState(memberId, 'taken_over');
+      store.addRunCost(runId, 1.5);
+      return { member_id: memberId, name: 'solo', cwd: root, argv: ['claude'] };
+    };
+    let said = '';
+    const res = await attach({ member_id: memberId }, { call, run: () => ({ status: 0 }), log: (s) => { said += s; } });
+    assert.deepEqual(res.members, []);
+    assert.deepEqual(res.skipped, [{ id: memberId, name: 'solo', reason: 'run is at its cost cap ($1.50 of $1.00)' }]);
+    assert.equal(store.member(memberId).state, 'paused');
+    assert.deepEqual(store.events(memberId).findLast((e) => e.kind === 'cost_cap').body, { cost_usd: 1.5, max_cost_usd: 1 });
+    assert.match(said, /solo is still paused: run is at its cost cap \(\$1\.50 of \$1\.00\); resume with --max-cost-usd/);
+    sup.resume({ member_id: memberId, max_cost_usd: 5 });
+    assert.equal((await sup.waitRun(runId)).status, 'ok');
+  } finally { await sup.close(); }
+});

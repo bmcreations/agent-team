@@ -224,12 +224,20 @@ export class Supervisor {
 
   // The human's terminal session has ended: run the member headless again from that session.
   // drove is false when the human's claude never started, so there is nothing to tell it.
+  // A run at its cost cap (the human's turns cost too) leaves the member paused until a
+  // resume raises the cap; `skipped` says why.
   handback({ by = 'local', drove = true, ...who } = {}) {
     const m = this.#target(who);
     if (m.state !== 'taken_over') throw new Error(`"${m.name}" is not taken over (${m.state})`);
     this.store.setState(m.id, 'paused');
     this.store.addEvent(m.id, 'handed_back', { by });
     this.#notifyManager(m, `handed back by ${by}`);
+    const { cost_usd: spent, max_cost_usd: cap } = this.store.run(m.run_id);
+    if (cap != null && spent >= cap) {
+      this.store.addEvent(m.id, 'cost_cap', { cost_usd: spent, max_cost_usd: cap });
+      const reason = `run is at its cost cap ($${spent.toFixed(2)} of $${cap.toFixed(2)})`;
+      return { members: [], skipped: [{ id: m.id, name: m.name, reason }] };
+    }
     this.#unpause(this.store.member(m.id), { note: null, by, drove });
     return { members: [{ id: m.id, name: m.name }], skipped: [] };
   }

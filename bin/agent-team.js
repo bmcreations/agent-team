@@ -11,7 +11,7 @@ import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
-import { adminCall, attach, memberArgs, whoAmI, renderQuestions } from '../src/admin.js';
+import { adminCall, attach, memberArgs, whoAmI, renderQuestions, handbackNotice } from '../src/admin.js';
 import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -205,6 +205,7 @@ if (Object.hasOwn(ADMIN, positionals[0])) {
   try {
     const [method, params] = ADMIN[positionals[0]](positionals.slice(1));
     const result = await adminCall(method, params);
+    if (method === 'handback') process.stderr.write(handbackNotice(result));
     process.stdout.write(method === 'questions' && !values.json
       ? renderQuestions(result)
       : JSON.stringify(result, null, 2) + '\n');
