@@ -261,6 +261,9 @@ because codex's default of 300 s is shorter than `ask_human`'s 7200 s maximum. T
 under that policy; each is answered so a turn cannot hang, and none approves anything (the
 `agent-team` MCP elicitation is accepted, commands and patches are declined).
 
+Ending a session (stop, interrupt, a closed stdin, SIGTERM) also ends the shell commands its
+app-server started, including ones in their own process group; the same holds for the take-over server.
+
 **Tokens, not dollars.** codex reports no dollar figure. `idle.tokens` is the turn's tokens,
 and `start.tokens` is the member's recorded total: `thread/resume` re-emits the restored total
 once, and the baseline keeps it out of the first `idle`. The supervisor records both on the

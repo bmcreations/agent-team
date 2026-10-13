@@ -8,6 +8,7 @@ import { createWriteStream, existsSync, mkdtempSync, readFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { descendants, endTree, merge, targets } from './proctree.js';
 
 const BIN = fileURLToPath(new URL('../bin/agent-team.js', import.meta.url));
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -100,12 +101,20 @@ export function runCodexSession({ artifacts }) {
   });
   const finish = (result) => process.stdout.write(JSON.stringify({ type: 'result', ...result }) + '\n', () => process.exit(0));
   const textInput = (text) => [{ type: 'text', text, text_elements: [] }];
+  const serverAlive = () => !!server && server.exitCode === null && server.signalCode === null;
+  // Everything the server has started, as last seen while it was alive. Commands run in their
+  // own process groups, so they are ended by pid once the server is gone.
+  let tree = [];
+  const snapshot = () => { if (serverAlive()) tree = merge(tree, descendants(server.pid)); };
+  const endCommands = (signal) => endTree(tree, signal);
   const endServer = () => {
     stopping = true;
     killedByUs = true;
-    if (!server || server.exitCode !== null || server.signalCode !== null) return;
+    if (!serverAlive()) return;
+    snapshot();
     server.kill('SIGTERM');
-    setTimeout(() => server.kill('SIGKILL'), ORPHAN_GRACE_MS).unref();
+    endCommands('SIGTERM');
+    setTimeout(() => { if (serverAlive()) { snapshot(); server.kill('SIGKILL'); endCommands('SIGKILL'); } }, ORPHAN_GRACE_MS).unref();
   };
   const sendInterrupt = () => { request('turn/interrupt', { threadId, turnId }).catch(() => {}); };
 
@@ -222,6 +231,7 @@ export function runCodexSession({ artifacts }) {
   }
 
   function onServerExit(code, signal) {
+    endCommands('SIGKILL');
     // An interrupt answers with idle, not a result.
     if (interrupting && !startError) return log.end(() => process.stdout.write('', () => process.exit(0)));
     const usage = { tokens: reported, session_id: threadId, turns };
@@ -301,24 +311,29 @@ export function runCodexSession({ artifacts }) {
     // The supervisor closed our stdin or died. The server would finish its turn first, writing to
     // the thread that a recovering supervisor resumes in a second server, so the turn is
     // interrupted and the server killed if it is still there after a short grace.
-    if (!server || server.exitCode !== null || server.signalCode !== null) return;
+    if (!serverAlive()) return;
+    snapshot();
     if (inTurn && !interrupting && !stopping) {
       interrupting = true;
       if (turnId) sendInterrupt();
     } else if (!stopping) endServer();
     killedByUs = true;
-    setTimeout(() => server.kill('SIGTERM'), ORPHAN_GRACE_MS).unref();
-    setTimeout(() => server.kill('SIGKILL'), ORPHAN_GRACE_MS * 2).unref();
+    setTimeout(() => { if (serverAlive()) { snapshot(); server.kill('SIGTERM'); endCommands('SIGTERM'); } }, ORPHAN_GRACE_MS).unref();
+    setTimeout(() => { if (serverAlive()) { snapshot(); server.kill('SIGKILL'); endCommands('SIGKILL'); } }, ORPHAN_GRACE_MS * 2).unref();
   });
   // With the supervisor gone, writing to stdout fails; the exit path must still run.
   process.stdout.on('error', () => {});
 
   // The supervisor's last resort after an interrupt is SIGTERM; the server goes with us.
   process.on('SIGTERM', () => {
-    if (server && server.exitCode === null && server.signalCode === null) {
+    if (serverAlive()) {
+      snapshot();
       server.kill('SIGTERM');
-      // Unref'd timers cannot keep us alive, so the grace is a detached killer.
-      spawn(process.execPath, ['-e', `setTimeout(()=>{try{process.kill(${server.pid},'SIGKILL')}catch{}},${ORPHAN_GRACE_MS})`],
+      endCommands('SIGTERM');
+      // Unref'd timers cannot keep us alive, so the grace is a detached killer; it also covers
+      // the commands (own process groups) that outlive the server.
+      const doomed = JSON.stringify([server.pid, ...targets(tree)]);
+      spawn(process.execPath, ['-e', `for(const t of ${doomed})setTimeout(()=>{try{process.kill(t,'SIGKILL')}catch{}},${ORPHAN_GRACE_MS})`],
             { detached: true, stdio: 'ignore' }).unref();
     }
     process.exit(143);

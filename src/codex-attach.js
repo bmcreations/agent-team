@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, chmodSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir, constants } from 'node:os';
 import { join } from 'node:path';
+import { descendants, endTree, merge } from './proctree.js';
 
 const LISTEN_TIMEOUT_MS = 10_000;
 const KILL_AFTER_MS = 2_000;
@@ -105,11 +106,19 @@ function listening(server) {
 }
 
 // SIGTERM, then SIGKILL if the server is still alive after KILL_AFTER_MS.
+// Whatever the child started (codex runs commands in their own process groups) is ended with it.
 async function stop(child) {
   if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   const exited = new Promise((resolve) => child.once('exit', resolve));
+  let tree = descendants(child.pid);
   child.kill('SIGTERM');
-  const timer = setTimeout(() => child.kill('SIGKILL'), KILL_AFTER_MS);
+  endTree(tree, 'SIGTERM');
+  const timer = setTimeout(() => {
+    tree = merge(tree, descendants(child.pid));
+    child.kill('SIGKILL');
+    endTree(tree, 'SIGKILL');
+  }, KILL_AFTER_MS);
   await exited;
   clearTimeout(timer);
+  endTree(tree, 'SIGKILL');
 }

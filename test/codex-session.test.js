@@ -407,3 +407,44 @@ test('closing stdin mid-turn interrupts the turn and kills a lingering app-serve
   assert.ok(s.logged().some((l) => l.sigterm === true));
   await s.exit;
 });
+
+// A shell command codex started runs in its own process group, so it outlives the app-server
+// unless the adapter ends it too.
+const sleepPids = (s) => s.logged().filter((l) => l.sleep_pid).map((l) => l.sleep_pid);
+const killAll = (pids) => { for (const p of pids) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } };
+
+async function withSleep(env, body) {
+  const s = session({ FAKE_CODEX_SPAWN_SLEEP: '1', ...env });
+  try {
+    s.send(START('HOLD'));
+    await s.next('session');
+    for (let i = 0; i < 100 && !sleepPids(s).length; i++) await sleep(20);
+    const [pid] = sleepPids(s);
+    assert.ok(pid && alive(pid), 'the fake started a command');
+    await body(s, pid);
+    assert.ok(await gone(pid, 5000), 'the command outlived the session');
+  } finally { killAll(sleepPids(s)); }
+}
+
+test('an interrupt ends the shell commands the app-server started', { timeout: 15000 }, async () => {
+  await withSleep({}, async (s) => {
+    s.send({ type: 'interrupt' });
+    await s.next('idle');
+    assert.equal(await s.exit, 0);
+  });
+});
+
+test('closing stdin mid-turn ends the shell commands the app-server started', { timeout: 15000 }, async () => {
+  await withSleep({ FAKE_CODEX_LINGER: '1' }, async (s) => {
+    s.close();
+    await s.exit;
+  });
+});
+
+test('SIGTERM to the adapter ends the shell commands the app-server started', { timeout: 15000 }, async () => {
+  await withSleep({}, async (s) => {
+    const ppid = Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(serverPid(s))]).toString().trim());
+    process.kill(ppid, 'SIGTERM');
+    assert.equal(await s.exit, 143);
+  });
+});

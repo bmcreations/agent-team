@@ -202,3 +202,22 @@ test('tokens a human spent in a taken-over codex thread are counted once after h
     assert.equal(store.run(runId).cost_usd, 0);
   } finally { await sup.close(); }
 });
+
+test('the take-over server\'s shell commands end with it', { timeout: 30_000 }, async () => {
+  const { sup, entries, calls, submit, attach } = await setup({ FAKE_CODEX_SPAWN_SLEEP: '1' });
+  const sleeps = () => entries().filter((e) => e.sleep_pid).map((e) => e.sleep_pid);
+  try {
+    const { runId } = submit('HOLD the work');
+    await until(() => calls('turn/start').length === 1);
+    const { code, stderr } = await attach(runId);
+    assert.equal(code, 0, stderr);
+    const { serverStart } = takeoverLog(entries());
+    const mine = entries().filter((e) => e.sleep_pid && e.pid === serverStart.pid).map((e) => e.sleep_pid);
+    assert.equal(mine.length, 1, 'the take-over server started a command');
+    await until(() => !alive(mine[0]), 5000);
+    await sup.waitRun(runId);
+  } finally {
+    for (const p of sleeps()) { try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } }
+    await sup.close();
+  }
+});

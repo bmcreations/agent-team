@@ -3,10 +3,18 @@
 // ws://…` (take-over server; prints the listening line and waits), and `resume <id> --remote …`
 // (the human's TUI; logs and exits). Wire shapes are the ones probed from codex-cli 0.162.1.
 import { appendFileSync, readFileSync, statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
 const LOG = process.env.FAKE_CODEX_LOG;
 const log = (o) => { if (LOG) appendFileSync(LOG, JSON.stringify({ pid: process.pid, ...o }) + '\n'); };
+// SPAWN_SLEEP: a shell command the server started, in its own process group like codex's.
+const spawnSleep = () => {
+  if (process.env.FAKE_CODEX_SPAWN_SLEEP !== '1') return;
+  const c = spawn('sleep', ['300'], { detached: true, stdio: 'ignore' });
+  c.unref();
+  log({ sleep_pid: c.pid });
+};
 const argv = process.argv.slice(2);
 log({ argv, cwd: process.cwd(), team_token: process.env.AGENT_TEAM_TEAM_TOKEN ?? null, team_socket: process.env.AGENT_TEAM_TEAM_SOCKET ?? null });
 
@@ -29,6 +37,7 @@ if (argv[0] === 'resume') {
   if (process.env.FAKE_CODEX_NO_LISTEN !== '1') {
     process.stderr.write('codex app-server (WebSockets)\n  listening on: ws://127.0.0.1:45454\n');
   }
+  spawnSleep();
   process.on('SIGTERM', () => { log({ serverExit: true }); process.exit(0); });
   setInterval(() => {}, 1 << 30);
 } else if (argv[0] === 'app-server') {
@@ -65,6 +74,7 @@ function stdioServer() {
   };
   const begin = (input) => {
     turns++;
+    spawnSleep();
     turn = { id: `turn-${turns}`, texts: [text(input)] };
     notify('turn/started', { threadId: thread, turn: { id: turn.id, status: 'inProgress' } });
     // Another thread's traffic on the same server: the adapter must ignore it.
