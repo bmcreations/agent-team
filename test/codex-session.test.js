@@ -38,10 +38,11 @@ function session(env = {}) {
   };
   const exit = new Promise((r) => child.on('close', r));
   const send = (m) => child.stdin.write(JSON.stringify(m) + '\n');
+  const close = () => child.stdin.end();
   const logged = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
   const requests = (method) => logged().filter((l) => l.method === method).map((l) => l.params);
   const argvs = () => logged().filter((l) => l.argv).map((l) => l.argv);
-  return { send, next, lines, exit, logged, requests, argvs };
+  return { send, close, next, lines, exit, logged, requests, argvs };
 }
 
 const newCwd = () => mkdtempSync(join(tmpdir(), 'at-cx-'));
@@ -250,4 +251,159 @@ test('brief.effort becomes model_reasoning_effort in the thread config', { timeo
   s.send({ type: 'stop' });
   await s.next('result');
   assert.equal(await s.exit, 0);
+});
+
+const START = (task, extra = {}) => ({ type: 'start', brief: { task, cwd: newCwd(), read_only: false }, resume: null, note: null, ...extra });
+const turnStarts = (s) => s.requests('turn/start').map((p) => p.input[0].text);
+const gone = async (pid, ms = 6000) => {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) {
+    try { process.kill(pid, 0); } catch { return true; }
+  }
+  return false;
+};
+const serverPid = (s) => s.logged().find((l) => l.argv?.[0] === 'app-server').pid;
+
+test('a message between turns starts a turn and is acked', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send(START('Say hi'));
+  await s.next('idle');
+  s.send({ type: 'message', id: 7, from: 'lead', text: 'next' });
+  assert.deepEqual(await s.next('ack'), { type: 'ack', message_id: 7 });
+  assert.deepEqual(await s.next('event'), { type: 'event', kind: 'text', text: 'echo: [from: lead] next' });
+  assert.deepEqual(await s.next('idle'), { type: 'idle', tokens: 100 });
+  assert.deepEqual(turnStarts(s), ['Say hi', '[from: lead] next']);
+  s.send({ type: 'stop' });
+  assert.equal((await s.next('result')).usage.turns, 2);
+  assert.equal(await s.exit, 0);
+});
+
+test('a message mid-turn is steered into the running turn', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send(START('HOLD please'));
+  await s.next('session');
+  s.send({ type: 'message', id: 8, from: 'lead', text: 'RELEASE now' });
+  assert.deepEqual(await s.next('ack'), { type: 'ack', message_id: 8 });
+  const [steer] = s.requests('turn/steer');
+  assert.equal(steer.expectedTurnId, 'turn-1');
+  assert.equal(steer.input[0].text, '[from: lead] RELEASE now');
+  assert.deepEqual(await s.next('event'), { type: 'event', kind: 'text', text: 'echo: HOLD please | [from: lead] RELEASE now' });
+  await s.next('idle');
+  assert.equal(s.requests('turn/start').length, 1);
+  s.send({ type: 'stop' });
+  await s.next('result');
+  assert.equal(await s.exit, 0);
+});
+
+test('a message sent before the turn id is known is steered once the id arrives', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send(START('HOLD'));
+  s.send({ type: 'message', id: 9, from: 'lead', text: 'RELEASE' });
+  assert.deepEqual(await s.next('ack'), { type: 'ack', message_id: 9 });
+  await s.next('idle');
+  assert.equal(s.requests('turn/start').length, 1);
+  const steers = s.requests('turn/steer');
+  assert.equal(steers.length, 1);
+  assert.equal(steers[0].expectedTurnId, 'turn-1');
+  s.send({ type: 'stop' });
+  await s.next('result');
+  assert.equal(s.lines.filter((m) => m.type === 'ack').length, 1);
+  assert.equal(await s.exit, 0);
+});
+
+test('a steer that loses the race with the end of the turn runs as the next turn', { timeout: 10000 }, async () => {
+  const s = session({ FAKE_CODEX_STEER_FAIL: '1', FAKE_CODEX_HOLD_MS: '50' });
+  s.send(START('HOLD'));
+  await s.next('session');
+  s.send({ type: 'message', id: 10, from: 'lead', text: 'more' });
+  const first = await s.next('idle');
+  assert.equal(s.lines.some((m) => m.type === 'ack'), false, 'no ack before the first idle');
+  assert.deepEqual(first, { type: 'idle', tokens: 100 });
+  assert.deepEqual(await s.next('ack'), { type: 'ack', message_id: 10 });
+  assert.deepEqual(await s.next('idle'), { type: 'idle', tokens: 100 });
+  assert.deepEqual(turnStarts(s), ['HOLD', '[from: lead] more']);
+  s.send({ type: 'stop' });
+  await s.next('result');
+  assert.equal(s.lines.filter((m) => m.type === 'ack').length, 1);
+  assert.equal(await s.exit, 0);
+});
+
+test('interrupt mid-turn reports an interrupted idle and ends the app-server', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send(START('HOLD'));
+  await s.next('session');
+  s.send({ type: 'interrupt' });
+  assert.deepEqual(await s.next('idle'), { type: 'idle', interrupted: true });
+  assert.equal(await s.exit, 0);
+  assert.equal(s.lines.some((m) => m.type === 'result'), false);
+  assert.deepEqual(s.requests('turn/interrupt'), [{ threadId: 'thr-1', turnId: 'turn-1' }]);
+  assert.ok(await gone(serverPid(s)));
+});
+
+test('interrupt between turns reports an interrupted idle at once', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send(START('Say hi'));
+  await s.next('idle');
+  s.send({ type: 'interrupt' });
+  assert.deepEqual(await s.next('idle'), { type: 'idle', interrupted: true });
+  assert.equal(await s.exit, 0);
+  assert.equal(s.lines.some((m) => m.type === 'result'), false);
+  assert.equal(s.requests('turn/interrupt').length, 0);
+  assert.ok(await gone(serverPid(s)));
+});
+
+test('resume restores the thread with the team tools and sends the note', { timeout: 10000 }, async () => {
+  const s = session({ FAKE_CODEX_RESUME_TOKENS: '1000' });
+  const cwd = newCwd();
+  s.send({ type: 'start', brief: { task: 'ignored', cwd, read_only: true }, resume: 'thr-9', note: 'Resumed by bmc.', tokens: 1000 });
+  assert.deepEqual(await s.next('session'), { type: 'session', harness_id: 'thr-9', resume: 'thr-9' });
+  assert.deepEqual(await s.next('idle'), { type: 'idle', tokens: 100 });
+  assert.equal(s.requests('thread/start').length, 0);
+  const [r] = s.requests('thread/resume');
+  assert.equal(r.threadId, 'thr-9');
+  assert.equal(r.excludeTurns, true);
+  assert.equal(r.cwd, cwd);
+  assert.equal(r.approvalPolicy, 'never');
+  assert.equal(r.sandbox, 'read-only');
+  assert.deepEqual(r.config.mcp_servers['agent-team'], {
+    command: process.execPath, args: [BIN, 'mcp'],
+    env: { AGENT_TEAM_TEAM_SOCKET: '/tmp/team.sock', AGENT_TEAM_TEAM_TOKEN: 'tok-1' },
+    default_tools_approval_mode: 'approve', tool_timeout_sec: 7500
+  });
+  assert.deepEqual(turnStarts(s), ['Resumed by bmc.']);
+  s.send({ type: 'stop' });
+  assert.deepEqual((await s.next('result')).usage, { tokens: 100, session_id: 'thr-9', turns: 1 });
+  assert.equal(await s.exit, 0);
+});
+
+test('resume with no note continues where it left off', { timeout: 10000 }, async () => {
+  const s = session();
+  s.send({ ...START('ignored'), resume: 'thr-9', tokens: 1000 });
+  await s.next('idle');
+  assert.deepEqual(turnStarts(s), ['Continue where you left off.']);
+  s.send({ type: 'stop' });
+  await s.next('result');
+  assert.equal(await s.exit, 0);
+});
+
+test('resume with no recorded tokens counts the restored total once', { timeout: 10000 }, async () => {
+  const s = session({ FAKE_CODEX_RESUME_TOKENS: '1000' });
+  s.send({ ...START('ignored'), resume: 'thr-9' });
+  assert.deepEqual(await s.next('idle'), { type: 'idle', tokens: 1100 });
+  s.send({ type: 'stop' });
+  await s.next('result');
+  assert.equal(await s.exit, 0);
+});
+
+test('closing stdin mid-turn interrupts the turn and kills a lingering app-server', { timeout: 15000 }, async () => {
+  const s = session({ FAKE_CODEX_LINGER: '1' });
+  s.send(START('HOLD'));
+  await s.next('session');
+  s.send({ type: 'message', id: 1, from: 'lead', text: 'sync' });
+  await s.next('ack');
+  const pid = serverPid(s);
+  s.close();
+  assert.ok(await gone(pid), 'app-server outlived the supervisor');
+  assert.equal(s.requests('turn/interrupt').length, 1);
+  assert.ok(s.logged().some((l) => l.sigterm === true));
+  await s.exit;
 });

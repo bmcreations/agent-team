@@ -96,6 +96,10 @@ function stdioServer() {
       return;   // the turn completes once every reply is in
     }
     if (!s.includes('HOLD')) setTimeout(() => complete(), 5);
+    else if (process.env.FAKE_CODEX_HOLD_MS) {
+      const mine = turn;
+      setTimeout(() => { if (turn === mine) complete(); }, Number(process.env.FAKE_CODEX_HOLD_MS));
+    }
   };
 
   createInterface({ input: process.stdin }).on('line', (line) => {
@@ -127,6 +131,7 @@ function stdioServer() {
         begin(m.params.input);
         return ok({ turn: { id: turn?.id ?? `turn-${turns}`, status: 'inProgress' } });
       case 'turn/steer': {
+        if (process.env.FAKE_CODEX_STEER_FAIL === '1') return err('turn is not steerable');
         if (!turn || m.params.expectedTurnId !== turn.id) return err('no active turn to steer');
         const s = text(m.params.input);
         turn.texts.push(s);
