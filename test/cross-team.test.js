@@ -294,6 +294,8 @@ test('a member name shared by two entered teams is ambiguous; an alias names the
     await sup.cancel({ run_id: runId, member: 'loupe' });   // the alias names B's entry
     await until(() => ['cancelled', 'stopping'].includes(store.member(entry.id).state) || store.member(entry.id).state === 'cancelled');
     assert.notEqual(store.member(root.id).state, 'cancelled');
+    await sup.cancel({ run_id: runId, member: String(root.id) });   // the id the refusal named
+    await until(() => store.member(root.id).state === 'cancelled');
   } finally { await sup.close(); store.close(); }
 });
 

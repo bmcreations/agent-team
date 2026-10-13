@@ -338,7 +338,13 @@ export class Supervisor {
       return this.#owned(m);
     }
     if (run_id == null || typeof member !== 'string') throw new Error('name a member: member_id, or run_id and member');
-    const matches = this.store.members(Number(run_id)).filter((m) => m.name === member || m.alias === member);
+    const all = this.store.members(Number(run_id));
+    const matches = all.filter((m) => m.name === member || m.alias === member);
+    // A bare id names one member when a name is shared across teams.
+    if (!matches.length && /^\d+$/.test(member)) {
+      const byId = all.find((m) => m.id === Number(member));
+      if (byId) return this.#owned(byId);
+    }
     if (!matches.length) throw new Error(`run ${run_id} has no member "${member}"`);
     const live = matches.filter((m) => !TERMINAL.has(m.state));
     // The same role twice is the latest one; different teams sharing a name are not.
