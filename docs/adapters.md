@@ -49,7 +49,7 @@ session starts a fresh count. Past the timeout it sends `interrupt` and fails th
 
 | Direction | Message | Meaning |
 |---|---|---|
-| in | `start {brief, resume, note}` | Begin. `resume` is null for a fresh start; otherwise it is the string this adapter sent in `session {resume}`, and `note` is the first user turn to send after resuming. |
+| in | `start {brief, resume, note, cost_usd?}` | Begin. `resume` is null for a fresh start; otherwise it is the string this adapter sent in `session {resume}`, and `note` is the first user turn to send after resuming. With a `resume`, `cost_usd` is what the supervisor has recorded for this member so far; an adapter whose harness reports cost cumulatively across a resumed session takes each `idle`'s `cost_usd` from it. Adapters that report per-turn cost ignore it. |
 | in | `message {id, from, text}` | Inbox delivery. |
 | in | `stop` | Finish after the current turn. |
 | in | `interrupt` | End the turn now and exit: send `idle {interrupted: true}` and no `result`. |
@@ -196,11 +196,11 @@ value is ignored with a warning and sets `artifacts.diff_max_buffer_invalid_over
 | Contract message | claude |
 |---|---|
 | `start {brief}` | The task as the first user turn. |
-| `start {resume, note}` | `--resume <resume>`; the note as the first user turn. |
+| `start {resume, note, cost_usd}` | `--resume <resume>`; the note as the first user turn. claude restores the session's `total_cost_usd` on resume, so `cost_usd` is the starting point for the next `idle`'s change. |
 | `message {from, text}` | A user turn `[from: <from>] <text>`; content is always a list of blocks, since claude drops a plain string. |
 | `ack` | Sent when claude replays the user line's `uuid` with `isReplay: true`. |
 | `interrupt` | `control_request {subtype: "interrupt"}`; answered with `idle {interrupted: true}`, then the adapter ends claude and exits without a `result`. |
-| `idle {cost_usd}` | Each `result` line; `cost_usd` is the change in claude's cumulative `total_cost_usd`. |
+| `idle {cost_usd}` | Each `result` line; `cost_usd` is the change in claude's cumulative `total_cost_usd`, never negative. |
 | `session {resume}` | The `session_id` of the first `system/init` line. |
 
 The MCP config, written to a `0600` file so the member's token stays out of `ps`, runs

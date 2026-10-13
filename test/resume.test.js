@@ -109,6 +109,35 @@ test('a paused subtree resumes together and the run finishes', async () => {
   } finally { await sup.close(); }
 });
 
+// claude restores a resumed session's cumulative cost, so the adapter needs the member's spend
+// so far to report only the new turns.
+test('resume passes the member\'s recorded spend as the cost baseline', async () => {
+  const { root, script } = project({ lead: LIVE(), worker: LIVE({ reports_to: 'lead' }) }, {
+    by_member: {
+      lead: { steps: [{ tool: 'delegate', args: { to: 'worker', task: 'w' } }], on_resume: { steps: [] }, turn_cost_usd: 0.5 },
+      worker: { steps: [{ say: 'working' }, { sleep_ms: 30_000 }] }
+    }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    // The lead idles after its turn and stays up while its report works.
+    await until(() => store.run(runId).cost_usd === 0.5);
+    const workerId = store.children(leadId)[0].id;
+    assert.equal(store.member(leadId).cost_usd, 0.5);
+    sup.pause({ member_id: leadId });
+    await until(() => store.member(leadId).state === 'paused');
+    sup.resume({ member_id: leadId });
+    await until(() => store.member(leadId).state === 'running' && store.run(runId).cost_usd > 0.5);
+    sup.cancel({ member_id: workerId });
+    const result = await sup.waitRun(runId);
+    assert.equal(result.status, 'ok');
+    assert.equal(result.start_cost_usd, 0.5);
+    assert.equal(store.member(leadId).cost_usd, store.run(runId).cost_usd);
+    assert.equal(store.member(workerId).cost_usd, 0);
+  } finally { await sup.close(); }
+});
+
 test('a member paused before its adapter launched starts fresh on resume, in one workspace', async () => {
   const { root, script } = project({ solo: LIVE({ isolation: 'workspace' }) }, { by_member: { solo: { steps: [{ say: 'ran' }] } } });
   const { sup, store } = await supervise(script);
@@ -124,6 +153,7 @@ test('a member paused before its adapter launched starts fresh on resume, in one
     const result = await sup.waitRun(runId);
     assert.equal(result.status, 'ok');
     assert.ok(!result.received.some((r) => r.startsWith('[resume')), 'a fresh start was sent a resume id');
+    assert.ok(!Object.hasOwn(result, 'start_cost_usd'), 'a fresh start was sent a cost baseline');
     assert.ok(store.events(memberId).some((e) => e.kind === 'text' && e.body.text === 'ran'));
     assert.deepEqual(store.events(memberId).filter((e) => e.kind === 'resumed').map((e) => e.body), [{ by: 'ann' }]);
   } finally { await sup.close(); }

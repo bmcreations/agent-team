@@ -23,7 +23,9 @@ only `serve` listens on the shared path. The `claude` adapter speaks protocol 2,
 and fails the member. A working member with no events for `defaults.stall_minutes` (default
 10) is reported to its manager as `stalled`. `defaults.max_cost_usd` (default none) caps what a
 run may spend, summed from the costs harnesses report; past it the whole run is paused, and
-`resume` needs a higher cap. A member that has finished its work and does not exit within
+`resume` needs a higher cap. Each member's spend is recorded too: a resumed claude session
+reports its cost from the start of the session, so the supervisor hands the member's spend to
+the adapter and only the new turns are added. A member that has finished its work and does not exit within
 10 seconds of being told to stop is ended and fails. Its reports are
 started with the `delegate` tool and run in parallel, each in its own workspace. A v1 member
 keeps the `{"status":"delegating"}` loop described under [Delegation](#delegation).

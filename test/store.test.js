@@ -139,6 +139,19 @@ test('run cost accumulates and run limits are stored', () => {
   assert.equal(store.addRunCost(runId, 0.5), 0.75);
 });
 
+test('a member\'s spend is kept on its row as well as the run\'s', () => {
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project: '/p', task: 't' });
+  const a = store.addMember({ runId, parentId: null, name: 'a', task: 't', depth: 0 });
+  const b = store.addMember({ runId, parentId: a.id, name: 'b', task: 't', depth: 1 });
+  assert.equal(store.member(a.id).cost_usd, 0);
+  assert.equal(store.addRunCost(runId, 0.25, a.id), 0.25);
+  assert.equal(store.addRunCost(runId, 0.5, b.id), 0.75);
+  assert.equal(store.addRunCost(runId, 0.5, a.id), 1.25);
+  assert.equal(store.member(a.id).cost_usd, 0.75);
+  assert.equal(store.member(b.id).cost_usd, 0.5);
+});
+
 test('membersInStates finds members across runs', () => {
   const store = openStore(':memory:');
   const r1 = store.createRun({ project: '/a', task: 't' });

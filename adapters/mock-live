@@ -143,7 +143,9 @@ function session() {
       type: 'result',
       status: entry.result?.status ?? 'ok',
       summary: entry.result?.summary ?? 'done',
-      received, tool_results: toolResults
+      received, tool_results: toolResults,
+      // Echoes the start's cost_usd baseline, when it had one, for tests to check.
+      ...(Object.hasOwn(start, 'cost_usd') ? { start_cost_usd: start.cost_usd } : {})
     });
     process.stdout.write('', () => process.exit(0));
   })();

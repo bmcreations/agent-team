@@ -54,6 +54,30 @@ test('a restart resumes working members from their sessions and tells the manage
   } finally { await sup.close(); }
 });
 
+test('a member adopted after a restart is passed its recorded spend as the cost baseline', async () => {
+  const { root, script } = project({ lead: LIVE(), worker: LIVE({ reports_to: 'lead' }) }, {
+    by_member: {
+      lead: { steps: [{ tool: 'delegate', args: { to: 'worker', task: 'w' } }], on_resume: { steps: [] }, turn_cost_usd: 0.5 },
+      worker: { steps: [{ say: 'working' }, { sleep_ms: 30_000 }], on_resume: { steps: [] } }
+    }
+  });
+  const first = await supervise(script);
+  const { store } = first;
+  const { runId, memberId: leadId } = first.sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+  await until(() => store.run(runId).cost_usd === 0.5 && store.children(leadId)[0]?.resume);
+  await first.sup.close();
+  assert.equal(store.member(leadId).cost_usd, 0.5);
+
+  const { sup } = await supervise(script, { store });
+  try {
+    assert.deepEqual(await sup.recover(), { recovered: [runId], failed: [] });
+    const result = await sup.waitRun(runId);
+    assert.equal(result.status, 'ok');
+    assert.equal(result.start_cost_usd, 0.5);
+    assert.equal(store.member(store.children(leadId)[0].id).result.start_cost_usd, 0);
+  } finally { await sup.close(); }
+});
+
 test('a run whose project config is gone fails with the reason; other runs still recover', async () => {
   const a = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } } });
   const b = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } } } });

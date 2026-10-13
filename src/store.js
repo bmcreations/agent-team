@@ -39,7 +39,9 @@ const MIGRATIONS = [
    ALTER TABLE runs ADD COLUMN max_cost_usd REAL;`,
   // The socket of the supervisor running the run; recovery adopts a run only when nothing
   // listens there any more.
-  `ALTER TABLE runs ADD COLUMN owner TEXT;`
+  `ALTER TABLE runs ADD COLUMN owner TEXT;`,
+  // What each member has spent, handed to its adapter as the cost baseline on resume.
+  `ALTER TABLE members ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;`
 ];
 
 function migrate(db) {
@@ -90,8 +92,10 @@ export function openStore(path) {
     runsWithStatus: (status) => q('SELECT * FROM runs WHERE status = ? ORDER BY id').all(status),
     setBudget: (id, left) => q('UPDATE runs SET budget = ? WHERE id = ?').run(left, id),
     setRunCap: (id, usd) => q('UPDATE runs SET max_cost_usd = ? WHERE id = ?').run(usd, id),
-    addRunCost(id, usd) {
+    // Adds to the run's spend and, given a member, to that member's. Returns the run's total.
+    addRunCost(id, usd, memberId = null) {
       q('UPDATE runs SET cost_usd = cost_usd + ? WHERE id = ?').run(usd, id);
+      if (memberId != null) q('UPDATE members SET cost_usd = cost_usd + ? WHERE id = ?').run(usd, memberId);
       return q('SELECT cost_usd FROM runs WHERE id = ?').get(id).cost_usd;
     },
     run: (id) => q('SELECT * FROM runs WHERE id = ?').get(id),

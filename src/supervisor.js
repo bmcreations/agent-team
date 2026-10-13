@@ -473,9 +473,10 @@ export class Supervisor {
     }
   }
 
-  // Harness-reported cost. Past the run's cap, the whole run pauses after its current turns.
-  #spend(runId, usd) {
-    const total = this.store.addRunCost(runId, usd);
+  // Harness-reported cost, charged to the run and to the member that spent it. Past the run's
+  // cap, the whole run pauses after its current turns.
+  #spend(runId, memberId, usd) {
+    const total = this.store.addRunCost(runId, usd, memberId);
     const { max_cost_usd: cap, root_member: root } = this.store.run(runId);
     if (cap == null || total < cap || TERMINAL.has(this.store.member(root).state)) return;
     const { members } = this.#intervene({ member_id: root, subtree: true, by: 'cost cap' }, 'pause');
@@ -669,10 +670,13 @@ export class Supervisor {
     rt.quietSince = Date.now();   // resolving and preparing the workspace are not quiet time
     // With no harness session to resume, the note rides along with the task instead.
     if (resume && !m.resume) brief.task += `\n\n${resume.note}`;
+    // A resumed harness session may report its cost cumulatively from the session's start
+    // (claude does), so the member's spend so far goes along as the baseline.
     rt.session.send({
       type: 'start', brief,
       resume: resume ? m.resume : null,
-      note: resume && m.resume ? resume.note : null
+      note: resume && m.resume ? resume.note : null,
+      ...(resume && m.resume ? { cost_usd: m.cost_usd } : {})
     });
     this.#pump(id);   // anything sent while the member was queued
   }
@@ -701,7 +705,7 @@ export class Supervisor {
       }
       rt.staleOffers = new Set(rt.offered);
       rt.idle = true;
-      if (msg.cost_usd) this.#spend(rt.member.run_id, msg.cost_usd);
+      if (msg.cost_usd) this.#spend(rt.member.run_id, id, msg.cost_usd);
       this.#pump(id);
     } else if (msg.type === 'result') rt.result = msg;
   }

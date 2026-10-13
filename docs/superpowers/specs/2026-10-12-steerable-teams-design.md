@@ -131,7 +131,7 @@ A v2 adapter is a long-lived process speaking newline-delimited JSON in both dir
 
 | Direction | Message | Meaning |
 |---|---|---|
-| in | `start {brief, resume, note}` | Begin, with the brief composed as today. `resume` is null for a fresh start; otherwise it is the string the adapter sent in `session {resume}`, and `note` is the first user turn after resuming. |
+| in | `start {brief, resume, note, cost_usd?}` | Begin, with the brief composed as today. `resume` is null for a fresh start; otherwise it is the string the adapter sent in `session {resume}`, `note` is the first user turn after resuming, and `cost_usd` is the member's recorded spend, the baseline for a harness whose cost is cumulative across a resumed session. |
 | in | `message {id, from, text}` | Inbox delivery. |
 | in | `stop` | Finish after the current turn. |
 | in | `interrupt` | Finish now. |
