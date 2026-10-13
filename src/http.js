@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { whoAmI } from './admin.js';
-import { publicRun, publicMessage, clipEvent, runDetail, needsYou } from './view.js';
+import { publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState } from './view.js';
 
 // The web view: a JSON API over the store, server-sent events, and a static page. It binds to
 // 127.0.0.1 and has no sign-in yet: anyone who can open a connection to the port on this
@@ -76,10 +76,103 @@ function timelineView(store, scope, url) {
   return { events: rows.events.map((e) => clipEvent(e)), messages: rows.messages.map(publicMessage), cursor };
 }
 
+const BATCH = 500;
+
+// Every open stream shares one timer. store.version() is one cheap pragma read; nothing else
+// runs while it is unchanged, except for a client that still has a backlog to send.
+class Hub {
+  #clients = new Set();
+  #timer = null;
+  #version = null;
+
+  constructor({ store, own, pollMs, heartbeatMs, stallMs }) {
+    Object.assign(this, { store, own, pollMs, heartbeatMs, stallMs });
+  }
+
+  get size() { return this.#clients.size; }
+
+  add(req, res, { runId, cursor }) {
+    res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive' });
+    res.write('retry: 2000\n\n');
+    const c = { res, runId, cursor, state: null, more: false, blockedAt: null };
+    // A full socket buffer pauses this client; it resumes from its cursor once drained.
+    res.on('drain', () => { c.blockedAt = null; c.more = true; });
+    c.heartbeat = setInterval(() => { if (c.blockedAt == null) c.res.write(': ping\n\n'); }, this.heartbeatMs);
+    c.heartbeat.unref();
+    this.#clients.add(c);
+    req.on('close', () => this.#drop(c));
+    res.on('error', () => this.#drop(c));
+    this.#push(c);
+    if (!this.#timer) {
+      this.#timer = setInterval(() => this.#poll(), this.pollMs);
+      this.#timer.unref();
+    }
+  }
+
+  close() {
+    for (const c of [...this.#clients]) { c.res.end(); this.#drop(c); }
+  }
+
+  #drop(c) {
+    if (!this.#clients.delete(c)) return;
+    clearInterval(c.heartbeat);
+    if (this.#clients.size === 0) {
+      clearInterval(this.#timer);
+      this.#timer = null;
+    }
+  }
+
+  #poll() {
+    let changed = false;
+    try {
+      const v = this.store.version();
+      changed = v !== this.#version;
+      this.#version = v;
+    } catch { return; }   // the store is closing
+    for (const c of [...this.#clients]) {
+      if (changed || c.more || c.blockedAt != null) this.#push(c);
+    }
+  }
+
+  #push(c) {
+    if (c.blockedAt != null) {
+      // A reader that has not drained for stallMs (a sleeping laptop, a stuck proxy) is cut;
+      // EventSource reconnects with Last-Event-ID when it wakes.
+      if (Date.now() - c.blockedAt >= this.stallMs) { c.res.destroy(); this.#drop(c); }
+      return;
+    }
+    c.more = false;
+    const state = JSON.stringify(streamState(this.store, c.runId, this.own));
+    if (state !== c.state) {
+      c.state = state;
+      this.#send(c, `event: state\ndata: ${state}\n\n`);
+    }
+    if (c.blockedAt != null) return;
+    const scope = c.runId != null ? { runId: c.runId } : {};
+    const rows = this.store.timeline({ ...scope, afterEvent: c.cursor.event, afterMessage: c.cursor.message, limit: BATCH });
+    if (!rows.events.length && !rows.messages.length) return;
+    c.cursor = { event: rows.events.at(-1)?.id ?? c.cursor.event, message: rows.messages.at(-1)?.id ?? c.cursor.message };
+    c.more = rows.events.length === BATCH || rows.messages.length === BATCH;
+    const data = JSON.stringify({ events: rows.events.map((e) => clipEvent(e)), messages: rows.messages.map(publicMessage), cursor: c.cursor });
+    this.#send(c, `id: ${c.cursor.event}.${c.cursor.message}\nevent: timeline\ndata: ${data}\n\n`);
+  }
+
+  #send(c, frame) {
+    if (!c.res.write(frame)) c.blockedAt = Date.now();
+  }
+}
+
+// "<event>.<message>", as the stream's ids are written.
+function lastEventId(raw) {
+  const m = /^(\d+)\.(\d+)$/.exec(raw ?? '');
+  return m ? { event: Number(m[1]), message: Number(m[2]) } : null;
+}
+
 export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAULT_PORT, env = process.env,
-                            by = null, pollMs = 250, heartbeatMs = 15_000, fetchImpl = fetch } = {}) {
+                            by = null, pollMs = 250, heartbeatMs = 15_000, stallMs = 60_000, fetchImpl = fetch } = {}) {
   const own = sup?.socketPath ?? null;
   let bound = null;
+  const hub = new Hub({ store, own, pollMs, heartbeatMs, stallMs });
   const found = (v, what) => { if (v == null) throw new HttpError(404, `unknown ${what}`); return v; };
   const member = (id) => found(store.member(id), `member ${id}`);
 
@@ -101,7 +194,18 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
     }],
     ['GET', /^\/api\/timeline$/, ({ url }) => timelineView(store, {}, url)],
     ['GET', /^\/api\/events\/(\d+)$/, ({ params }) => found(store.event(params[0]), `event ${params[0]}`)],
-    ['GET', /^\/api\/needs-you$/, () => needsYou(store)]
+    ['GET', /^\/api\/needs-you$/, () => needsYou(store)],
+    ['GET', /^\/api\/stream$/, ({ req, res, url }) => {
+      const raw = url.searchParams.get('run');
+      const runId = raw == null || raw === '' ? null : positiveInt(raw, 'run');
+      if (runId != null) found(store.run(runId), `run ${runId}`);
+      const top = store.maxIds();
+      const cursor = lastEventId(req.headers['last-event-id']) ?? {
+        event: intParam(url, 'after_event', top.event, MAX),
+        message: intParam(url, 'after_message', top.message, MAX)
+      };
+      hub.add(req, res, { runId, cursor });
+    }]
   ];
 
   function serveStatic(res, path) {
@@ -139,6 +243,7 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
   });
 
   function close() {
+    hub.close();
     return new Promise((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections();
@@ -155,7 +260,7 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
     server.listen(port, host, () => {
       bound = server.address().port;
       server.on('error', (err) => process.stderr.write(`agent-team: web server error: ${err.message}\n`));
-      resolve({ port: bound, url: `http://${host}:${bound}/`, close, clients: () => 0 });
+      resolve({ port: bound, url: `http://${host}:${bound}/`, close, clients: () => hub.size });
     });
   });
 }
