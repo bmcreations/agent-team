@@ -178,6 +178,39 @@ export class Supervisor {
     return { members, skipped };
   }
 
+  // Hands a claude member's session to a human: its turn is interrupted, and once its adapter
+  // has exited (so two processes never write one session) it is marked taken_over. The caller
+  // runs `argv` in `cwd` and calls handback when the human is done.
+  async takeover({ by = 'local', ...who } = {}) {
+    const m = this.#target(who);
+    const r = await this.#resolve(m);
+    if (r.resolved?.agent !== 'claude') {
+      throw new Error(`"${m.name}" runs ${r.team ? 'a team in another project' : r.resolved?.agent ?? 'nothing'}; only claude members can be taken over`);
+    }
+    if (m.state !== 'paused') {
+      const rt = this.#live.get(m.id);
+      this.#halt(m, 'pause', { now: true, by });
+      await rt?.session?.exited;
+    }
+    const now = this.store.member(m.id);
+    if (now.state !== 'paused') throw new Error(`"${m.name}" is still pausing — run attach again in a moment`);
+    if (!now.resume || !now.workspace) throw new Error(`"${m.name}" has no claude session yet — resume it instead`);
+    this.store.setState(m.id, 'taken_over');
+    this.store.addEvent(m.id, 'taken_over', { by });
+    this.#notifyManager(now, `taken over by ${by}`);
+    return { member_id: m.id, name: m.name, cwd: now.workspace, argv: ['claude', '--resume', now.resume] };
+  }
+
+  // The human's terminal session has ended: run the member headless again from that session.
+  handback({ by = 'local', ...who } = {}) {
+    const m = this.#target(who);
+    if (m.state !== 'taken_over') throw new Error(`"${m.name}" is not taken over (${m.state})`);
+    this.store.setState(m.id, 'paused');
+    this.store.addEvent(m.id, 'handed_back', { by });
+    this.#unpause(this.store.member(m.id), { note: null, by, drove: true });
+    return { members: [{ id: m.id, name: m.name }], skipped: [] };
+  }
+
   // A run paused at its cost cap resumes only with a higher cap. Stores `cap` once it passes
   // and returns a function that puts the previous cap back.
   #allowSpend(runId, cap) {
@@ -193,13 +226,17 @@ export class Supervisor {
     return () => this.store.setRunCap(runId, run.max_cost_usd);
   }
 
-  #unpause(m, { note, by }) {
+  #unpause(m, { note, by, drove = false }) {
     if (m.state !== 'paused') throw new Error(`"${m.name}" is not paused (${m.state})`);
     const paused = this.store.events(m.id).findLast((e) => e.kind === 'paused')?.body ?? {};
     const lines = [`Resumed by ${by}.`];
     if (paused.now) {
       lines.push('Your last turn was interrupted: a command it started may have partly run. ' +
                  'Check the workspace before repeating work.');
+    }
+    if (drove) {
+      lines.push(`${by} drove this session in a terminal while you were paused; their turns are ` +
+                 'in your history. Continue from where they left off.');
     }
     if (typeof note === 'string' && note.trim()) lines.push(`${by}: ${note}`);
     this.#resumes.set(m.id, { note: lines.join('\n') });
@@ -267,6 +304,7 @@ export class Supervisor {
   #halt(m, kind, { now, by }) {
     const verb = kind === 'pause' ? 'paused' : 'cancelled';
     if (TERMINAL.has(m.state)) throw new Error(`"${m.name}" has already finished (${m.state})`);
+    if (m.state === 'taken_over' && kind === 'pause') throw new Error(`"${m.name}" is taken over by a human`);
     const rt = this.#live.get(m.id);
     if (!rt) {
       if (kind === 'pause' && m.state === 'paused') throw new Error(`"${m.name}" is already paused`);
@@ -400,7 +438,8 @@ export class Supervisor {
   }
 
   #recoverMember(m) {
-    if (TERMINAL.has(m.state) || m.state === 'paused') return;
+    // A taken-over member may still be in a human's terminal; handback resumes it.
+    if (TERMINAL.has(m.state) || m.state === 'paused' || m.state === 'taken_over') return;
     this.store.requeueOffered(m.id);
     if (m.state === 'queued') {
       // Queued after a resume: it has a workspace and maybe a session to go back to.
@@ -719,7 +758,9 @@ export class Supervisor {
       questions: (p) => this.questions(p),
       pause: (p) => this.pause(p),
       cancel: (p) => this.cancel(p),
-      resume: (p) => this.resume(p)
+      resume: (p) => this.resume(p),
+      takeover: (p) => this.takeover(p),
+      handback: (p) => this.handback(p)
     };
     if (Object.hasOwn(admin, method)) return admin[method](params);
 

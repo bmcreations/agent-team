@@ -11,7 +11,7 @@ import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
-import { adminCall, memberArgs, whoAmI, renderQuestions } from '../src/admin.js';
+import { adminCall, attach, memberArgs, whoAmI, renderQuestions } from '../src/admin.js';
 import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,7 +46,8 @@ const USAGE =
   '       agent-team resume <run> <member> [--subtree] [--note <text>] [--max-cost-usd <usd>]\n' +
   '       agent-team cancel <run> <member> [--subtree]\n' +
   '       agent-team questions [<run>] [--json]\n' +
-  '       agent-team answer <question-id> <answer>\n';
+  '       agent-team answer <question-id> <answer>\n' +
+  '       agent-team attach <run> <member>\n';
 
 // Any throw here — a broken config, a bad org chart, a member resolution failure — must
 // reach the caller (the delegate skill included) as the same JSON shape a normal run
@@ -187,6 +188,17 @@ const ADMIN = {
     return ['answer', { question_id: Number(id), answer: text.join(' '), by: whoAmI() }];
   }
 };
+if (positionals[0] === 'attach') {
+  try {
+    const back = await attach(memberArgs(positionals.slice(1)));
+    process.stdout.write(JSON.stringify(back, null, 2) + '\n');
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(`agent-team: ${err.message}\n`);
+    process.exit(1);
+  }
+}
+
 if (Object.hasOwn(ADMIN, positionals[0])) {
   try {
     const [method, params] = ADMIN[positionals[0]](positionals.slice(1));

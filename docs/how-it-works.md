@@ -62,6 +62,7 @@ agent-team resume <run> <member> [--subtree] [--note <text>] [--max-cost-usd <us
 agent-team cancel <run> <member> [--subtree]
 agent-team questions [<run>] [--json]
 agent-team answer <question-id> <answer>
+agent-team attach <run> <member>
 ```
 
 `pause` lets the current turn finish; `--now` interrupts it, so a command it started may have
@@ -69,6 +70,13 @@ partly run. `resume` starts the member again from its harness session in the sam
 and delivers anything sent to it while paused. `cancel` keeps the workspace. `--subtree`
 applies the verb to the member and every report under it. Each verb is signed with your OS
 user name, which is what the member and its manager are told.
+
+`attach` hands a claude member to you: its turn is interrupted, and once its process has
+exited, `claude --resume <session>` starts in its workspace in your terminal. Its manager is
+told it was taken over. Claude may first ask whether to trust the workspace folder. When you
+exit claude, however you exit, the member resumes headless and is told that you drove the
+session; your turns are in its history. While you have it, `pause` refuses it and a
+supervisor restart leaves it alone. Taking over a codex member comes in a later plan.
 
 ## Resolving the agent
 
