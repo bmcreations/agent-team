@@ -1378,7 +1378,12 @@ export class Supervisor {
     for (const id of ids) {
       try {
         this.#closeThread(this.store.thread(id), state, result, id === served);
-      } catch { /* a concurrent move already closed it */ }
+      } catch (err) {
+        // Only a lost race is expected: a concurrent move already closed the thread.
+        if (!/^cannot move thread #/.test(err.message)) {
+          process.stderr.write(`agent-team: could not close thread #${id}: ${err.message}\n`);
+        }
+      }
     }
   }
 

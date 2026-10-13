@@ -690,3 +690,23 @@ test('an accepted thread with no run is closed failed when its lead ends, not do
     assert.ok(!messagesOf(store, mgr.memberId).some((m) => /unrelated work/.test(m.text)));
   } finally { await sup.close(); store.close(); }
 });
+
+test('a failure while closing a thread is logged to stderr', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    manager: { steps: [{ tool: 'request', args: { team: b, text: 'x', task: 'y' } }] },
+    'b-lead': { steps: [{ say: 'looking' }] }
+  } }));
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  const logged = [];
+  const write = process.stderr.write;
+  process.stderr.write = (chunk) => { logged.push(String(chunk)); return true; };
+  try {
+    const move = store.moveThread.bind(store);
+    store.moveThread = (id, from, to, o) => { if (to === 'declined') throw new Error('disk full'); return move(id, from, to, o); };
+    sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    // The requester stays alive on its open thread, so only the receiving run is awaited.
+    await until(() => store.thread(1)?.run_id);
+    await sup.waitRun(store.thread(1).run_id);
+    assert.ok(logged.some((l) => /could not close thread #1: disk full/.test(l)), JSON.stringify(logged));
+  } finally { process.stderr.write = write; await sup.close(); store.close(); }
+});
