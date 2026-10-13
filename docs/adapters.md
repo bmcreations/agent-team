@@ -22,8 +22,9 @@ stdout. The shipped adapters exit `0` and report failure through `status` instea
 on an unknown subcommand.
 
 A `run` result needs `status`, one of `ok`, `failed`, `timeout` or `delegating`, and on `ok`,
-a string `summary`. An optional `usage` object is copied into the run log; only the claude
-adapter sets it (a codex session reports `tokens` in its `usage`), so codex `run` and grok members show `—` in the report. `delegating` also needs `delegations`; see
+a string `summary`. An optional `usage` object is copied into the run log. The claude adapter
+sets `cost_usd` in it and a codex session sets `tokens`; codex `run` and grok set none, so those
+members show `—` in the report. `delegating` also needs `delegations`; see
 [Delegation](how-it-works.md#delegation). Everything else in the object is passed through to
 the caller. The brief's fields are listed in [The brief](how-it-works.md#the-brief).
 
@@ -263,6 +264,10 @@ under that policy; each is answered so a turn cannot hang, and none approves any
 
 Ending a session (stop, interrupt, a closed stdin, SIGTERM) also ends the shell commands its
 app-server started, including ones in their own process group; the same holds for the take-over server.
+So does an app-server that crashes mid-turn: the adapter refreshes its list of the server's
+descendants at each turn start and each command start, and kills that list when the server
+exits for any reason. The list comes from `ps`; if `ps` is missing or fails, the session log
+says so and no commands are swept.
 
 **Tokens, not dollars.** codex reports no dollar figure. `idle.tokens` is the turn's tokens,
 and `start.tokens` is the member's recorded total: `thread/resume` re-emits the restored total
