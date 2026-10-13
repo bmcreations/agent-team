@@ -47,6 +47,8 @@ export function lockSupervisorDir(env = process.env) {
 }
 
 const label = (m) => `${m.from_name} (${m.from_kind})`;
+// Legal thread moves by kind; declined and done are final.
+const THREAD_MOVES = { task: { open: ['accepted', 'declined'], accepted: ['done'] }, question: { open: ['done', 'declined'] } };
 const render = (m) => ({ id: m.id, from: label(m), text: m.text, report_id: m.report_id, thread_id: m.thread_id ?? null });
 const clampSeconds = (v, dflt, max) => (Number.isInteger(v) && v > 0 ? Math.min(v, max) : dflt);
 
@@ -862,6 +864,7 @@ export class Supervisor {
       this.#notifyManager(m, `finished ${outcome}: ${result.summary ?? ''}${stat}`);
     } else {
       this.store.finishRun(m.run_id, state);
+      this.#closeThreadsOf(m, state, result);
       for (const resolve of this.#runWaiters.get(m.run_id) ?? []) resolve(this.store.member(id).result);
       this.#runWaiters.delete(m.run_id);
     }
@@ -889,8 +892,12 @@ export class Supervisor {
 
   // ---- inbox delivery ----
 
-  #openReports(id) {
-    return this.store.children(id).filter((c) => !TERMINAL.has(c.state)).length;
+  // What keeps a member working: reports still running, and threads it (or a finished report
+  // it now stands in for) opened that are not closed.
+  #openWork(id) {
+    const reports = this.store.children(id).filter((c) => !TERMINAL.has(c.state)).length;
+    const threads = this.store.threadsInState(['open', 'accepted']).filter((t) => this.#holder(t) === id).length;
+    return reports + threads;
   }
 
   // Exactly one path delivers each message: a blocked wait_for takes it as its tool result;
@@ -924,7 +931,7 @@ export class Supervisor {
       rt.session.send({ type: 'message', id: m.id, from: label(m), text: m.text });
     }
     if (msgs.length) { rt.idle = false; return; }
-    if (rt.idle && rt.offered.size === 0 && this.#openReports(id) === 0) {
+    if (rt.idle && rt.offered.size === 0 && this.#openWork(id) === 0) {
       rt.stopping = true;
       rt.session.send({ type: 'stop' });
       // An adapter that hangs on its way out would hold its slot forever.
@@ -1002,7 +1009,8 @@ export class Supervisor {
       report_progress: (id, p) => this.#reportProgress(id, p),
       ask_human: (id, p) => this.#askHuman(id, p),
       team_status: (id, p) => this.#teamStatus(id, p),
-      request: (id, p) => this.#request(id, p)
+      request: (id, p) => this.#request(id, p),
+      reply: (id, p) => this.#reply(id, p)
     };
     if (!Object.hasOwn(tools, method)) throw new Error(`unknown tool "${method}"`);
     const m = typeof token === 'string' ? this.store.memberByToken(token) : null;
@@ -1041,6 +1049,13 @@ export class Supervisor {
     if (!rt.resolved.reports.includes(to)) throw new Error(`"${to}" is not a direct report of "${m.name}"`);
     if (m.depth >= config.defaults.max_depth) {
       throw new Error(`delegation refused: already at max_depth ${config.defaults.max_depth}`);
+    }
+    const runThread = this.store.run(m.run_id).thread_id;
+    if (runThread != null) {
+      const t = this.store.thread(runThread);
+      if (t.kind === 'task' && t.state === 'open') {
+        throw new Error(`delegation refused: accept thread #${t.id} first — reply({ thread: ${t.id}, state: "accepted" })`);
+      }
     }
     this.#checkBudget(run, scope);
     const spec = config.members[to];
@@ -1183,14 +1198,121 @@ export class Supervisor {
 
   // One post on a thread, delivered to a member's inbox. `record: false` when the caller has
   // already stored the post (the opening one).
-  #deliver(threadId, to, { side, author, text, state = null, fromTeam, record = true }) {
+  // `notice: true` sends a close notice as it is, without the "[thread #n]" tag a post carries.
+  #deliver(threadId, to, { side, author, text, state = null, fromTeam, record = true, notice = false }) {
     if (record) this.store.addThreadPost({ threadId, side, author, text, state });
     this.store.enqueue({
       to, threadId, fromKind: side === 'human' ? 'human' : 'team',
       fromName: side === 'human' ? author : `${basename(fromTeam)}/${author}`,
-      text: `[thread #${threadId}] ${text}`
+      text: notice ? text : `[thread #${threadId}] ${text}`
     });
     this.#pump(to);
+  }
+
+  // The member that stands in for a thread's requester: the requester itself, or once it has
+  // finished its nearest unfinished ancestor in the same run. Null when the run is over.
+  #holder(t) {
+    for (let cur = this.store.member(t.from_member); cur;
+         cur = cur.parent_id == null ? null : this.store.member(cur.parent_id)) {
+      if (!TERMINAL.has(cur.state)) return cur.id;
+    }
+    return null;
+  }
+
+  #sideOf(t, m) {
+    if (m.id === t.owner_member) return 'receiver';
+    return m.id === this.#holder(t) ? 'requester' : null;
+  }
+
+  #reply(id, { thread, text, state } = {}) {
+    const threadId = Number(thread);
+    const t = Number.isInteger(threadId) ? this.store.thread(threadId) : null;
+    if (!t) throw new Error(`no thread #${thread}`);
+    if (typeof text !== 'string') text = '';
+    if (state != null && typeof state !== 'string') throw new Error('"state" must be a string');
+    if (!state && !text.trim()) throw new Error('reply needs "text" (or a "state")');
+    const m = this.store.member(id);
+    const side = this.#sideOf(t, m);
+    if (!side) throw new Error(`reply refused: member "${m.name}" is not on thread #${t.id}`);
+    let started = null;
+    if (state) {
+      if (side !== 'receiver') throw new Error(`reply refused: only the receiving lead on thread #${t.id} can change its state`);
+      if (state === 'declined' && !text.trim()) throw new Error('declining a thread needs a reason in "text"');
+      started = this.#moveThread(t, state, { text, author: m.name,
+        result: state === 'done' ? { status: 'ok', summary: text } : null });
+    } else {
+      this.store.addThreadPost({ threadId: t.id, side, author: m.name, text });
+      const to = side === 'receiver' ? this.#holder(t) : this.store.thread(t.id).owner_member;
+      if (to != null) {
+        this.#deliver(t.id, to, {
+          side, author: m.name, text, record: false,
+          fromTeam: side === 'receiver' ? t.to_project : t.from_project
+        });
+      }
+    }
+    return { thread_id: t.id, state: this.store.thread(t.id).state, ...(started ? { run_id: started, note: `thread #${t.id}: started run #${started}` } : {}) };
+  }
+
+  // The only place a thread's state changes. `author` 'agent-team' is the supervisor acting
+  // for the receiving side when its run finishes. Returns the id of the run it started, if any.
+  #moveThread(t, to, { text = '', author, result = null }) {
+    const cur = this.store.thread(t.id);
+    const refuse = () => new Error(`cannot move thread #${t.id} from ${cur.state} to ${to}`);
+    if (!THREAD_MOVES[cur.kind]?.[cur.state]?.includes(to)) throw refuse();
+    // False: a concurrent move won.
+    if (!this.store.moveThread(t.id, cur.state, to, { result: result ?? (to === 'declined' ? { reason: text } : null) })) throw refuse();
+    this.store.addThreadPost({ threadId: t.id, side: 'receiver', author, text, state: to });
+    const holder = this.#holder(cur);
+    if (to === 'accepted') {
+      if (holder != null) {
+        this.#deliver(t.id, holder, { side: 'receiver', author, text: text.trim() || 'accepted', record: false, fromTeam: cur.to_project });
+      }
+      if (cur.run_id != null) return null;
+      // A live lead in another run accepted: the work is its own run, under this team's budgets.
+      try {
+        return this.#startThreadRun(t.id);
+      } catch (err) {
+        this.#moveThread(this.store.thread(t.id), 'done', { text: `could not start: ${err.message}`, author: 'agent-team',
+          result: { status: 'failed', summary: `could not start: ${err.message}` } });
+        throw err;
+      }
+    }
+    const notice = to === 'declined'
+      ? `thread #${t.id} declined: ${text}`
+      : `thread #${t.id} done ${result?.status ?? 'ok'}: ${result?.summary ?? text}`;
+    if (holder != null) {
+      this.#deliver(t.id, holder, { side: 'receiver', author, text: notice, record: false, notice: true, fromTeam: cur.to_project });
+    }
+    return null;
+  }
+
+  // A root finished: the thread its run serves, and any thread delivered to it as a live lead
+  // that never got a run of its own, close with the run's outcome.
+  #closeThreadsOf(m, state, result) {
+    const ids = new Set();
+    const served = this.store.run(m.run_id).thread_id;
+    if (served != null) ids.add(served);
+    for (const t of this.store.threadsInState(['open', 'accepted'])) {
+      if (t.owner_member === m.id && t.run_id == null) ids.add(t.id);
+    }
+    for (const id of ids) {
+      try {
+        this.#closeThread(this.store.thread(id), state, result);
+      } catch { /* a concurrent move already closed it */ }
+    }
+  }
+
+  #closeThread(t, state, result) {
+    if (t.state === 'done' || t.state === 'declined') return;
+    const status = state === 'done' ? result.status : 'failed';
+    const summary = result.summary ?? '';
+    if (t.kind === 'task' && t.state === 'open') {
+      return this.#moveThread(t, 'declined', { text: 'the lead finished without accepting', author: 'agent-team' });
+    }
+    if (t.kind === 'question' && state !== 'done') {
+      return this.#moveThread(t, 'declined', { text: `the lead's run ${state}`, author: 'agent-team' });
+    }
+    this.#moveThread(t, 'done', { text: summary, author: 'agent-team', result: { status, summary } });
   }
 
   // What a launching member's brief says about threads: the one its run serves (root only),
@@ -1270,7 +1392,8 @@ export class Supervisor {
     }
     // Only a member that has delegated can have nothing left to wait for; a leaf calling
     // wait_for is waiting on its manager and blocks.
-    if (reportIds == null && this.store.children(id).length > 0 && this.#openReports(id) === 0) {
+    if (reportIds == null && (this.store.children(id).length > 0 || this.store.threadsFrom(id).length > 0) &&
+        this.#openWork(id) === 0) {
       return { messages: [], timed_out: false, note: 'no open reports' };
     }
     const seconds = clampSeconds(timeout_s, WAIT_DEFAULT_S, WAIT_MAX_S);

@@ -35,7 +35,7 @@ test('lists the seven team tools, each read-only', async () => {
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {} });
     assert.equal(init.result.serverInfo.name, 'agent-team');
     const { result } = await rpc('tools/list', {});
-    assert.deepEqual(result.tools.map((t) => t.name), ['delegate', 'send_to', 'wait_for', 'report_progress', 'ask_human', 'team_status', 'request']);
+    assert.deepEqual(result.tools.map((t) => t.name), ['delegate', 'send_to', 'wait_for', 'report_progress', 'ask_human', 'team_status', 'request', 'reply']);
     assert.ok(result.tools.every((t) => t.annotations?.readOnlyHint === true));
   });
 });

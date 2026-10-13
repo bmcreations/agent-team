@@ -126,6 +126,22 @@ function session() {
             if (interrupted) break;
           }
           res = error ? { messages, error } : { messages };
+        } else if (step.until_threads) {
+          const ids = subst(step.until_threads).map(Number);
+          const done = new Set();
+          const messages = [];
+          let error = null;
+          while (!ids.every((id) => done.has(id))) {
+            const r = await call('wait_for', args).catch((err) => ({ error: err.message }));
+            if (r.error) { error = r.error; break; }
+            for (const m of r.messages) {
+              messages.push(m);
+              if (m.thread_id != null && new RegExp(`^thread #${m.thread_id} (done|declined)`).test(m.text)) done.add(m.thread_id);
+            }
+            if (r.messages.length === 0 && !r.timed_out) break;
+            if (interrupted) break;
+          }
+          res = error ? { messages, error } : { messages };
         } else {
           res = await call(step.tool, args).catch((err) => ({ error: err.message }));
         }
