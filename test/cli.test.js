@@ -171,10 +171,19 @@ test('threads falls back to the first post when a thread has no task, and clips 
   const m = store.addMember({ runId: run, parentId: null, name: 'mgr', task: 't', depth: 0 });
   store.addThread({ kind: 'question', fromProject: '/a', fromRun: run, fromMember: m.id, toProject: '/b',
     toMember: 'lead', chain: [], text: 'q'.repeat(200) });
+  store.addThread({ kind: 'question', fromProject: '/a', fromRun: run, fromMember: m.id, toProject: '/b',
+    toMember: 'lead', chain: [], text: 'x\x1b[2Jy\x9b1m post' });
+  store.addThread({ kind: 'task', fromProject: '/a', fromRun: run, fromMember: m.id, toProject: '/b',
+    toMember: 'lead', chain: [], text: 'p', task: 'k\x9b2J' });
   store.close();
   const { stdout } = await runCli(['threads'], env);
   const line = stdout.split('\n').find((l) => l.trim().startsWith('#3 '));
   assert.ok(line.endsWith(': ' + 'q'.repeat(80)), line);
+  assert.equal(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(stdout), false);
+  assert.match(stdout, /#4 open question mgr -> -: x\[2Jy1m post/);
+  const json = (await runCli(['threads', '--json'], env)).stdout;
+  assert.equal(/[\u007f-\u009f]/.test(json), false, 'DEL and C1 are escaped in --json');
+  assert.match(json, /k\\u009b2J/);
 });
 
 test('threads --json prints the threadsView object; --project narrows it', async () => {

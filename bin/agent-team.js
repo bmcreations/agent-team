@@ -12,7 +12,7 @@ import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
 import { watchRun, plain } from '../src/watch.js';
-import { threadsView, threadDetail } from '../src/view.js';
+import { threadsView } from '../src/view.js';
 import { startHttp, DEFAULT_PORT } from '../src/http.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
 import { adminCall, attach, memberArgs, whoAmI, renderQuestions, handbackNotice } from '../src/admin.js';
@@ -20,8 +20,9 @@ import { askSession, listChannels, pickSession, START_COMMAND } from '../src/cha
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-const { values, positionals } = parseArgs({
+const { values, positionals, tokens } = parseArgs({
   allowPositionals: true,
+  tokens: true,
   options: {
     member: { type: 'string' },
     task: { type: 'string' },
@@ -271,15 +272,16 @@ if (positionals[0] === 'threads') {
   const store = openStore(dbPath);
   let code = 0;
   try {
-    const named = process.argv.some((a) => a === '--project' || a.startsWith('--project='));
+    const named = tokens.some((t) => t.kind === 'option' && t.name === 'project');
     const view = threadsView(store, { project: named ? resolve(values.project) : null });
-    if (values.json) process.stdout.write(JSON.stringify(view, null, 2) + '\n');
+    // DEL and C1 controls are legal raw in JSON; escape them so a terminal never sees one.
+    if (values.json) process.stdout.write(JSON.stringify(view, null, 2).replace(/[\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`) + '\n');
     else {
       const out = [];
       for (const { pair, threads } of view.pairs) {
         out.push(plain(pair));
         for (const t of threads) {
-          const what = t.task ?? threadDetail(store, t.id)?.posts[0]?.text ?? '';
+          const what = t.task ?? store.threadPosts(t.id)[0]?.text ?? '';
           out.push(`  #${t.id} ${plain(t.state)} ${plain(t.kind)} ${plain(t.from_member?.name ?? '-')} -> ${plain(t.owner?.name ?? '-')}: ${plain(what).slice(0, 80)}`);
         }
       }

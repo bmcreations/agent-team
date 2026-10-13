@@ -181,3 +181,21 @@ test('a human reply with no supervisor needs serve', async () => {
     assert.equal((await post(web.url, '/api/threads/1/reply', { text: 'hi' })).status, 503);
   } finally { await web.close(); store.close(); }
 });
+
+test('a human reply to a thread whose runs another supervisor owns is refused and stores nothing', async () => {
+  const { a } = threadPair();
+  const v = await view(a.script, { shared: true });
+  try {
+    const run = v.store.createRun({ project: '/a', task: 't', owner: '/elsewhere.sock' });
+    const m = v.store.addMember({ runId: run, parentId: null, name: 'mgr', task: 't', depth: 0 });
+    v.store.setRunRoot(run, m.id);
+    v.store.setState(m.id, 'running');
+    const id = v.store.addThread({ kind: 'question', fromProject: '/a', fromRun: run, fromMember: m.id,
+      toProject: '/b', toMember: 'lead', chain: ['/a'], text: 'q' });
+    const before = v.store.threadPosts(id).length;
+    const r = await post(v.base, `/api/threads/${id}/reply`, { text: 'hello' });
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /^read-only: /);
+    assert.equal(v.store.threadPosts(id).length, before);
+  } finally { await v.close(); }
+});
