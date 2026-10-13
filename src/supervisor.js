@@ -161,6 +161,25 @@ export class Supervisor {
     return { ok: true };
   }
 
+  // A human's post on a thread, delivered to whoever holds each side. A human posts only: no
+  // state change, and a closed thread takes no more posts. A side whose run another supervisor
+  // owns has the post recorded and is skipped.
+  humanReply({ thread_id, text, by = 'local' }) {
+    const t = Number.isInteger(thread_id) ? this.store.thread(thread_id) : null;
+    if (!t) throw new Error(`unknown thread #${thread_id}`);
+    if (typeof text !== 'string' || !text.trim()) throw new Error('a reply needs text');
+    if (t.state === 'done' || t.state === 'declined') throw new Error(`thread #${t.id} is ${t.state}`);
+    this.store.addThreadPost({ threadId: t.id, side: 'human', author: by, text });
+    const live = (id) => {
+      const m = id == null ? null : this.store.member(id);
+      return m && !TERMINAL.has(m.state) && this.#runs.has(m.run_id) ? m.id : null;
+    };
+    for (const to of new Set([live(this.#holder(t)), live(t.owner_member)])) {
+      if (to != null) this.#deliver(t.id, to, { side: 'human', author: by, text, record: false });
+    }
+    return { thread_id: t.id, state: t.state };
+  }
+
   // Open ask_human questions, newest last, with who asked; `answer` takes their ids.
   questions({ run_id = null } = {}) {
     return this.store.openQuestions().map((q) => {
@@ -1027,6 +1046,7 @@ export class Supervisor {
       wait_run: (p) => this.waitRun(p.run_id),
       send: (p) => this.send(p),
       answer: (p) => this.answer(p),
+      thread_reply: (p) => this.humanReply(p),
       questions: (p) => this.questions(p),
       pause: (p) => this.pause(p),
       cancel: (p) => this.cancel(p),

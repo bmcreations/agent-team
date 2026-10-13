@@ -101,6 +101,8 @@ agent-team cancel <run> <member> [--subtree]
 agent-team send <run> <member> <text>
 agent-team questions [<run>] [--json]
 agent-team answer <question-id> <answer>
+agent-team threads [--project <dir>] [--json]
+agent-team reply <thread> <text>
 agent-team attach <run> <member>
 agent-team handback <run> <member>
 ```
@@ -116,6 +118,13 @@ unfinished member of its run, queued ones included. Pausing a manager alone leav
 working. A one-shot (v1) report that is already running cannot be cancelled and runs until it
 finishes. Each verb is signed with your OS
 user name, which is what the member and its manager are told.
+
+`threads` lists the threads between teams, grouped by team pair, newest first; it reads the
+store directly, so it works without `serve` (`--project` narrows it to threads that team is on).
+`reply` posts to a thread as you, and both sides' leads get it. It does not accept or decline
+the thread, and a closed thread takes no more posts. The web view has the same list at
+`GET /api/threads`, one thread with its posts at `GET /api/threads/<id>`, and the reply at
+`POST /api/threads/<id>/reply`.
 
 `attach` hands a claude or codex member to you: its turn is interrupted, and once its process
 has exited, the adapter's `attach` starts in its workspace in your terminal: `claude --resume

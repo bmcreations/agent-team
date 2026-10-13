@@ -193,3 +193,57 @@ test('/api/teams lists the known teams; /api/teams/status serves only known ones
     assert.equal((await get(web.url, '/api/teams/status?root=/not/known')).status, 404);
   } finally { await web.close(); }
 });
+
+function seededThreads() {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't', owner: '/elsewhere.sock' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'mgr', task: 't', depth: 0 });
+  const open = (toProject, text, task = null, chain = ['/secret/path']) => store.addThread({
+    kind: task ? 'task' : 'question', fromProject: '/a', fromRun: run, fromMember: m.id,
+    toProject, toMember: 'lead', chain, text, task
+  });
+  const t1 = open('/b', 'first', 'fix the bug');
+  const t2 = open('/b', 'second');
+  const t3 = open('/c', 'third', 'other');
+  store.addThreadPost({ threadId: t1, side: 'receiver', author: 'lead', text: 'on it' });
+  store.moveThread(t1, 'open', 'accepted');
+  store.moveThread(t1, 'accepted', 'done', { result: { status: 'ok', summary: 'fixed', secret: '/secret/path' } });
+  return { store, t1, t2, t3 };
+}
+
+test('threads group by team pair, newest pair first, with no chain and only allowlisted post fields', async () => {
+  const { store } = seededThreads();
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const all = await get(web.url, '/api/threads');
+    assert.equal(all.status, 200);
+    assert.deepEqual(all.json.pairs.map((p) => p.pair), ['a → c', 'a → b']);
+    assert.deepEqual(all.json.pairs[1].threads.map((t) => t.id), [2, 1]);
+    for (const p of all.json.pairs) for (const t of p.threads) assert.equal('chain' in t, false);
+    assert.equal(all.text.includes('/secret/path'), false);
+    assert.deepEqual(all.json.pairs[1].threads[1].result, { status: 'ok', summary: 'fixed' });
+    assert.deepEqual(all.json.pairs[1].threads[1].from_member.name, 'mgr');
+
+    const one = await get(web.url, '/api/threads?project=/c');
+    assert.deepEqual(one.json.pairs.map((p) => p.pair), ['a → c']);
+
+    const detail = await get(web.url, '/api/threads/1');
+    assert.equal(detail.status, 200);
+    assert.equal(detail.text.includes('/secret/path'), false);
+    assert.deepEqual(detail.json.posts.map((p) => p.author), ['mgr', 'lead']);
+    for (const p of detail.json.posts) assert.deepEqual(Object.keys(p), ['id', 'side', 'author', 'text', 'state', 'at']);
+    assert.equal((await get(web.url, '/api/threads/99')).status, 404);
+  } finally { await web.close(); store.close(); }
+});
+
+test('thread text is clipped in the view and kept whole in the store', async () => {
+  const { store, t1 } = seededThreads();
+  const long = 'x'.repeat(10_000);
+  store.addThreadPost({ threadId: t1, side: 'receiver', author: 'lead', text: long });
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const posts = (await get(web.url, '/api/threads/1')).json.posts;
+    assert.ok(posts.at(-1).text.length < 5000);
+    assert.equal(store.threadPosts(t1).at(-1).text.length, 10_000);
+  } finally { await web.close(); store.close(); }
+});

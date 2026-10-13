@@ -6,7 +6,7 @@ import { figmaRefs, figmaImage, FILE_KEY_RE, NODE_RE } from './figma.js';
 import { basename } from 'node:path';
 import { loadConfig } from './config.js';
 import { knownTeams } from './teams.js';
-import { memberTexts, publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState, teamStatus, READ_ONLY_NOTE } from './view.js';
+import { memberTexts, publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState, teamStatus, threadsView, threadDetail, READ_ONLY_NOTE } from './view.js';
 
 // The web view: a JSON API over the store, server-sent events, and a static page. It binds to
 // 127.0.0.1 and has no sign-in yet: anyone who can open a connection to the port on this
@@ -372,7 +372,11 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
       return steer(() => sup.resume({ member_id: params[0], subtree: flag(body.subtree), note, max_cost_usd: maxCost, by: who }));
     }],
     ['POST', /^\/api\/questions\/(\d+)\/answer$/, ({ params, body }) =>
-      steer(() => sup.answer({ question_id: params[0], answer: text(body.answer, 'answer'), by: who }))]
+      steer(() => sup.answer({ question_id: params[0], answer: text(body.answer, 'answer'), by: who }))],
+    ['GET', /^\/api\/threads$/, ({ url }) => threadsView(store, { project: url.searchParams.get('project') || null })],
+    ['GET', /^\/api\/threads\/(\d+)$/, ({ params }) => found(threadDetail(store, Number(params[0])), `thread ${params[0]}`)],
+    ['POST', /^\/api\/threads\/(\d+)\/reply$/, ({ params, body }) =>
+      steer(() => sup.humanReply({ thread_id: Number(params[0]), text: text(body.text, 'text'), by: who }))]
   ];
 
   function serveStatic(res, path) {
