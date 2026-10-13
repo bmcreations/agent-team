@@ -110,3 +110,16 @@ test('close() settles a blocked wait_for instead of leaving its connection open'
   const results = store.events(memberId).filter((e) => e.kind === 'tool_result');
   assert.deepEqual(results.map((e) => e.body.result), [{ error: 'the agent-team supervisor is shutting down' }]);
 });
+
+test('a launched member records its harness, model and whether it could write', async () => {
+  const { root, script } = project({ solo: LIVE({ model: 'mock-1' }) }, {
+    by_member: { solo: { steps: [], result: { status: 'ok', summary: 'ok' } } }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    await sup.waitRun(runId);
+    const m = store.member(memberId);
+    assert.deepEqual([m.agent, m.model, m.read_only], ['mock-live', 'mock-1', 1]);   // isolation none is read-only
+  } finally { await sup.close(); }
+});

@@ -664,6 +664,10 @@ export class Supervisor {
     // member resolves afresh on resume.
     if (rt.halt) return this.#halted(id, rt);
     if (r.error) throw r.error;
+    // For the web view and the report: the resolution is not otherwise kept.
+    this.store.setHarnessInfo(id, r.team
+      ? { agent: 'team' }
+      : { agent: r.resolved.agent, model: r.resolved.model, readOnly: r.resolved.isolation !== 'workspace' });
     // Teams in other projects and v1 adapters keep today's one-shot loop, with no session
     // for send_to to deliver to.
     if (r.team || r.caps.protocol !== 2) {

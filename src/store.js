@@ -44,7 +44,15 @@ const MIGRATIONS = [
   `ALTER TABLE members ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;`,
   // Token usage, for harnesses that report tokens and no dollar cost (codex).
   `ALTER TABLE members ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0;
-   ALTER TABLE runs ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0;`
+   ALTER TABLE runs ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0;`,
+  // What the web view shows per member: the harness, the configured model, and whether the
+  // member could write. Indexes for the view's timeline reads.
+  `ALTER TABLE members ADD COLUMN agent TEXT;
+   ALTER TABLE members ADD COLUMN model TEXT;
+   ALTER TABLE members ADD COLUMN read_only INTEGER;
+   CREATE INDEX IF NOT EXISTS events_member ON events(member_id, id);
+   CREATE INDEX IF NOT EXISTS messages_to ON messages(to_member, id);
+   CREATE INDEX IF NOT EXISTS members_run ON members(run_id);`
 ];
 
 function migrate(db) {
@@ -77,6 +85,7 @@ export function openStore(path) {
   migrate(db);
   const q = (sql) => db.prepare(sql);
   const memberRow = (row) => row && { ...row, result: parse(row.result) };
+  const eventRow = (row) => row && { ...row, body: parse(row.body) };
   const questionRow = (row) => row && { ...row, options: parse(row.options) };
   const setMessageState = (id, from, to) =>
     q('UPDATE messages SET state = ? WHERE id = ? AND state = ?').run(to, id, from);
@@ -188,6 +197,46 @@ export function openStore(path) {
     ).run(answer, by, id).changes > 0,
     // Timed out, or its asker finished: no longer answerable.
     closeQuestion: (id) => q('UPDATE questions SET closed = 1 WHERE id = ? AND answer IS NULL').run(id),
-    openQuestions: () => q('SELECT * FROM questions WHERE answer IS NULL AND closed = 0 ORDER BY id').all().map(questionRow)
+    openQuestions: () => q('SELECT * FROM questions WHERE answer IS NULL AND closed = 0 ORDER BY id').all().map(questionRow),
+
+    // ---- reads for the web view, `watch`, and `report` ----
+
+    setHarnessInfo: (id, { agent = null, model = null, readOnly = null }) =>
+      q('UPDATE members SET agent = ?, model = ?, read_only = ? WHERE id = ?')
+        .run(agent, model, readOnly == null ? null : (readOnly ? 1 : 0), id),
+    // Differs after any committed write: data_version moves for other connections' commits
+    // (an in-process supervisor in another CLI), total_changes() for this connection's own.
+    version: () => `${q('PRAGMA data_version').get().data_version}.${q('SELECT total_changes() AS n').get().n}`,
+    // node:sqlite rows have a null prototype; spread so callers can deepEqual plain objects.
+    maxIds: () => ({ ...q('SELECT (SELECT ifnull(max(id), 0) FROM events) AS event, ' +
+                    '(SELECT ifnull(max(id), 0) FROM messages) AS message').get() }),
+    listRuns: ({ project = null, limit = 50 } = {}) =>
+      q('SELECT * FROM runs WHERE ?1 IS NULL OR project = ?1 ORDER BY id DESC LIMIT ?2').all(project, limit),
+    // Events and messages of one run, one member, or every run, after a cursor (oldest first)
+    // or before one (the newest `limit`, still returned oldest first).
+    timeline({ runId = null, memberId = null, afterEvent = 0, afterMessage = 0,
+               beforeEvent = null, beforeMessage = null, limit = 200 } = {}) {
+      const back = beforeEvent != null || beforeMessage != null;
+      const order = back ? 'DESC' : 'ASC';
+      const top = Number.MAX_SAFE_INTEGER;
+      const events = q(
+        'SELECT e.*, m.run_id, m.name AS member FROM events e JOIN members m ON m.id = e.member_id ' +
+        'WHERE (?1 IS NULL OR m.run_id = ?1) AND (?2 IS NULL OR e.member_id = ?2) AND e.id > ?3 AND e.id < ?4 ' +
+        `ORDER BY e.id ${order} LIMIT ?5`
+      ).all(runId, memberId, afterEvent, beforeEvent ?? top, limit).map(eventRow);
+      const messages = q(
+        'SELECT g.*, m.run_id, m.name AS to_name FROM messages g JOIN members m ON m.id = g.to_member ' +
+        'WHERE (?1 IS NULL OR m.run_id = ?1) AND (?2 IS NULL OR g.to_member = ?2) AND g.id > ?3 AND g.id < ?4 ' +
+        `ORDER BY g.id ${order} LIMIT ?5`
+      ).all(runId, memberId, afterMessage, beforeMessage ?? top, limit);
+      if (back) { events.reverse(); messages.reverse(); }
+      return { events, messages };
+    },
+    event: (id) => eventRow(q('SELECT * FROM events WHERE id = ?').get(id)),
+    lastEvent: (memberId) => eventRow(q('SELECT * FROM events WHERE member_id = ? ORDER BY id DESC LIMIT 1').get(memberId)),
+    memberSpan: (memberId) => ({ ...q(
+      "SELECT (SELECT min(at) FROM events WHERE member_id = ?1) AS started, " +
+      "(SELECT max(at) FROM events WHERE member_id = ?1 AND kind = 'finished') AS finished"
+    ).get(memberId) })
   };
 }

@@ -193,7 +193,9 @@ test('a version 3 database gains token columns at 0, and reopening changes nothi
   const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   first.close();
   const raw = new DatabaseSync(path);   // rewind to version 3: no token columns
-  raw.exec('ALTER TABLE members DROP COLUMN tokens; ALTER TABLE runs DROP COLUMN tokens; PRAGMA user_version = 3');
+  raw.exec('ALTER TABLE members DROP COLUMN tokens; ALTER TABLE runs DROP COLUMN tokens; ' +
+           'ALTER TABLE members DROP COLUMN agent; ALTER TABLE members DROP COLUMN model; ' +
+           'ALTER TABLE members DROP COLUMN read_only; PRAGMA user_version = 3');
   raw.close();
   const store = openStore(path);
   assert.equal(store.member(lead.id).tokens, 0);
@@ -206,4 +208,74 @@ test('a version 3 database gains token columns at 0, and reopening changes nothi
   const again = openStore(path);
   assert.equal(again.run(runId).tokens, 12);
   again.close();
+});
+
+test('a version 4 database gains agent, model and read_only, unset', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig5-')), 's.db');
+  const first = openStore(path);
+  const runId = first.createRun({ project: '/p', task: 't' });
+  const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+  first.close();
+  const raw = new DatabaseSync(path);
+  raw.exec('ALTER TABLE members DROP COLUMN agent; ALTER TABLE members DROP COLUMN model; ' +
+           'ALTER TABLE members DROP COLUMN read_only; PRAGMA user_version = 4');
+  raw.close();
+  const store = openStore(path);
+  assert.equal(store.member(lead.id).agent, null);
+  store.setHarnessInfo(lead.id, { agent: 'codex', model: 'gpt-5.5', readOnly: true });
+  const m = store.member(lead.id);
+  assert.deepEqual([m.agent, m.model, m.read_only], ['codex', 'gpt-5.5', 1]);
+  store.close();
+});
+
+test('the timeline pages forward from a cursor and backward from the newest', () => {
+  const { store, runId, lead } = seeded();
+  const other = store.createRun({ project: '/q', task: 'x' });
+  const stranger = store.addMember({ runId: other, parentId: null, name: 'x', task: 'x', depth: 0 });
+  for (let i = 1; i <= 5; i++) store.addEvent(lead.id, 'text', { text: `t${i}` });
+  store.addEvent(stranger.id, 'text', { text: 'elsewhere' });
+  store.enqueue({ to: lead.id, fromKind: 'human', fromName: 'b', text: 'hi' });
+
+  const top = store.maxIds();
+  assert.deepEqual(top, { event: 6, message: 1 });
+  const tail = store.timeline({ runId, beforeEvent: top.event + 1, beforeMessage: top.message + 1, limit: 2 });
+  assert.deepEqual(tail.events.map((e) => e.body.text), ['t4', 't5']);
+  assert.equal(tail.events[0].member, 'lead');
+  assert.equal(tail.events[0].run_id, runId);
+  assert.equal(tail.messages[0].to_name, 'lead');
+
+  const after = store.timeline({ runId, afterEvent: 2, limit: 10 });
+  assert.deepEqual(after.events.map((e) => e.body.text), ['t3', 't4', 't5']);
+  assert.equal(store.timeline({ afterEvent: 5 }).events[0].body.text, 'elsewhere');   // every run
+  assert.equal(store.timeline({ memberId: stranger.id }).events.length, 1);
+});
+
+test('version changes on a write from this connection and from another', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-ver-')), 's.db');
+  const a = openStore(path);
+  const b = openStore(path);
+  const v0 = a.version();
+  a.createRun({ project: '/p', task: 't' });
+  const v1 = a.version();
+  assert.notEqual(v1, v0);
+  b.createRun({ project: '/p', task: 'u' });
+  assert.notEqual(a.version(), v1);
+  assert.equal(a.version(), a.version());
+  a.close();
+  b.close();
+});
+
+test('runs list newest first, by project; a member span runs from its first event to finished', () => {
+  const { store, runId, lead } = seeded();
+  store.createRun({ project: '/q', task: 'other' });
+  assert.deepEqual(store.listRuns({ project: '/p' }).map((r) => r.id), [runId]);
+  assert.equal(store.listRuns().length, 2);
+  assert.equal(store.listRuns({ limit: -1 }).length, 2);
+  assert.deepEqual(store.memberSpan(lead.id), { started: null, finished: null });
+  store.addEvent(lead.id, 'started', {});
+  store.addEvent(lead.id, 'finished', { status: 'ok', state: 'done' });
+  const span = store.memberSpan(lead.id);
+  assert.ok(span.started <= span.finished);
+  assert.equal(store.lastEvent(lead.id).kind, 'finished');
+  assert.equal(store.event(store.lastEvent(lead.id).id).body.state, 'done');
 });

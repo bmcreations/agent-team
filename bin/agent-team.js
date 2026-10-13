@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
+import { startHttp, DEFAULT_PORT } from '../src/http.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
 import { adminCall, attach, memberArgs, whoAmI, renderQuestions, handbackNotice } from '../src/admin.js';
 import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
@@ -29,7 +30,9 @@ const { values, positionals } = parseArgs({
     now: { type: 'boolean', default: false },
     subtree: { type: 'boolean', default: false },
     note: { type: 'string' },
-    'max-cost-usd': { type: 'string' }
+    'max-cost-usd': { type: 'string' },
+    port: { type: 'string', default: String(DEFAULT_PORT) },
+    'max-running': { type: 'string', default: '6' }
   }
 });
 
@@ -38,7 +41,7 @@ const USAGE =
   '       agent-team org [--project <dir>]\n' +
   '       agent-team report [--project <dir>] [--all] [--json]\n' +
   '       agent-team mcp\n' +
-  '       agent-team serve\n' +
+  '       agent-team serve [--port <n>] [--max-running <n>]\n' +
   '       agent-team channel enable|disable [--project <dir>]\n' +
   '       agent-team channel list [--json]\n' +
   '       agent-team channel ask --task <text> [--session <id>] [--project <dir>] [--timeout <sec>]\n' +
@@ -68,11 +71,21 @@ if (positionals[0] === 'mcp') {
 
 // The machine's supervisor, in the foreground until SIGINT/SIGTERM.
 if (positionals[0] === 'serve') {
+  const count = (v, flag, min) => {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < min || n > 65535) {
+      process.stderr.write(`agent-team: ${flag} must be a whole number from ${min}, got "${v}"\n`);
+      process.exit(2);
+    }
+    return n;
+  };
+  const port = count(values.port, '--port', 0);
+  const maxRunning = count(values['max-running'], '--max-running', 1);
   lockSupervisorDir();
   const store = openStore(defaultStorePath());
   const sup = new Supervisor({
     store, adapterDir: join(ROOT, 'adapters'), skillsDir: join(ROOT, 'skills'),
-    socketPath: defaultSocketPath()
+    socketPath: defaultSocketPath(), maxRunning
   });
   try {
     await sup.start();
@@ -81,6 +94,17 @@ if (positionals[0] === 'serve') {
     fail(err);
   }
   process.stderr.write(`agent-team: supervisor listening on ${defaultSocketPath()}\n`);
+  let web;
+  try {
+    web = await startHttp({ store, sup, port });
+  } catch (err) {
+    await sup.close().catch(() => {});
+    store.close();
+    process.stderr.write(`agent-team: ${err.message}\n`);
+    process.exit(1);
+  }
+  process.stderr.write(`agent-team: web view at ${web.url} (this machine only, no sign-in: ` +
+                       'any local user who can reach the port can steer runs serve owns)\n');
   // Runs left behind by a previous serve, or by a CLI whose in-process supervisor died.
   const { recovered, failed } = await sup.recover();
   if (recovered.length || failed.length) {
@@ -90,7 +114,7 @@ if (positionals[0] === 'serve') {
   const shutdown = () => {
     if (stopping) return;
     stopping = true;
-    sup.close().catch(() => {}).finally(() => { store.close(); process.exit(0); });
+    web.close().then(() => sup.close()).catch(() => {}).finally(() => { store.close(); process.exit(0); });
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
