@@ -111,6 +111,15 @@ export class Supervisor {
     return { ok: true };
   }
 
+  // Open ask_human questions, newest last, with who asked; `answer` takes their ids.
+  questions({ run_id = null } = {}) {
+    return this.store.openQuestions().map((q) => {
+      const m = this.store.member(q.member_id);
+      return { id: q.id, run_id: m.run_id, member_id: m.id, member: m.name,
+               question: q.question, options: q.options, asked_at: q.at };
+    }).filter((q) => run_id == null || q.run_id === Number(run_id));
+  }
+
   // Re-check the queue, e.g. after raising maxRunning.
   kick() {
     this.#drain();
@@ -459,6 +468,19 @@ export class Supervisor {
       if (msgs.length) this.#resolveWaiter(id, { messages: msgs.map(render), timed_out: false });
       return;
     }
+    // A human or the manager can cut a question short, as wait_for would be; a report's
+    // progress is offered to the harness as usual and read after the answer.
+    if (rt.question) {
+      const msgs = this.store.claimForQuestion(id);
+      for (const m of msgs) { rt.offered.delete(m.id); rt.staleOffers.delete(m.id); }
+      if (msgs.length) {
+        this.store.closeQuestion(rt.question.id);
+        this.#resolveQuestion(id, {
+          answer: null, timed_out: false, messages: msgs.map(render),
+          note: 'question closed: a message arrived before an answer'
+        });
+      }
+    }
     // A halting member's messages wait in the inbox for its resume.
     if (rt.stopping || rt.halt) return;
     const msgs = this.store.offerQueued(id);
@@ -522,6 +544,7 @@ export class Supervisor {
       wait_run: (p) => this.waitRun(p.run_id),
       send: (p) => this.send(p),
       answer: (p) => this.answer(p),
+      questions: (p) => this.questions(p),
       pause: (p) => this.pause(p),
       cancel: (p) => this.cancel(p),
       resume: (p) => this.resume(p)

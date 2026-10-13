@@ -181,8 +181,9 @@ full stream still goes to the store and the web view.
 Every inbox message is delivered once, by one of two paths. If the member is blocked in
 `wait_for`, the tool reclaims it and returns it as the result; the harness may also surface it
 in its own context. Otherwise the adapter writes it into the session, where it is picked up at
-the next tool boundary, and `ack` marks it delivered. `ask_human` does not reclaim: a message
-to a member blocked there waits on stdin until the human answers. An offered message that
+the next tool boundary, and `ack` marks it delivered. `ask_human` reclaims too, but only messages from a human or the member's manager: such a
+message closes the question and is returned as the result. A report's progress is offered to
+the session as usual and read after the answer. An offered message that
 is not acked goes back to the queue at the second `idle` or when the process exits. Messages carry their author,
 rendered as `[from: brandon (human)]` or `[from: lead (manager)]`, and each member's brief
 states that human messages outrank agent messages.

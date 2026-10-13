@@ -44,7 +44,7 @@ export const TOOL_SCHEMAS = [
   },
   {
     name: 'ask_human',
-    description: 'Ask a human and block until they answer. Returns {answer}, or {answer: null, timed_out: true}, in which case decide yourself.',
+    description: 'Ask a human and block until they answer. Returns {answer}; or {answer: null, timed_out: true}, in which case decide yourself; or {answer: null, messages}, when a human or your manager wrote to you first.',
     inputSchema: {
       type: 'object',
       properties: {

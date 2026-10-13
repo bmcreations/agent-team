@@ -70,9 +70,9 @@ A message is delivered once, by one of two paths:
 - Otherwise the supervisor sends it as a `message` and counts it delivered when the adapter
   sends `ack`. Ack means consumed, not written.
 
-`ask_human` does not reclaim messages. A message sent to a member blocked in `ask_human` is
-offered on stdin and waits there until the human answers and the harness reaches its next tool
-boundary.
+`ask_human` reclaims messages from a human or the member's manager the same way: the question
+is closed and the call returns `{answer: null, timed_out: false, messages, note}`. A report's
+progress is not reclaimed; it is offered on stdin and read after the answer.
 
 A message that was offered and not acked is put back in the queue at the second `idle`, or
 when the process exits. A single `idle` does not requeue it, because the offer can still be in
