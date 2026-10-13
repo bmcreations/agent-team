@@ -52,7 +52,12 @@ const MIGRATIONS = [
    ALTER TABLE members ADD COLUMN read_only INTEGER;
    CREATE INDEX IF NOT EXISTS events_member ON events(member_id, id);
    CREATE INDEX IF NOT EXISTS messages_to ON messages(to_member, id);
-   CREATE INDEX IF NOT EXISTS members_run ON members(run_id);`
+   CREATE INDEX IF NOT EXISTS members_run ON members(run_id);`,
+  // Live cross-team delegation: the project a member was entered into (null: its run's),
+  // the name its manager delegated to, and the entered team's own delegation counter.
+  `ALTER TABLE members ADD COLUMN project TEXT;
+   ALTER TABLE members ADD COLUMN alias TEXT;
+   ALTER TABLE members ADD COLUMN scope_budget INTEGER;`
 ];
 
 function migrate(db) {
@@ -118,13 +123,13 @@ export function openStore(path) {
     setRunRoot: (id, memberId) => q('UPDATE runs SET root_member = ? WHERE id = ?').run(memberId, id),
     finishRun: (id, status) => q('UPDATE runs SET status = ? WHERE id = ?').run(status, id),
 
-    addMember({ runId, parentId, name, task, depth }) {
+    addMember({ runId, parentId, name, task, depth, project = null, alias = null, scopeBudget = null }) {
       const token = randomBytes(24).toString('hex');
       const t = now();
       const id = Number(q(
-        "INSERT INTO members (run_id, parent_id, name, task, depth, state, token, created_at, updated_at) " +
-        "VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)"
-      ).run(runId, parentId, name, task, depth, token, t, t).lastInsertRowid);
+        "INSERT INTO members (run_id, parent_id, name, task, depth, state, token, created_at, updated_at, " +
+        "project, alias, scope_budget) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)"
+      ).run(runId, parentId, name, task, depth, token, t, t, project, alias, scopeBudget).lastInsertRowid);
       return { id, token };
     },
     member: (id) => memberRow(q('SELECT * FROM members WHERE id = ?').get(id)),
@@ -139,6 +144,13 @@ export function openStore(path) {
     ).all(...states).map(memberRow),
     setWorkspace: (id, dir) => q('UPDATE members SET workspace = ? WHERE id = ?').run(dir, id),
     setResult: (id, result) => q('UPDATE members SET result = ? WHERE id = ?').run(JSON.stringify(result), id),
+    setScopeBudget: (id, n) => q('UPDATE members SET scope_budget = ? WHERE id = ?').run(n, id),
+    projects: () => q('SELECT project FROM runs UNION SELECT project FROM members WHERE project IS NOT NULL ORDER BY 1')
+      .all().map((r) => r.project),
+    liveMembersIn: (project) => q(
+      "SELECT m.* FROM members m JOIN runs r ON r.id = m.run_id WHERE r.status = 'running' " +
+      'AND (m.project = ?1 OR (m.project IS NULL AND r.project = ?1)) ORDER BY m.id'
+    ).all(project).map(memberRow),
 
     addEvent: (memberId, kind, body) =>
       q('INSERT INTO events (member_id, kind, body, at) VALUES (?, ?, ?, ?)')

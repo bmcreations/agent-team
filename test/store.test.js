@@ -193,7 +193,9 @@ test('a version 3 database gains token columns at 0, and reopening changes nothi
   const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   first.close();
   const raw = new DatabaseSync(path);   // rewind to version 3: no token columns
-  raw.exec('ALTER TABLE members DROP COLUMN tokens; ALTER TABLE runs DROP COLUMN tokens; ' +
+  raw.exec('ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
+           'ALTER TABLE members DROP COLUMN scope_budget; ' +
+           'ALTER TABLE members DROP COLUMN tokens; ALTER TABLE runs DROP COLUMN tokens; ' +
            'ALTER TABLE members DROP COLUMN agent; ALTER TABLE members DROP COLUMN model; ' +
            'ALTER TABLE members DROP COLUMN read_only; PRAGMA user_version = 3');
   raw.close();
@@ -217,7 +219,9 @@ test('a version 4 database gains agent, model and read_only, unset', () => {
   const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   first.close();
   const raw = new DatabaseSync(path);
-  raw.exec('ALTER TABLE members DROP COLUMN agent; ALTER TABLE members DROP COLUMN model; ' +
+  raw.exec('ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
+           'ALTER TABLE members DROP COLUMN scope_budget; ' +
+           'ALTER TABLE members DROP COLUMN agent; ALTER TABLE members DROP COLUMN model; ' +
            'ALTER TABLE members DROP COLUMN read_only; PRAGMA user_version = 4');
   raw.close();
   const store = openStore(path);
@@ -278,4 +282,40 @@ test('runs list newest first, by project; a member span runs from its first even
   assert.ok(span.started <= span.finished);
   assert.equal(store.lastEvent(lead.id).kind, 'finished');
   assert.equal(store.event(store.lastEvent(lead.id).id).body.state, 'done');
+});
+
+test('a version 5 database gains project, alias and scope_budget, unset', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig6-')), 's.db');
+  const first = openStore(path);
+  const runId = first.createRun({ project: '/a', task: 't' });
+  const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+  first.close();
+  const raw = new DatabaseSync(path);
+  raw.exec('ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
+           'ALTER TABLE members DROP COLUMN scope_budget; PRAGMA user_version = 5');
+  raw.close();
+  const store = openStore(path);
+  const m = store.member(lead.id);
+  assert.deepEqual([m.project, m.alias, m.scope_budget], [null, null, null]);
+  store.close();
+});
+
+test('an entry member records its project, alias and budget; projects and liveMembersIn see it', () => {
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project: '/a', task: 't' });
+  const lead = store.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+  const entry = store.addMember({ runId, parentId: lead.id, name: 'lead', task: 'fix', depth: 0,
+                                  project: '/b', alias: 'loupe', scopeBudget: 3 });
+  const below = store.addMember({ runId, parentId: entry.id, name: 'dev', task: 'x', depth: 1 });
+  store.setScopeBudget(entry.id, 2);
+  const e = store.member(entry.id);
+  assert.deepEqual([e.project, e.alias, e.scope_budget], ['/b', 'loupe', 2]);
+  assert.deepEqual(store.projects(), ['/a', '/b']);
+  // `dev` has no project of its own: liveMembersIn('/b') matches members by their own column
+  // only, so a scope's descendants are found by walking parent_id (the supervisor does that).
+  assert.deepEqual(store.liveMembersIn('/b').map((m) => m.id), [entry.id]);
+  assert.deepEqual(store.liveMembersIn('/a').map((m) => m.id), [lead.id, below.id]);
+  store.finishRun(runId, 'done');
+  assert.deepEqual(store.liveMembersIn('/a'), []);
+  store.close();
 });
