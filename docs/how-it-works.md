@@ -300,7 +300,7 @@ Under `agent-team serve`, a member can open a thread with any team the superviso
 other team to do work; without, it asks a question. The call returns at once.
 
 The thread goes to the other team's entry member. If that member is running in this supervisor
-it gets the thread in its inbox; otherwise `serve` starts a run in that repository, under its
+as its own run's lead (not a member another run entered cross-team), it gets the thread in its inbox; otherwise `serve` starts a run in that repository, under its
 own config, budgets and `deny_paths`, with the thread in the lead's brief. Opening a thread
 spends one of the requester's delegations; the work it leads to is charged to the other team.
 
@@ -309,7 +309,11 @@ A thread moves `open -> accepted | declined -> done`. The receiving lead answers
 `declined` with a reason, `done` to answer a question. A reply without a state is a post: a
 question back, an update. If the lead's run finishes without accepting a task thread, the
 thread is declined; if it finishes after accepting, the thread closes `done` with the run's
-result. The member that asked gets every post and the close through `wait_for`, and stays
+result. A question nobody answers closes the same way when its lead finishes: if the lead's run was
+started for the thread, the thread closes `done` with that run's summary; if the lead was already
+running for other work, the thread is declined with "the lead finished without answering", and its
+summary is not passed on. While the lead has posted a question back and is waiting for the
+requester, it stays running and `wait_for` blocks instead of returning "no open reports". The member that asked gets every post and the close through `wait_for`, and stays
 running while a thread it opened is open. If it has finished, its manager gets them instead.
 
 A request whose chain of threads leads back to a team already in it is refused, so A asking B
