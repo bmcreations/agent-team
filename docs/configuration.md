@@ -293,6 +293,19 @@ there when it matches files but a more specific entry wins every one of them, be
 Tracked symlinks are always removed from the clone, whatever `deny_paths` says. A name-based
 denylist cannot see where a symlink points.
 
+## `peers`
+
+Teams this one may want to talk to before anyone has run a job there. Each entry is a
+directory: absolute, under `~/`, or relative to this project (from a linked worktree, relative
+to the main checkout). A peer counts once it has its own `.claude/agent-team.json`; until then
+it is listed as missing and naming it fails with "not found". Teams named by GitHub repository
+cannot be peers.
+
+    "peers": ["../loupe", "~/dev/design-system"]
+
+Members can also name any team the supervisor has already run, or any directory with a config,
+by path. `peers` only makes a team known by name in advance.
+
 ## `defaults`
 
 Optional.
