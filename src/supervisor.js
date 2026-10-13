@@ -1202,7 +1202,7 @@ export class Supervisor {
     }
     this.#checkBudget(run, scope);   // checked before anything is written
     const threadId = this.store.addThread({
-      kind: task ? 'task' : 'question', fromProject: scope.projectRoot, fromRun: m.run_id, fromMember: id,
+      kind: task ? 'task' : 'question', fromProject: realRoot(scope.projectRoot), fromRun: m.run_id, fromMember: id,
       toProject: target.root, toMember: entry, parentThread: this.store.run(m.run_id).thread_id ?? null,
       chain, text, task: task ?? null
     });

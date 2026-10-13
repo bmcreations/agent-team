@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync, realpathSync } from 'node:fs';
+import { writeFileSync, readFileSync, realpathSync, symlinkSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { threadsView } from '../src/view.js';
 import { basename } from 'node:path';
 import { project, supervise, LIVE } from './helpers/live.js';
 
@@ -642,4 +645,20 @@ test('a thread run that asks back and goes idle stays until the answer arrives',
     assert.equal(th.result.summary, 'pixel 8 it is');
     assert.ok(messagesOf(store, mgr.memberId).some((m) => /done ok: pixel 8 it is/.test(m.text)));
   });
+});
+
+test('a thread opened from a symlinked project path is stored and found by its real path', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    manager: { steps: [{ tool: 'request', args: { team: b, text: 'hi' } }] },
+    'b-lead': { steps: [{ say: 'looking' }] }
+  } }));
+  const link = join(mkdtempSync(join(tmpdir(), 'at-link-')), 'a-link');
+  symlinkSync(t.a.root, link);
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const { runId } = sup.submit({ projectRoot: link, member: 'manager', task: 'ship' });
+    await sup.waitRun(runId);
+    assert.equal(store.thread(1).from_project, t.aReal);
+    assert.equal(threadsView(store, { project: link }).pairs.length, 1);
+  } finally { await sup.close(); store.close(); }
 });
