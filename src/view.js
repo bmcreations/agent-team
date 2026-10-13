@@ -65,7 +65,7 @@ export function runDetail(store, runId, ownSocket) {
   if (!state) return null;
   let denyPaths = null;
   try { denyPaths = loadConfig(state.run.project).deny_paths; } catch { /* moved or broken */ }
-  const byProject = {};
+  const byProject = Object.create(null);
   for (const m of state.members) {
     if (m.project == null || Object.hasOwn(byProject, m.project)) continue;
     try { byProject[m.project] = loadConfig(m.project).deny_paths; } catch { byProject[m.project] = null; }

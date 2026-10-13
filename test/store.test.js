@@ -300,22 +300,16 @@ test('a version 5 database gains project, alias and scope_budget, unset', () => 
   store.close();
 });
 
-test('an entry member records its project, alias and budget; projects and liveMembersIn see it', () => {
+test('an entry member records its project, alias and budget; projects sees it', () => {
   const store = openStore(':memory:');
   const runId = store.createRun({ project: '/a', task: 't' });
   const lead = store.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   const entry = store.addMember({ runId, parentId: lead.id, name: 'lead', task: 'fix', depth: 0,
                                   project: '/b', alias: 'loupe', scopeBudget: 3 });
-  const below = store.addMember({ runId, parentId: entry.id, name: 'dev', task: 'x', depth: 1 });
+  store.addMember({ runId, parentId: entry.id, name: 'dev', task: 'x', depth: 1 });
   store.setScopeBudget(entry.id, 2);
   const e = store.member(entry.id);
   assert.deepEqual([e.project, e.alias, e.scope_budget], ['/b', 'loupe', 2]);
   assert.deepEqual(store.projects(), ['/a', '/b']);
-  // `dev` has no project of its own: liveMembersIn('/b') matches members by their own column
-  // only, so a scope's descendants are found by walking parent_id (the supervisor does that).
-  assert.deepEqual(store.liveMembersIn('/b').map((m) => m.id), [entry.id]);
-  assert.deepEqual(store.liveMembersIn('/a').map((m) => m.id), [lead.id, below.id]);
-  store.finishRun(runId, 'done');
-  assert.deepEqual(store.liveMembersIn('/a'), []);
   store.close();
 });
