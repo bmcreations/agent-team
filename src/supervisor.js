@@ -579,7 +579,32 @@ export class Supervisor {
       for (const m of this.store.members(run.id)) this.#recoverMember(m);
       out.recovered.push(run.id);
     }
+    if (this.shared) this.#recoverThreads();
     return out;
+  }
+
+  // Every open or accepted thread ends recovery with a live owner or a running thread-run, or
+  // closed. Runs are already recovered (or failed), so their state says which.
+  #recoverThreads() {
+    const live = (runId) => this.store.run(runId)?.status === 'running';
+    for (const t of this.store.threadsInState(['open', 'accepted'])) {
+      const owner = t.owner_member == null ? null : this.store.member(t.owner_member);
+      if ((owner && !TERMINAL.has(owner.state) && live(owner.run_id)) || (t.run_id != null && live(t.run_id))) continue;
+      try {
+        if (t.run_id != null) {
+          // Its run is over; close the thread the way a finishing run would, once.
+          const run = this.store.run(t.run_id);
+          this.#closeThread(t, 'failed', { status: 'failed', summary: `the run ${run.status} during a supervisor restart` });
+        } else {
+          this.#startThreadRun(t.id);
+        }
+      } catch (err) {
+        try {
+          this.#moveThread(this.store.thread(t.id), 'declined',
+            { text: `the receiving team could not be recovered: ${err.message}`, author: 'agent-team' });
+        } catch { /* a concurrent move already closed it */ }
+      }
+    }
   }
 
   #recoverMember(m) {
@@ -1327,7 +1352,10 @@ export class Supervisor {
       return { id: t.id, kind: t.kind, from, text: first?.text ?? '', task: t.task };
     };
     const own = run.thread_id != null ? view(this.store.thread(run.thread_id)) : null;
-    const waiting = this.store.unownedThreadsTo(scope.projectRoot, m.name).filter((t) => t.id !== run.thread_id);
+    // Threads store their target as a real path; a run's project is stored as it was submitted.
+    let root = scope.projectRoot;
+    try { root = realpathSync(root); } catch { /* a vanished root has no threads */ }
+    const waiting = this.store.unownedThreadsTo(root, m.name).filter((t) => t.id !== run.thread_id);
     for (const t of waiting) this.store.setThreadOwner(t.id, m.id);
     return { thread: own, threads: waiting.map(view) };
   }
