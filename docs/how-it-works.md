@@ -45,6 +45,9 @@ shows the `agent-team attach <run> <member>` command to copy. A run started by a
 read-only, and `send` and `answer` refuse it too, because only the supervisor running a member
 can deliver to it.
 
+The Threads page (`#/threads`) lists threads between teams grouped by team pair, shows each
+thread's posts at `#/threads/<id>`, links the runs on both sides, and lets you post to a thread.
+
 `agent-team send <run> <member> <text>` puts one message in the member's inbox and needs
 `serve`, like `pause`, `resume`, `cancel` and `answer`.
 

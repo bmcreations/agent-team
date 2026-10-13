@@ -4,7 +4,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary } from '../src/web/feed.js';
+import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount } from '../src/web/feed.js';
+import { publicMessage } from '../src/view.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
 const XSS = '<img src=x onerror="alert(1)"></script><script>alert(2)</script>';
@@ -164,4 +165,31 @@ test('progress folds into one running task per member, not a line per update', (
   assert.equal(countLabel(3, 'progress'), '3 updates');
   assert.equal(countLabel(3, 'tool_call'), '3 times');
   assert.ok(!conversation({ events, messages: [] }).some((r) => r.kind === 'progress'));
+});
+
+test('the threads page is routed, fetches the thread API, and posts through the page\'s api helper', () => {
+  const src = readFileSync(new URL('app.js', WEB), 'utf8');
+  assert.match(src, /#\\\/threads/, 'parseRoute matches #/threads');
+  assert.match(src, /'\/api\/threads'/);
+  assert.match(src, /`\/api\/threads\/\$\{id\}\/reply`/);
+  assert.match(src, /thread_opened/);
+  assert.match(readFileSync(new URL('index.html', WEB), 'utf8'), /href="#\/threads"/);
+  assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+});
+
+test('thread helpers: snippets are one clipped line and the badge counts open and accepted threads', () => {
+  assert.equal(snippet('a\n  b\tc'), 'a b c');
+  assert.equal(snippet('x'.repeat(200), 120), `${'x'.repeat(120)}…`);
+  assert.equal(snippet(null), '');
+  const pairs = [{ pair: 'a → b', threads: [{ state: 'open' }, { state: 'done' }] }, { pair: 'c → d', threads: [{ state: 'accepted' }, { state: 'declined' }] }];
+  assert.equal(openThreadCount(pairs), 2);
+  assert.equal(openThreadCount([]), 0);
+});
+
+test('stream messages carry only the thread id of a thread, so the page can refetch', () => {
+  const row = { id: 1, run_id: 1, to_member: 2, to_name: 'b', from_kind: 'team', from_name: 'x/y', report_id: null, thread_id: 7,
+                text: 't', state: 'delivered', at: 1, token: 'secret' };
+  assert.equal(publicMessage(row).thread_id, 7);
+  assert.equal('token' in publicMessage(row), false);
+  assert.equal(publicMessage({ ...row, thread_id: undefined }).thread_id, null);
 });

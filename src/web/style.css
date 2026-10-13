@@ -403,3 +403,20 @@ details.more-facts[open] summary .icon { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Threads */
+.threads-link { margin-top: 14px; }
+.threads-link .pill { margin-left: auto; }
+.thread-item + .thread-item { margin-top: 4px; }
+.thread-links { margin: -4px 0 6px 34px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.thread-links a { text-decoration: underline; text-underline-offset: 2px; }
+.thread-item .run-card .pill { flex: none; }
+.talk.posts { max-height: none; }
+.thread-note { margin: 14px 0 0; font-size: 14px; }
+.facts-row { flex-wrap: wrap; }
+@media (max-width: 900px) {
+  .thread-item .run-card { flex-wrap: wrap; }
+  .thread-item .run-card .body { flex-basis: calc(100% - 50px); }
+  .thread-links { margin-left: 0; }
+}
+.run-head .thread-links { margin: 10px 0 0; }

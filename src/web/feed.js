@@ -161,3 +161,12 @@ export const matches = (query, ...fields) => {
   const q = query.toLowerCase();
   return fields.some((f) => typeof f === 'string' && f.toLowerCase().includes(q));
 };
+
+// A single line of someone's text, cut to `max` characters.
+export const snippet = (text, max = 120) => {
+  const one = oneLine(text ?? '');
+  return one.length > max ? `${one.slice(0, max)}…` : one;
+};
+
+// The sidebar badge: threads a team still has to answer or finish. `pairs` is the server's grouping.
+export const openThreadCount = (pairs) => pairs.reduce((n, g) => n + g.threads.filter((t) => t.state === 'open' || t.state === 'accepted').length, 0);
