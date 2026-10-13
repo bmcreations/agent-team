@@ -26,7 +26,10 @@ a string `summary`. An optional `usage` object is copied into the run log. The c
 sets `cost_usd` in it and a codex session sets `tokens`; codex `run` and grok set none, so those
 members show `—` in the report. `delegating` also needs `delegations`; see
 [Delegation](how-it-works.md#delegation). Everything else in the object is passed through to
-the caller. The brief's fields are listed in [The brief](how-it-works.md#the-brief).
+the caller. The brief's fields are listed in [The brief](how-it-works.md#the-brief). Under `agent-team serve`
+it can also carry `thread` (`{id, kind, from, text, task}`): the peer thread the member's run was
+started to serve, set for a run's root only. `threads` lists open threads for the member's team
+that nobody owned yet, which it now owns.
 
 `tool_dialect` names a file in `references/`: `codex` loads `references/codex-tools.md` and
 puts it at the top of the brief. `claude` means no dialect file.
@@ -102,10 +105,11 @@ The supervisor sets two variables for the session process:
 | `AGENT_TEAM_TEAM_TOKEN` | A token that identifies the member to the supervisor. |
 
 A real harness is configured with `agent-team mcp` as an MCP server and passes both variables
-through to it. `agent-team mcp` serves the six team tools (`delegate`, `send_to`, `wait_for`,
-`report_progress`, `ask_human`, `team_status`) over stdio and forwards each call to the socket. It forwards
-only those tool names. The socket also serves admin methods (`submit`, `wait_run`, `send`,
-`answer`, `questions`, `pause`, `resume`, `cancel`, `takeover`, `handback`), which the bridge refuses. They are reachable by anything that can open the socket,
+through to it. `agent-team mcp` serves the eight team tools (`delegate`, `send_to`, `wait_for`,
+`report_progress`, `ask_human`, `team_status`, `request`, `reply`) over stdio and forwards each call to the socket.
+It forwards only those tool names. `request` and `reply` are the peer-thread tools; see
+[Threads between teams](how-it-works.md#threads-between-teams). The socket also serves admin methods (`submit`, `wait_run`, `send`,
+`answer`, `questions`, `pause`, `resume`, `cancel`, `takeover`, `handback`, `thread_reply`), which the bridge refuses. They are reachable by anything that can open the socket,
 which is a directory created with mode `0700`. The token identifies a member; it does not
 authenticate a user, and the socket is not an authentication boundary until the auth phase.
 
@@ -139,8 +143,9 @@ by `brief.member`; otherwise the script is the entry.
 | `say` | Emit a `text` event. |
 | `sleep_ms` | Wait. |
 | `tool`, `args` | Call a team tool. A tool error becomes `{error}` in the result instead of failing the run. |
-| `save` | Keep the tool's result under this name. Later strings of the form `$name.field` are replaced by that field. |
+| `save` | Keep the tool's result under this name. Later strings that are exactly `$name.a.b` (any depth) are replaced by that path in the result. `$brief.…` reads the same way from the brief the adapter was started with, for example `$brief.thread.id`. |
 | `until_finished` | With `tool: "wait_for"`: call it repeatedly until every listed report id has reported `finished`. |
+| `until_threads` | With `tool: "wait_for"`: call it repeatedly until each listed thread id has delivered a `thread #n done` or `thread #n declined` notice. |
 
 Before each step it acks and records any queued message. After the last step it sends `idle`,
 then keeps accepting messages until `stop` or `interrupt`, and ends with a `result` that also
