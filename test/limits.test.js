@@ -77,3 +77,24 @@ test('a run past max_cost_usd pauses, and resumes only with a higher cap', async
     assert.equal(store.run(runId).cost_usd, 1.7);
   } finally { await sup.close(); }
 });
+
+test('a resume that fails leaves the run cost cap as it was', async () => {
+  const { root, script } = project({ lead: LIVE(), worker: LIVE({ reports_to: 'lead' }) }, {
+    by_member: {
+      lead: { steps: [{ tool: 'delegate', args: { to: 'worker', task: 'w' } }, { tool: 'wait_for', args: {} }],
+              on_resume: { steps: [] }, turn_cost_usd: 0.5 },
+      worker: { steps: [], turn_cost_usd: 0.7 }
+    }
+  }, { max_cost_usd: 1 });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    await until(() => store.member(leadId).state === 'paused');
+    const workerId = store.members(runId).find((m) => m.name === 'worker').id;
+    assert.throws(() => sup.resume({ member_id: leadId, max_cost_usd: 1.1 }), /has spent \$1\.20 of its \$1\.10 cap/);
+    assert.throws(() => sup.resume({ member_id: workerId, max_cost_usd: 5 }), /is not paused/);
+    assert.equal(store.run(runId).max_cost_usd, 1);
+    assert.throws(() => sup.submit({ projectRoot: root, member: 'lead', task: 'go', maxCostUsd: 0 }),
+                  /max_cost_usd must be a positive number/);
+  } finally { await sup.close(); }
+});

@@ -37,6 +37,10 @@ const label = (m) => `${m.from_name} (${m.from_kind})`;
 const render = (m) => ({ id: m.id, from: label(m), text: m.text, report_id: m.report_id });
 const clampSeconds = (v, dflt, max) => (Number.isInteger(v) && v > 0 ? Math.min(v, max) : dflt);
 
+function checkCap(cap) {
+  if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) throw new Error('max_cost_usd must be a positive number');
+}
+
 export class Supervisor {
   #live = new Map();          // memberId -> runtime state of a launched, unfinished member
   #pending = [];              // memberIds waiting for a slot
@@ -55,7 +59,10 @@ export class Supervisor {
 
   async start() {
     this.server = await serveRpc(this.socketPath, (req) => this.#handle(req));
-    this.#ticker = setInterval(() => this.#tick(), this.tickMs);
+    this.#ticker = setInterval(() => {
+      // A throw here would be uncaught and take the supervisor down with every run in it.
+      try { this.#tick(); } catch (err) { process.stderr.write(`agent-team: tick failed: ${err.stack ?? err}\n`); }
+    }, this.tickMs);
     this.#ticker.unref();
   }
 
@@ -76,6 +83,7 @@ export class Supervisor {
     const limits = { budget: config.defaults.max_delegations,
                      timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : this.timeoutMs,
                      maxCostUsd: maxCostUsd ?? config.defaults.max_cost_usd };
+    if (limits.maxCostUsd != null) checkCap(limits.maxCostUsd);
     // Limits and owner are stored so a restarted supervisor can rebuild the run.
     const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath });
     this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs });
@@ -145,9 +153,15 @@ export class Supervisor {
   // and `note` as the first user turn. Queued messages are delivered once the session is up.
   resume({ subtree = false, note = null, by = 'local', max_cost_usd = null, ...who } = {}) {
     const top = this.#target(who);
-    this.#allowSpend(top.run_id, max_cost_usd);
+    // A raised cap is kept only if something actually resumes.
+    const restoreCap = this.#allowSpend(top.run_id, max_cost_usd);
     if (!subtree) {
-      this.#unpause(top, { note, by });
+      try {
+        this.#unpause(top, { note, by });
+      } catch (err) {
+        restoreCap();
+        throw err;
+      }
       return { members: [{ id: top.id, name: top.name }], skipped: [] };
     }
     const members = [];
@@ -160,20 +174,23 @@ export class Supervisor {
         skipped.push({ id: m.id, name: m.name, reason: err.message });
       }
     }
+    if (members.length === 0) restoreCap();
     return { members, skipped };
   }
 
-  // A run paused at its cost cap resumes only with a higher cap.
+  // A run paused at its cost cap resumes only with a higher cap. Stores `cap` once it passes
+  // and returns a function that puts the previous cap back.
   #allowSpend(runId, cap) {
-    if (cap != null) {
-      if (typeof cap !== 'number' || !Number.isFinite(cap) || cap <= 0) throw new Error('max_cost_usd must be a positive number');
-      this.store.setRunCap(runId, cap);
-    }
+    if (cap != null) checkCap(cap);
     const run = this.store.run(runId);
-    if (run.max_cost_usd != null && run.cost_usd >= run.max_cost_usd) {
-      throw new Error(`run ${runId} has spent $${run.cost_usd.toFixed(2)} of its $${run.max_cost_usd.toFixed(2)} cap — ` +
+    const limit = cap ?? run.max_cost_usd;
+    if (limit != null && run.cost_usd >= limit) {
+      throw new Error(`run ${runId} has spent $${run.cost_usd.toFixed(2)} of its $${limit.toFixed(2)} cap — ` +
                       'pass max_cost_usd to raise it');
     }
+    if (cap == null) return () => {};
+    this.store.setRunCap(runId, cap);
+    return () => this.store.setRunCap(runId, run.max_cost_usd);
   }
 
   #unpause(m, { note, by }) {
