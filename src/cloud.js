@@ -10,6 +10,12 @@ import { arbitrateDenyPaths } from './workspace.js';
 // "github:owner/repo", "https://github.com/owner/repo(.git)", "git@github.com:owner/repo(.git)"
 // and "ssh://git@github.com/owner/repo(.git)". `key` is what the cycle check compares, so a
 // local team and the GitHub form of the same repo cannot call each other.
+// Any remote spelling of a team: a GitHub form above, or a URL / scp-style address of another
+// host. Only local directories are teams that can be read in place.
+export function isRemoteTeam(text) {
+  return typeof text === 'string' && (parseGithubRepo(text) !== null || /^(github:|[a-z][a-z0-9+.-]*:\/\/|git@)/i.test(text));
+}
+
 export function parseGithubRepo(text) {
   if (typeof text !== 'string') return null;
   const m = text.match(/^github:([\w.-]+)\/([\w.-]+?)$/) ??

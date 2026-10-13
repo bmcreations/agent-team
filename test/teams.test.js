@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, symlinkSync, renameSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../src/store.js';
@@ -150,4 +150,45 @@ test('teamStatus leaves out finished members and members under a differently sco
   const inB = teamStatus(store, { name: 'b', root: b, source: 'supervisor' });
   assert.deepEqual(inB.runs[0].members.map((m) => m.name), ['b-lead', 'b-dev']);
   assert.deepEqual(teamStatus(store, { name: 'c', root: c, source: 'supervisor' }).runs, []);
+});
+
+test('ssh:// and git:// names are refused like any other remote', () => {
+  const c = ctx(repo('android'));
+  for (const team of ['ssh://host/me/loupe', 'git://host/me/loupe']) {
+    assert.throws(() => resolveTeam({ ...c, team }), /is a GitHub repository/, team);
+  }
+});
+
+test('a symlinked config is treated as missing and its target is never echoed', () => {
+  const parent = base();
+  const secretFile = join(parent, 'secret.env');
+  writeFileSync(secretFile, 'API_KEY=sk-live-hunter2\n');
+  const evil = join(parent, 'evil');
+  mkdirSync(join(evil, '.claude'), { recursive: true });
+  symlinkSync(secretFile, join(evil, '.claude', 'agent-team.json'));
+  const c = ctx(repo('android'));
+  let message;
+  try { resolveTeam({ ...c, team: evil }); } catch (err) { message = err.message; }
+  assert.match(message, /not found/);
+  assert.doesNotMatch(message, /hunter2|API_KEY|sk-live/);
+});
+
+test('a config that does not parse is reported without its content', () => {
+  const parent = base();
+  const loupe = repoIn(parent, 'loupe');
+  writeFileSync(join(loupe, '.claude', 'agent-team.json'), 'API_KEY=sk-live-hunter2\n');
+  const c = ctx(repo('android'));
+  let message;
+  try { resolveTeam({ ...c, team: loupe }); } catch (err) { message = err.message; }
+  assert.match(message, /could not be read/);
+  assert.doesNotMatch(message, /hunter2|API_KEY|sk-live/);
+});
+
+test('a supervisor project whose config is gone is listed as missing', () => {
+  const parent = base();
+  const loupe = repoIn(parent, 'loupe');
+  const c = ctx(repoIn(parent, 'android'));
+  c.store.createRun({ project: loupe, task: 't' });
+  renameSync(join(loupe, '.claude', 'agent-team.json'), join(loupe, '.claude', 'agent-team.gone'));
+  assert.deepEqual(knownTeams(c), [{ name: 'loupe', root: loupe, source: 'supervisor', missing: true }]);
 });
