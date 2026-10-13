@@ -261,9 +261,6 @@ export function openStore(path) {
         .run(threadId, side, author, text, state, now()).lastInsertRowid);
     },
     threadPosts: (threadId) => q('SELECT * FROM thread_posts WHERE thread_id = ? ORDER BY id').all(threadId),
-    openThreadsFrom: (memberId) =>
-      q("SELECT * FROM threads WHERE from_member = ? AND state IN ('open', 'accepted') ORDER BY id")
-        .all(memberId).map(threadRow),
     threadsFrom: (memberId) => q('SELECT * FROM threads WHERE from_member = ? ORDER BY id').all(memberId).map(threadRow),
     unownedThreadsTo: (project, member) =>
       q("SELECT * FROM threads WHERE state = 'open' AND owner_member IS NULL AND to_project = ? AND to_member = ? ORDER BY id")

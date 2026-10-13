@@ -374,10 +374,8 @@ test('a thread opens with its first post and moves only from the state it is in'
   assert.equal(store.moveThread(id, 'accepted', 'done'), false);
   assert.equal(store.moveThread(id, 'open', 'accepted'), true);
   assert.equal(store.moveThread(id, 'open', 'declined'), false);
-  assert.deepEqual(store.openThreadsFrom(m.id).map((x) => x.id), [id]);
   assert.equal(store.moveThread(id, 'accepted', 'done', { result: { status: 'ok', summary: 'fixed' } }), true);
   assert.deepEqual(store.thread(id).result, { status: 'ok', summary: 'fixed' });
-  assert.deepEqual(store.openThreadsFrom(m.id), []);
   store.close();
 });
 
