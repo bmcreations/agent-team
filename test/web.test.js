@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount } from '../src/web/feed.js';
+import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount, threadTouched, canPostToThread } from '../src/web/feed.js';
 import { publicMessage } from '../src/view.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
@@ -172,7 +172,7 @@ test('the threads page is routed, fetches the thread API, and posts through the 
   assert.match(src, /#\\\/threads/, 'parseRoute matches #/threads');
   assert.match(src, /'\/api\/threads'/);
   assert.match(src, /`\/api\/threads\/\$\{id\}\/reply`/);
-  assert.match(src, /thread_opened/);
+  assert.match(readFileSync(new URL('feed.js', WEB), 'utf8'), /thread_opened/);
   assert.match(readFileSync(new URL('index.html', WEB), 'utf8'), /href="#\/threads"/);
   assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
 });
@@ -192,4 +192,41 @@ test('stream messages carry only the thread id of a thread, so the page can refe
   assert.equal(publicMessage(row).thread_id, 7);
   assert.equal('token' in publicMessage(row), false);
   assert.equal(publicMessage({ ...row, thread_id: undefined }).thread_id, null);
+});
+
+test('threadTouched: a thread message for this thread, any thread on the list, or a new thread', () => {
+  const msg = (thread_id) => ({ messages: [{ id: 1, thread_id }], events: [] });
+  assert.equal(threadTouched(msg(3), 3), true);
+  assert.equal(threadTouched(msg(3), 4), false);
+  assert.equal(threadTouched(msg(3), null), true);
+  assert.equal(threadTouched(msg(null), null), false);
+  assert.equal(threadTouched({ events: [{ kind: 'thread_opened' }] }, 4), true);
+  assert.equal(threadTouched({ events: [{ kind: 'text' }] }, null), false);
+  assert.equal(threadTouched({}, null), false);
+});
+
+test('canPostToThread: only an open thread with a steerable run on a side', () => {
+  const live = { id: 1, status: 'running', steerable: true };
+  assert.equal(canPostToThread({ state: 'open' }, [live]), true);
+  assert.equal(canPostToThread({ state: 'accepted' }, [{ id: 2, status: 'done', steerable: false }, live]), true);
+  assert.equal(canPostToThread({ state: 'open' }, [{ id: 2, status: 'done', steerable: false }]), false, 'finished');
+  assert.equal(canPostToThread({ state: 'open' }, [{ id: 2, status: 'running', steerable: false }]), false, 'not serve\'s');
+  assert.equal(canPostToThread({ state: 'open' }, []), false, 'runs missing');
+  assert.equal(canPostToThread({ state: 'done' }, [live]), false, 'closed');
+  assert.equal(canPostToThread({ state: 'declined' }, [live]), false, 'closed');
+});
+
+test('a thread result status is cut to 100 characters', async () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/p', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'a', task: 't', depth: 0 });
+  const id = store.addThread({ kind: 'task', fromProject: '/p', fromRun: run, fromMember: m.id ?? m.memberId ?? m, toProject: '/q', toMember: m.id ?? m.memberId ?? m, chain: [], text: 'x', task: 'x' });
+  store.moveThread(id, 'open', 'accepted');
+  store.moveThread(id, 'accepted', 'done', { result: { status: 's'.repeat(300), summary: 'ok' } });
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const r = await get(web.url, `/api/threads/${id}`);
+    assert.equal(r.json.thread.result.status.length, 101);
+    assert.equal(r.json.thread.result.summary, 'ok');
+  } finally { await web.close(); store.close(); }
 });

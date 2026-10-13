@@ -170,3 +170,13 @@ export const snippet = (text, max = 120) => {
 
 // The sidebar badge: threads a team still has to answer or finish. `pairs` is the server's grouping.
 export const openThreadCount = (pairs) => pairs.reduce((n, g) => n + g.threads.filter((t) => t.state === 'open' || t.state === 'accepted').length, 0);
+
+// Whether a stream batch means the thread list (or thread `id`, when given) is stale.
+export const threadTouched = (batch, id = null) =>
+  (batch.messages ?? []).some((m) => m.thread_id != null && (id == null || m.thread_id === id))
+  || (batch.events ?? []).some((e) => e.kind === 'thread_opened');
+
+// Humans post only to an open or accepted thread, and only through the serve process that owns a
+// live run on one side; `runs` are those runs' public rows, absent ones left out.
+export const canPostToThread = (thread, runs) =>
+  (thread.state === 'open' || thread.state === 'accepted') && runs.some((r) => r.steerable === true);

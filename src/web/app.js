@@ -1,4 +1,4 @@
-import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount, TERMINAL } from './feed.js';
+import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount, threadTouched, canPostToThread, TERMINAL } from './feed.js';
 
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
@@ -114,29 +114,35 @@ function parseRoute() {
 }
 
 // The thread list feeds the sidebar count on every page; the thread view also reloads its own
-// thread. Calls that arrive while one is in flight collapse into one more fetch.
+// thread. Calls that arrive while one is in flight collapse into one more fetch, and a fetch
+// that finishes after the view changed is dropped and redone for the new view.
 let threadsBusy = false, threadsAgain = false;
 async function refreshThreads() {
   if (threadsBusy) { threadsAgain = true; return; }
   threadsBusy = true;
-  const gen = S.gen;
   try {
     do {
       threadsAgain = false;
+      const gen = S.gen;
       const id = S.route?.thread ?? null;
-      const [list, detail] = await Promise.all([api('/api/threads'), id == null ? null : api(`/api/threads/${id}`).catch((err) => ({ error: err.message }))]);
-      if (gen !== S.gen) return;
-      S.threads = list.pairs;
-      if (id != null) S.thread = detail;
+      try {
+        const [list, detail] = await Promise.all([api('/api/threads'),
+          id == null ? null : api(`/api/threads/${id}`).then((d) => d, (err) => ({ error: err.message }))]);
+        if (gen !== S.gen) { threadsAgain = true; continue; }
+        S.threads = list.pairs;
+        if (id != null) {
+          if (detail.error && S.thread?.thread?.id === id) flash(detail.error);   // keep what is on screen
+          else S.thread = detail;
+        }
+        if (S.route?.threads) S.failed = null;
+      } catch (err) {
+        if (gen !== S.gen) { threadsAgain = true; continue; }
+        if (S.route?.threads) S.failed = `Could not load threads: ${err.message}`;
+      }
       schedule();
     } while (threadsAgain);
-  } catch (err) {
-    if (gen === S.gen && S.route?.threads) { S.failed = `Could not load threads: ${err.message}`; schedule(); }
   } finally { threadsBusy = false; }
 }
-// A stream batch touches threads when it carries thread traffic or a new thread.
-const threadTraffic = (batch, id) => (batch.messages ?? []).some((m) => m.thread_id != null && (id == null || m.thread_id === id))
-  || (batch.events ?? []).some((e) => e.kind === 'thread_opened');
 
 function setConn(text, cls) {
   const el = $('conn');
@@ -157,7 +163,6 @@ async function open() {
   S.source?.close();
   const gen = ++S.gen;
   Object.assign(S, { route, failed: null, panel: null, detail: null, thread: null, model: { events: [], messages: [] } });
-  if (route.threads) S.threads = null;
   $('view').replaceChildren(h('p', { class: 'loading' }, 'Loading…'));
   scrollTo({ top: 0 });
   try {
@@ -180,7 +185,7 @@ async function open() {
     on('state', (data) => { S.state = data; });
     on('timeline', (data) => {
       S.model = mergeTimeline(S.model, data);
-      if (threadTraffic(data, route.thread)) refreshThreads();
+      if (threadTouched(data, route.thread)) refreshThreads();
     });
     src.onopen = () => { setConn('Live', 'live'); };
     src.onerror = () => { setConn('Reconnecting', 'down'); };
@@ -395,13 +400,13 @@ function drawThread() {
   if (posts.length) keyed(S.panel.talk, posts, (p) => `p${p.id}`, postRow);
   else S.panel.talk.replaceChildren(h('li', { class: 'empty' }, 'Nothing has been posted yet.'));
   if (atEnd) S.panel.talk.scrollTop = S.panel.talk.scrollHeight;
-  // Posting needs the serve process that owns the runs; a thread whose live runs are none of serve's is read-only.
+  // Posting needs the serve process that owns a live run on one side of the thread.
   const runs = [t.from_run, t.run_id].filter((r) => r != null).map((r) => S.state?.runs.find((x) => x.id === r)).filter(Boolean);
   const closed = t.state === 'declined' || t.state === 'done';
-  const readOnly = !closed && runs.some((r) => r.status === 'running') && !runs.some((r) => r.steerable);
-  S.panel.composer.el.hidden = closed || readOnly;
-  S.panel.note.hidden = !closed && !readOnly;
-  S.panel.note.textContent = closed ? `This thread is ${t.state}, so it takes no more posts.` : 'Started without `agent-team serve`, so this page can read the thread but not post to it.';
+  const canPost = canPostToThread(t, runs);
+  S.panel.composer.el.hidden = !canPost;
+  S.panel.note.hidden = canPost;
+  S.panel.note.textContent = closed ? `This thread is ${t.state}, so it takes no more posts.` : 'No run on either side is live under `agent-team serve`, so this page can read the thread but not post to it.';
 }
 
 function runRow(run) {
