@@ -51,6 +51,7 @@ test('a member\'s Figma node renders through serve, with the token sent only to 
     const img = await get(s.web.url, '/api/figma/image?file=AbCdEf123456&node=12:34');
     assert.equal(img.status, 200);
     assert.equal(img.headers['content-type'], 'image/png');
+    assert.equal(img.headers['cross-origin-resource-policy'], 'same-origin');
     assert.deepEqual(img.buf, PNG);
     await get(s.web.url, '/api/figma/image?file=AbCdEf123456&node=12:34');
     assert.equal(s.calls.length, 2, 'the second request is served from the cache');

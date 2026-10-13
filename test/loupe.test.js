@@ -66,6 +66,7 @@ test('screenshots, the target list and the open link go through serve with the t
     const shot = await get(s.web.url, '/api/loupe/screenshot?target=sim:ABCD-1234');
     assert.equal(shot.status, 200);
     assert.equal(shot.headers['content-type'], 'image/png');
+    assert.equal(shot.headers['cross-origin-resource-policy'], 'same-origin');
     assert.deepEqual(shot.buf, PNG);
     const open = await get(s.web.url, '/loupe/open?target=sim:ABCD-1234');
     assert.equal(open.status, 302);

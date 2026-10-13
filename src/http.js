@@ -24,9 +24,12 @@ export const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'Cache-Control': 'no-store',
-  'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; " +
+  'Content-Security-Policy': "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; " +
     "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 };
+
+// Screenshots are for this page only: a cross-site <img> can still trigger the fetch but not read it.
+const CORP = { 'Cross-Origin-Resource-Policy': 'same-origin' };
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -286,13 +289,13 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
       if (!FILE_KEY_RE.test(fileKey) || !NODE_RE.test(nodeId)) throw new HttpError(400, 'file and node must be a Figma file key and a node id like 12:34');
       const png = await figmaImage({ token: figmaToken(), fileKey, nodeId, fetchImpl, cache: figmaCache })
         .catch((err) => { throw new HttpError(502, err.message); });
-      sendBody(res, 200, 'image/png', png);
+      sendBody(res, 200, 'image/png', png, CORP);
     }],
     ['GET', /^\/api\/loupe\/screenshot$/, async ({ url, res }) => {
       const target = targetParam(url);
       const r = await loupeGet(needLoupe(), '/api/screenshot', { target }).catch((err) => { throw new HttpError(502, err.message); });
       if (r.status !== 200 || !r.type.startsWith('image/png')) throw new HttpError(502, `loupe answered ${r.status}`);
-      sendBody(res, 200, 'image/png', r.body);
+      sendBody(res, 200, 'image/png', r.body, CORP);
     }],
     ['GET', /^\/loupe\/open$/, ({ req, url, res }) => {
       const site = req.headers['sec-fetch-site'];

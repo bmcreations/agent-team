@@ -5,7 +5,7 @@ import { describe, memberTree, activity, countLabel, todayCount, mergeTimeline, 
 const $ = (id) => document.getElementById(id);
 const S = { gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null, query: '', panel: null };
 
-const safeHref = (v) => { const s = String(v); return s.startsWith('#') || s.startsWith('/') ? s : '#'; };
+const safeHref = (v) => { const s = String(v); return s.startsWith('#') || (s.startsWith('/') && !s.startsWith('//')) ? s : '#'; };
 // replaceChildren stringifies null, so anything that may be absent goes through here first.
 const present = (...list) => list.flat(Infinity).filter((c) => c != null && c !== false);
 function h(tag, props = {}, ...children) {
@@ -220,7 +220,7 @@ function drawMember(run, m) {
   p.controls.update(run, m);
   const rows = [
     ...S.model.events.filter((e) => e.member_id === m.id).map((e) => ({ at: e.at, key: `e${e.id}`, e })),
-    ...S.model.messages.filter((x) => x.to_member === m.id).map((x) => ({ at: x.at, key: `m${x.id}.${x.state}`, x }))
+    ...S.model.messages.filter((x) => x.to_member === m.id).map((x) => ({ at: x.at, key: `m${x.id}`, x }))
   ].sort((a, b) => a.at - b.at).slice(-400);
   keyed(p.transcript, rows, (r) => r.key, (r) => (r.e ? eventRow(r.e) : messageRow(r.x)));
 }
@@ -243,7 +243,7 @@ function eventRow(e) {
 }
 
 const messageRow = (x) => h('li', { class: 'msg' }, h('time', {}, clock(x.at)), ' ',
-  h('b', {}, `${x.from_name} (${x.from_kind})`), ' ', x.text, ' ', h('span', { class: 'muted' }, x.state));
+  h('b', {}, `${x.from_name} (${x.from_kind})`), ' ', x.text));
 
 function memberControls(m) {
   const base = `/api/members/${m.id}`;
