@@ -138,7 +138,7 @@ function session() {
               messages.push(m);
               if (m.thread_id != null && new RegExp(`^thread #${m.thread_id} (done|declined)`).test(m.text)) done.add(m.thread_id);
             }
-            if (r.messages.length === 0 && !r.timed_out) break;
+            if (r.messages.length === 0) break;   // timed out or nothing left to wait on
             if (interrupted) break;
           }
           res = error ? { messages, error } : { messages };

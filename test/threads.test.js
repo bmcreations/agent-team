@@ -539,3 +539,50 @@ test('a live lead that accepts a task starts a run for the thread under its own 
     await sup.waitRun(th.run_id);
   } finally { await sup.close(); store.close(); }
 });
+
+test('a question refuses accepted and an empty answer; a closed thread refuses posts', async () => {
+  const script = ({ b }) => ({ by_member: {
+    manager: { steps: [
+      { tool: 'request', args: { team: b, text: 'which api?' }, save: 't' },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] },
+      { tool: 'reply', args: { thread: '$t.thread_id', text: 'thanks' } }
+    ] },
+    ...lead([
+      replyTo({ text: 'on it', state: 'accepted' }),
+      replyTo({ text: '  ', state: 'done' }),
+      replyTo({ text: '42', state: 'done' }),
+      replyTo({ text: 'one more thing' })
+    ])
+  } });
+  await withTeams(script, {}, ({ store, mgr, bRun }) => {
+    const [accepted, empty, ok, late] = results(store, bRun.root_member, 'reply');
+    assert.match(accepted.error, /cannot move thread #1 from open to accepted/);
+    assert.match(empty.error, /needs the answer/);
+    assert.equal(ok.state, 'done');
+    assert.match(late.error, /thread #1 is closed/);
+    assert.match(results(store, mgr.memberId, 'reply')[0].error, /thread #1 is closed/);
+    assert.equal(store.threadPosts(1).length, 2);
+  });
+});
+
+test('a question delivered to a live lead is declined when that run ends unanswered', async () => {
+  const t = twoTeams(({ b }) => ({ by_member: {
+    manager: { steps: [
+      { sleep_ms: 400 },
+      { tool: 'request', args: { team: b, text: 'which api?' }, save: 't' },
+      { tool: 'wait_for', args: {}, until_threads: ['$t.thread_id'] }
+    ] },
+    'b-lead': { steps: [{ tool: 'wait_for', args: { timeout_s: 3 } }], result: { status: 'ok', summary: 'unrelated work' } }
+  } }), {});
+  const { sup, store } = await supervise(t.a.script, { shared: true });
+  try {
+    const live = sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own it' });
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(mgr.runId);
+    await sup.waitRun(live.runId);
+    assert.equal(store.thread(1).state, 'declined');
+    const got = messagesOf(store, mgr.memberId).map((m) => m.text);
+    assert.ok(got.includes('thread #1 declined: the lead finished without answering'), JSON.stringify(got));
+    assert.ok(!got.some((x) => x.includes('unrelated work')));
+  } finally { await sup.close(); store.close(); }
+});
