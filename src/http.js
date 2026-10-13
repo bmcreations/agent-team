@@ -6,6 +6,7 @@ import { figmaRefs, figmaImage, FILE_KEY_RE, NODE_RE } from './figma.js';
 import { basename } from 'node:path';
 import { loadConfig } from './config.js';
 import { knownTeams } from './teams.js';
+import { changesReader } from './changes.js';
 import { memberTexts, publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState, teamStatus, threadsView, threadDetail, READ_ONLY_NOTE } from './view.js';
 
 // The web view: a JSON API over the store, server-sent events, and a static page. It binds to
@@ -263,6 +264,8 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
     return v;
   };
 
+  const changesOf = changesReader();
+
   const figmaCache = new Map();
   const figmaToken = () => {
     if (!env.FIGMA_TOKEN) throw new HttpError(404, 'Figma previews are off: set FIGMA_TOKEN before starting serve');
@@ -310,6 +313,7 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
       if (!env.FIGMA_TOKEN) return { enabled: false, refs: [] };
       return { enabled: true, refs: figmaRefs(memberTexts(store, m.id), defaultFileKey(m.run_id)) };
     }],
+    ['GET', /^\/api\/members\/(\d+)\/changes$/, ({ params }) => changesOf(member(params[0]))],
     ['GET', /^\/api\/figma\/image$/, async ({ url, res }) => {
       const fileKey = url.searchParams.get('file') ?? '';
       const nodeId = url.searchParams.get('node') ?? '';

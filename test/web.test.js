@@ -263,3 +263,20 @@ test('a conversation message is clipped past 480 characters or 6 lines', () => {
   assert.equal(isLongText('x'.repeat(481)), true);
   assert.equal(isLongText(null), false);
 });
+
+test('splitDiff gives one entry per file with each line tagged by kind, and counts only hunk lines', async () => {
+  const { splitDiff, changeCounts } = await import('../src/web/feed.js');
+  const diff = [
+    'diff --git a/a.txt b/a.txt', 'index 1..2 100644', '--- a/a.txt', '+++ b/a.txt',
+    '@@ -1,2 +1,2 @@', ' same', '-old', '+new',
+    'diff --git a/b.txt b/b.txt', 'new file mode 100644', '--- /dev/null', '+++ b/b.txt',
+    '@@ -0,0 +1 @@', '+--x', ''
+  ].join('\n');
+  const files = splitDiff(diff);
+  assert.deepEqual(files.map((f) => [f.path, f.added, f.removed]), [['a.txt', 1, 1], ['b.txt', 1, 0]]);
+  assert.deepEqual(files[0].lines.map((l) => l.kind), ['meta', 'meta', 'meta', 'meta', 'hunk', 'ctx', 'del', 'add']);
+  assert.equal(files[1].lines.at(-1).kind, 'add');   // "+--x" is content, not a header
+  assert.equal(changeCounts(files[0]), '+1 −1');
+  assert.deepEqual(splitDiff(''), []);
+  assert.deepEqual(splitDiff(null), []);
+});

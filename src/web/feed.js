@@ -203,3 +203,31 @@ export const isLongText = (text) => {
   const t = String(text ?? '');
   return t.length > 480 || t.split('\n').length > CLAMP_LINES;
 };
+
+// A unified diff as one entry per file, each line tagged with its kind so the page can tint it
+// by class: 'meta' (file headers), 'hunk' (@@), 'add', 'del', 'ctx'. Counts exclude headers.
+export function splitDiff(diff) {
+  const files = [];
+  let cur = null;
+  let inHunk = false;
+  for (const raw of String(diff ?? '').split('\n')) {
+    const head = /^diff --git a\/(.+) b\/(.+)$/.exec(raw);
+    if (head) {
+      cur = { path: head[2], added: 0, removed: 0, lines: [{ kind: 'meta', text: raw }] };
+      files.push(cur);
+      inHunk = false;
+      continue;
+    }
+    if (!cur) continue;
+    if (raw.startsWith('@@')) { inHunk = true; cur.lines.push({ kind: 'hunk', text: raw }); continue; }
+    if (!inHunk) { cur.lines.push({ kind: 'meta', text: raw }); continue; }
+    if (raw.startsWith('+')) { cur.added++; cur.lines.push({ kind: 'add', text: raw }); }
+    else if (raw.startsWith('-')) { cur.removed++; cur.lines.push({ kind: 'del', text: raw }); }
+    else cur.lines.push({ kind: 'ctx', text: raw });
+  }
+  for (const f of files) if (f.lines.at(-1)?.text === '') f.lines.pop();   // the split's trailing blank
+  return files;
+}
+
+// The "+3 −1" label beside a file.
+export const changeCounts = (f) => [f.added ? `+${f.added}` : '', f.removed ? `−${f.removed}` : ''].filter(Boolean).join(' ') || '0';

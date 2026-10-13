@@ -423,3 +423,19 @@ details.more-facts[open] summary .icon { transform: rotate(90deg); }
   .thread-links { margin-left: 0; }
 }
 .run-head .thread-links { margin: 10px 0 0; }
+
+/* Changes: a file list, each file folding open to its hunks. The diff scrolls inside its box. */
+.changes .subhead { display: flex; justify-content: space-between; gap: 12px; }
+.changes .counts { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.changes { min-width: 0; }
+.changes .files { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.changes .file { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; padding: 8px 12px;
+                 border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); text-align: left; cursor: pointer; }
+.changes .file .path { min-width: 0; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12.5px; }
+.changes .diff { margin: 4px 0 0; padding: 8px 0; max-width: 100%; overflow-x: auto; border-radius: var(--radius-sm); background: var(--sunk); }
+.changes .dl { padding: 0 12px; white-space: pre; min-width: max-content; }
+.changes .dl.add { background: var(--green-soft); color: var(--green); }
+.changes .dl.del { background: var(--red-soft); color: var(--red); }
+.changes .dl.hunk { color: var(--blue); background: var(--blue-soft); }
+.changes .dl.meta { color: var(--muted); }
+.changes .note { color: var(--muted); font-size: 13px; }

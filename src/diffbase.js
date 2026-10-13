@@ -28,9 +28,35 @@ export function diffBase(cwd) {
 // own: a read_only brief's conformance check compares `git status --porcelain` from before the
 // run to after it, and touching the real index would turn "?? new.txt" into "A  new.txt" and
 // report a read-only violation that never happened. Throws on failure (ENOBUFS when too big).
-export function gitDiff(cwd, indexFile, { args = [], maxBuffer } = {}) {
+export function gitDiff(cwd, indexFile, { args = [], maxBuffer, timeout } = {}) {
   const env = { ...process.env, GIT_INDEX_FILE: indexFile };
   git(cwd, ['read-tree', 'HEAD'], { env });
   git(cwd, ['add', '-A', '-N'], { env });
-  return git(cwd, ['diff', ...args, diffBase(cwd)], { env, maxBuffer }).toString();
+  return git(cwd, ['diff', ...args, diffBase(cwd)], { env, maxBuffer, timeout }).toString();
+}
+
+// One entry per file of a unified diff: its path (the new side), how it changed, and the
+// +/- line counts. Counting only inside hunks keeps the `+++`/`---` headers out of the totals.
+export function diffFiles(diff) {
+  const files = [];
+  let cur = null;
+  let inHunk = false;
+  for (const line of diff.split('\n')) {
+    const head = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (head) {
+      cur = { path: head[2], status: 'modified', added: 0, removed: 0 };
+      files.push(cur);
+      inHunk = false;
+    } else if (!cur) {
+      continue;
+    } else if (line.startsWith('@@')) {
+      inHunk = true;
+    } else if (inHunk) {
+      if (line.startsWith('+')) cur.added++;
+      else if (line.startsWith('-')) cur.removed++;
+    } else if (line.startsWith('new file mode')) cur.status = 'added';
+    else if (line.startsWith('deleted file mode')) cur.status = 'deleted';
+    else if (line.startsWith('rename to ')) cur.status = 'renamed';
+  }
+  return files;
 }

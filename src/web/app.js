@@ -1,4 +1,4 @@
-import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, TERMINAL } from './feed.js';
+import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, splitDiff, changeCounts, TERMINAL } from './feed.js';
 
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
@@ -612,6 +612,8 @@ function drawMember(run, m) {
   const p = S.panel;
   if (p.controls?.id !== m.id) {
     p.controls = memberControls(m);
+    p.changes?.stop();
+    p.changes = changesPanel(m.id);
     p.mhead = h('div', { class: 'mhead' });
     p.mtask = h('p', { class: 'mtask' });
     p.mfull = h('div');
@@ -621,7 +623,7 @@ function drawMember(run, m) {
     p.task = h('div', { class: 'progress now' });
     p.member.replaceChildren(
       h('a', { class: 'back', href: `#/run/${run.id}` }, icon('back'), 'Team'),
-      p.mhead, p.mtask, p.mfull, p.result, p.controls.el,
+      p.mhead, p.mtask, p.mfull, p.result, p.controls.el, p.changes.el,
       h('details', { class: 'more-facts' }, h('summary', {}, icon('chevron'), 'Details'), p.facts),
       ...extras(m), h('h3', { class: 'subhead' }, 'Transcript'), p.task, p.transcript);
   }
@@ -645,6 +647,8 @@ function drawMember(run, m) {
     ['cost', money(m.cost_usd) ?? '—'], ['tokens', m.tokens ? String(m.tokens) : '—']
   ].flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
   p.controls.update(run, m);
+  // A new event for this member, or a state change, is the cue to look again; the panel throttles.
+  p.changes.update(`${m.state}:${S.model.events.findLast((e) => e.member_id === m.id)?.id ?? 0}`);
   const mine = tasks(S.model.events.filter((e) => e.member_id === m.id))[0];
   p.task.hidden = !mine;
   if (mine) p.task.replaceChildren(...taskLine({ state: m.state, steps: mine.steps, open: `s${m.id}` }));
@@ -655,6 +659,69 @@ function drawMember(run, m) {
   ].sort((a, b) => a.at - b.at).slice(-400);
   if (rows.length) keyed(p.transcript, rows, (r) => r.key, (r) => (r.e ? eventRow(r.e) : messageRow(r.x)));
   else p.transcript.replaceChildren(h('li', { class: 'sys' }, h('span', { class: 'what' }, 'Nothing yet.')));
+}
+
+const CHANGES_EVERY_MS = 4000;
+const CHANGES_MAX_LINES = 300;
+
+// The member's changes so far: a file list with +/- counts, and tapping a file folds its hunks
+// open. It looks again when `update` is given a new cue (an event for this member arrived), at
+// most once per CHANGES_EVERY_MS: the SSE stream is the clock, there is no polling loop here.
+function changesPanel(memberId) {
+  const el = h('section', { class: 'changes', hidden: true });
+  const c = { el, cue: null, at: 0, timer: null, busy: false, sig: null, dead: false };
+  const key = (path) => `chg${memberId}:${path}`;
+  const line = (l) => h('div', { class: `dl ${l.kind}` }, l.text || ' ');
+  function fileRow(f) {
+    const open = () => S.expanded.has(key(f.path));
+    const body = h('pre', { class: 'diff', hidden: !open() });
+    const fill = () => {
+      const all = S.expanded.has(`${key(f.path)}:all`);
+      const lines = all ? f.lines : f.lines.slice(0, CHANGES_MAX_LINES);
+      body.replaceChildren(...lines.map(line), ...present(lines.length < f.lines.length
+        ? h('button', { type: 'button', class: 'show-more', onclick: () => { S.expanded.add(`${key(f.path)}:all`); fill(); } },
+          `Show ${f.lines.length - lines.length} more lines`) : null));
+    };
+    const head = h('button', { type: 'button', class: 'file', 'aria-expanded': String(open()), onclick: () => {
+      if (open()) S.expanded.delete(key(f.path)); else S.expanded.add(key(f.path));
+      head.setAttribute('aria-expanded', String(open()));
+      body.hidden = !open();
+      if (open()) fill();
+    } }, h('span', { class: 'path' }, f.path), h('span', { class: 'counts' }, changeCounts(f)));
+    if (open()) fill();
+    return h('li', {}, head, body);
+  }
+  function show(r) {
+    const sig = `${r.diff.length}:${r.files.length}:${r.live}`;
+    if (sig === c.sig) return;
+    c.sig = sig;
+    el.hidden = r.files.length === 0;
+    const parsed = splitDiff(r.diff);
+    const byPath = new Map(parsed.map((f) => [f.path, f]));
+    const total = r.files.reduce((n, f) => [n[0] + f.added, n[1] + f.removed], [0, 0]);
+    el.replaceChildren(
+      h('h3', { class: 'subhead' }, r.live ? 'Changes so far' : 'Changes',
+        h('span', { class: 'counts' }, `${r.files.length} ${r.files.length === 1 ? 'file' : 'files'} ${changeCounts({ added: total[0], removed: total[1] })}`)),
+      h('ul', { class: 'files' }, r.files.map((f) => fileRow(byPath.get(f.path) ?? { ...f, lines: [] }))),
+      ...present(r.truncated ? h('p', { class: 'note' }, 'The diff is cut here; later files are listed without their lines.') : null));
+  }
+  async function look() {
+    c.timer = null;
+    if (c.busy || c.dead) return;
+    c.busy = true;
+    c.at = Date.now();
+    try { show(await api(`/api/members/${memberId}/changes`)); } catch { /* the section stays as it was */ } finally { c.busy = false; }
+  }
+  return {
+    el,
+    stop: () => { c.dead = true; clearTimeout(c.timer); },
+    update(cue) {
+      if (cue === c.cue || c.timer) return;
+      c.cue = cue;
+      const wait = Math.max(0, c.at + CHANGES_EVERY_MS - Date.now());
+      c.timer = setTimeout(look, wait);
+    }
+  };
 }
 
 function eventRow(e) {
