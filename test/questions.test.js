@@ -25,7 +25,7 @@ test('a human message cuts ask_human short and closes the question', async () =>
     const result = await sup.waitRun(runId);
     assert.deepEqual(result.tool_results[0].result, {
       answer: null, timed_out: false,
-      messages: [{ id: message_id, from: 'ann (human)', text: 'use b', report_id: null }],
+      messages: [{ id: message_id, from: 'ann (human)', text: 'use b', report_id: null, thread_id: null }],
       note: 'question closed: a message arrived before an answer'
     });
     assert.deepEqual(result.received, [], 'the message was delivered twice');

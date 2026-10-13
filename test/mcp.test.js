@@ -30,12 +30,12 @@ async function withMcp(handler, fn, { socketPath } = {}) {
   try { await fn(rpc, sendRaw); } finally { child.kill(); await server.close(); }
 }
 
-test('lists the six team tools, each read-only', async () => {
+test('lists the seven team tools, each read-only', async () => {
   await withMcp(() => null, async (rpc) => {
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {} });
     assert.equal(init.result.serverInfo.name, 'agent-team');
     const { result } = await rpc('tools/list', {});
-    assert.deepEqual(result.tools.map((t) => t.name), ['delegate', 'send_to', 'wait_for', 'report_progress', 'ask_human', 'team_status']);
+    assert.deepEqual(result.tools.map((t) => t.name), ['delegate', 'send_to', 'wait_for', 'report_progress', 'ask_human', 'team_status', 'request']);
     assert.ok(result.tools.every((t) => t.annotations?.readOnlyHint === true));
   });
 });

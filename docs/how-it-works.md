@@ -281,6 +281,20 @@ string also fails.
 The adapter only checks the shape. Whether each `to` names a direct report is checked by the
 dispatcher, which refuses the whole dispatch when it does not.
 
+## Threads between teams
+
+Under `agent-team serve`, a member can open a thread with any team the supervisor knows (see
+`peers` in configuration) with `request(team, text, task?)`. With `task`, the thread asks the
+other team to do work; without, it asks a question. The call returns at once.
+
+The thread goes to the other team's entry member. If that member is running in this supervisor
+it gets the thread in its inbox; otherwise `serve` starts a run in that repository, under its
+own config, budgets and `deny_paths`, with the thread in the lead's brief. Opening a thread
+spends one of the requester's delegations; the work it leads to is charged to the other team.
+
+A request whose chain of threads leads back to a team already in it is refused, so A asking B
+asking A cannot loop.
+
 ## The result
 
 `bin/agent-team.js` prints one JSON object and exits `0` if `status` is `ok`, `1` otherwise.
