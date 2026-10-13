@@ -87,7 +87,7 @@ relaunched.
 
 `defaults.max_parallel` (default 3) caps how many of one manager's reports run at once; the
 rest queue. It is per manager, not per run, so a run with several managers can have more
-members running. `serve` also caps running members across all runs at 6.
+members running. `serve` also caps running members across all runs, at 6 unless started with `--max-running <n>`.
 
 ### Steering a live run
 
@@ -98,6 +98,7 @@ in-process cannot be steered from another terminal. Members are named by run id 
 agent-team pause <run> <member> [--now] [--subtree]
 agent-team resume <run> <member> [--subtree] [--note <text>] [--max-cost-usd <usd>]
 agent-team cancel <run> <member> [--subtree]
+agent-team send <run> <member> <text>
 agent-team questions [<run>] [--json]
 agent-team answer <question-id> <answer>
 agent-team attach <run> <member>
