@@ -18,7 +18,7 @@ root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol
 `agent-team --member ...` runs it through the supervisor: it submits to a running one, or
 starts an in-process one if none is listening. An in-process supervisor listens on a
 private `inproc-<pid>-<n>.sock` beside the shared socket, so another CLI never submits to it;
-only `serve` listens on the shared path. For a v2 member, `--timeout` counts only the time the member is working, not time blocked in
+only `serve` listens on the shared path. The `claude` adapter speaks protocol 2, so a claude root member always runs this way; a v1 root's claude reports still run one-shot. For a v2 member, `--timeout` counts only the time the member is working, not time blocked in
 `wait_for` or `ask_human` or idle between turns; past it the supervisor interrupts the session
 and fails the member. A working member with no events for `defaults.stall_minutes` (default
 10) is reported to its manager as `stalled`. `defaults.max_cost_usd` (default none) caps what a

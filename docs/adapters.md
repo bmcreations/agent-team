@@ -144,7 +144,7 @@ session is started with a `resume` id, and `turn_cost_usd`, reported on every `i
 The three vendor adapters share a shape. They run the CLI once with the brief's `task` as
 the prompt, write its full output to `session.log` in a fresh `agent-team-<vendor>-*`
 directory under the system temp directory, and return that path as `log_path`. After the run
-they compute `artifacts.diff` from the workspace, with new files included through a throwaway
+they compute `artifacts.diff` and `artifacts.diff_stat` from the workspace, with new files included through a throwaway
 git index so the workspace's own index is untouched.
 
 When the brief has `can_delegate`, each vendor adapter also reads the CLI's final answer for a
@@ -184,6 +184,33 @@ it misses an advisor called mid-run. When the transcript cannot be found, `model
 
 `AGENT_TEAM_CLAUDE_DIFF_MAX_BUFFER` raises the byte limit for capturing the diff. An invalid
 value is ignored with a warning and sets `artifacts.diff_max_buffer_invalid_override`.
+
+#### Session (protocol 2)
+
+`adapters/claude session` runs the member as one long-lived process:
+
+    claude -p --input-format stream-json --output-format stream-json --verbose
+      --replay-user-messages --mcp-config <file> --allowedTools 'mcp__agent-team__*'
+      --permission-mode <plan|permission_mode> [--resume <session>] [--model ...]
+
+| Contract message | claude |
+|---|---|
+| `start {brief}` | The task as the first user turn. |
+| `start {resume, note}` | `--resume <resume>`; the note as the first user turn. |
+| `message {from, text}` | A user turn `[from: <from>] <text>`; content is always a list of blocks, since claude drops a plain string. |
+| `ack` | Sent when claude replays the user line's `uuid` with `isReplay: true`. |
+| `interrupt` | `control_request {subtype: "interrupt"}`; answered with `idle {interrupted: true}`, then the adapter ends claude and exits without a `result`. |
+| `idle {cost_usd}` | Each `result` line; `cost_usd` is the change in claude's cumulative `total_cost_usd`. |
+| `session {resume}` | The `session_id` of the first `system/init` line. |
+
+The MCP config, written to a `0600` file so the member's token stays out of `ps`, runs
+`agent-team mcp` with `AGENT_TEAM_TEAM_SOCKET` and `AGENT_TEAM_TEAM_TOKEN`. `MCP_TOOL_TIMEOUT`
+is set to 7,260,000 ms so claude does not give up on an `ask_human` call before its 7200 s
+maximum. A read-only member runs in plan mode; the team tools work there because each declares
+`readOnlyHint`.
+
+Resume works only on the same machine and in the same directory: claude keeps sessions per
+working directory under `~/.claude/projects`.
 
 ### codex
 
