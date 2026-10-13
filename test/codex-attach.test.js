@@ -158,10 +158,21 @@ test('adapters/codex attach stops the server and removes the token when it is hu
     assert.equal(alive(serverStart.pid), false);
     const a = serverStart.argv;
     assert.equal(existsSync(a[a.indexOf('--ws-token-file') + 1]), false);
+    const tuiPid = entries().find((e) => e.tui).pid;
+    assert.equal(alive(tuiPid), false, 'the TUI does not outlive attach');
   } finally {
     child.kill('SIGKILL');
     for (const e of entries().filter((x) => x.tui)) { try { process.kill(e.pid, 'SIGKILL'); } catch { /* gone */ } }
   }
+});
+
+test('adapters/codex attach that fails to set up exits as never started and runs no codex', { timeout: 30_000 }, async () => {
+  const log = join(mkdtempSync(join(tmpdir(), 'at-ca-')), 'codex.jsonl');
+  const { code, stderr } = await run(join(ADAPTERS, 'codex'), ['attach', 'thr-1'],
+    { AGENT_TEAM_CODEX_BIN: FAKE, FAKE_CODEX_LOG: log, TMPDIR: join(tmpdir(), 'at-ca-missing', 'nowhere') });
+  assert.equal(code, 3, stderr);
+  assert.match(stderr, /^agent-team: could not set up the codex take-over: /);
+  assert.equal(existsSync(log), false, 'no codex was started');
 });
 
 test('the claude and codex adapters declare take-over', async () => {

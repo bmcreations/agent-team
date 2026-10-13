@@ -18,26 +18,37 @@ const LISTENING = /listening on: (ws:\/\/\S+)/;
 // never started (agent-team attach then hands back with drove: false).
 export async function codexAttach(threadId) {
   const bin = process.env.AGENT_TEAM_CODEX_BIN || 'codex';
-  const dir = mkdtempSync(join(tmpdir(), 'agent-team-codex-attach-'));
-  chmodSync(dir, 0o700);
-  const tokenFile = join(dir, 'token');
-  const token = randomBytes(32).toString('hex');
-  writeFileSync(tokenFile, token, { mode: 0o600 });
-
+  let dir = null;
   let server = null;
+  let tui = null;
   let cleaning = null;
+  // The TUI is stopped too: after a targeted kill of attach it would hold the terminal against
+  // a dead server. When the TUI has already exited, stopping it is a no-op.
   const cleanup = () => (cleaning ??= (async () => {
+    if (tui) await stop(tui);
     if (server) await stop(server);
-    rmSync(dir, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
   })());
   // Ctrl-C belongs to the TUI; this process must outlive it to stop the server. A closed
-  // terminal or a kill still stops the server before this process goes.
+  // terminal or a kill still stops the TUI and the server before this process goes.
   const ignore = () => {};
   const onSignal = (sig) => { cleanup().finally(() => process.exit(128 + constants.signals[sig])); };
   process.on('SIGINT', ignore);
   process.on('SIGTERM', onSignal);
   process.on('SIGHUP', onSignal);
   try {
+    let tokenFile;
+    let token;
+    try {
+      dir = mkdtempSync(join(tmpdir(), 'agent-team-codex-attach-'));
+      chmodSync(dir, 0o700);
+      tokenFile = join(dir, 'token');
+      token = randomBytes(32).toString('hex');
+      writeFileSync(tokenFile, token, { mode: 0o600 });
+    } catch (err) {
+      process.stderr.write(`agent-team: could not set up the codex take-over: ${err.message}\n`);
+      return 3;
+    }
     // Its own process group, so a signal meant for the terminal's foreground job (the TUI)
     // does not end the server under the human.
     server = spawn(bin, ['app-server', '--listen', 'ws://127.0.0.1:0', '--ws-auth', 'capability-token',
@@ -47,7 +58,7 @@ export async function codexAttach(threadId) {
       process.stderr.write(`agent-team: codex app-server did not start listening: ${listen.error}\n`);
       return 3;
     }
-    const tui = spawn(bin, ['resume', threadId, '--remote', listen.url, '--remote-auth-token-env', TOKEN_ENV], {
+    tui = spawn(bin, ['resume', threadId, '--remote', listen.url, '--remote-auth-token-env', TOKEN_ENV], {
       stdio: 'inherit', env: { ...process.env, [TOKEN_ENV]: token }
     });
     return await new Promise((resolve) => {

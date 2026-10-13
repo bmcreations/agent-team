@@ -90,7 +90,10 @@ if (sub === 'probe') {
 } else if (sub === 'attach') {
   // The human's take-over of the member's thread, in this terminal (src/codex-attach.js).
   if (!process.argv[3]) { process.stderr.write('usage: codex attach <thread-id>\n'); process.exit(2); }
-  codexAttach(process.argv[3]).then((code) => process.exit(code));
+  // Anything unexpected is "never started" (3), so the handback does not claim the human drove.
+  codexAttach(process.argv[3])
+    .catch((err) => { process.stderr.write(`agent-team: codex attach failed: ${err.message}\n`); return 3; })
+    .then((code) => process.exit(code));
 } else if (sub === 'run') {
   const brief = JSON.parse(readFileSync(0, 'utf8'));
   const logDir = mkdtempSync(join(tmpdir(), 'agent-team-codex-'));
