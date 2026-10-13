@@ -116,8 +116,10 @@ export function runClaudeSession({ artifacts }) {
       inTurn = false;
       turns++;
       const total = Number.isFinite(e.total_cost_usd) ? e.total_cost_usd : cost;
+      // A baseline above claude's total (a session whose cost-state was lost) reports nothing for
+      // that turn; later turns are then measured from claude's own total again.
       const delta = Math.max(0, total - cost);
-      cost = Math.max(cost, total);
+      cost = total;
       lastError = e.is_error === true;
       if (typeof e.result === 'string') lastText = e.result;
       for (const d of e.permission_denials ?? []) denied.push(d.tool_name);

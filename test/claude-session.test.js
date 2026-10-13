@@ -153,6 +153,12 @@ test('a baseline above claude\'s total never reports a negative cost', { timeout
   try {
     s.send({ type: 'start', brief: brief(), resume: 'sid-7', note: 'Resumed by ana.', cost_usd: 9 });
     assert.deepEqual(await s.next('idle'), { type: 'idle' });
+    // Later turns are measured from claude's own total, not held at the baseline.
+    s.send({ type: 'message', id: 3, from: 'ana (human)', text: 'again' });
+    await s.next('ack');
+    assert.deepEqual(await s.next('idle'), { type: 'idle', cost_usd: 0.25 });
+    s.send({ type: 'stop' });
+    assert.equal((await s.next('result')).usage.cost_usd, 2);
   } finally { s.close(); }
 });
 
