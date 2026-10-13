@@ -2,7 +2,7 @@
 // Plays `codex` for tests: `--version`, `app-server` over stdio JSON-RPC, `app-server --listen
 // ws://…` (take-over server; prints the listening line and waits), and `resume <id> --remote …`
 // (the human's TUI; logs and exits). Wire shapes are the ones probed from codex-cli 0.162.1.
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const LOG = process.env.FAKE_CODEX_LOG;
@@ -16,12 +16,16 @@ if (argv[0] === 'resume') {
   // The human's interactive session. Records which env var carried the token and its value.
   const envVar = argv[argv.indexOf('--remote-auth-token-env') + 1];
   log({ tui: true, thread: argv[1], remote: argv[argv.indexOf('--remote') + 1], token: process.env[envVar] ?? null });
-  process.exit(Number(process.env.FAKE_CODEX_TUI_EXIT ?? 0));
+  // TUI_HOLD: the human is still in the session (until a signal ends it).
+  if (process.env.FAKE_CODEX_TUI_HOLD === '1') setInterval(() => {}, 1 << 30);
+  else process.exit(Number(process.env.FAKE_CODEX_TUI_EXIT ?? 0));
 }
 
-if (argv[0] === 'app-server' && argv.includes('--listen')) {
+if (argv[0] === 'resume') {
+  // handled above; a holding TUI waits for its signal
+} else if (argv[0] === 'app-server' && argv.includes('--listen')) {
   const file = argv[argv.indexOf('--ws-token-file') + 1];
-  log({ listen: argv[argv.indexOf('--listen') + 1], token: readFileSync(file, 'utf8').trim() });
+  log({ listen: argv[argv.indexOf('--listen') + 1], token: readFileSync(file, 'utf8').trim(), mode: statSync(file).mode & 0o777 });
   if (process.env.FAKE_CODEX_NO_LISTEN !== '1') {
     process.stderr.write('codex app-server (WebSockets)\n  listening on: ws://127.0.0.1:45454\n');
   }

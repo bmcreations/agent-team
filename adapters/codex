@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
 import { runCodexSession } from '../src/codex-session.js';
+import { codexAttach } from '../src/codex-attach.js';
 
 // Binary resolution: PATH is the contract ("codex" must resolve there for a normal install).
 // The env var is only an escape hatch for a non-PATH install — on this machine codex-cli
@@ -81,10 +82,15 @@ if (sub === 'probe') {
 } else if (sub === 'capabilities') {
   process.stdout.write(JSON.stringify({
     // `workspace`, not `worktree` — the plan text predates 9177874, which renamed the key.
-    write: true, workspace: true, structured_output: true, tool_dialect: 'codex', protocol: 2
+    write: true, workspace: true, structured_output: true, tool_dialect: 'codex', protocol: 2,
+    takeover: { notice: null }
   }) + '\n', () => process.exit(0));
 } else if (sub === 'session') {
   runCodexSession({ artifacts });
+} else if (sub === 'attach') {
+  // The human's take-over of the member's thread, in this terminal (src/codex-attach.js).
+  if (!process.argv[3]) { process.stderr.write('usage: codex attach <thread-id>\n'); process.exit(2); }
+  codexAttach(process.argv[3]).then((code) => process.exit(code));
 } else if (sub === 'run') {
   const brief = JSON.parse(readFileSync(0, 'utf8'));
   const logDir = mkdtempSync(join(tmpdir(), 'agent-team-codex-'));
