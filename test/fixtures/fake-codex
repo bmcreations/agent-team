@@ -1,0 +1,135 @@
+#!/usr/bin/env node
+// Plays `codex` for tests: `--version`, `app-server` over stdio JSON-RPC, `app-server --listen
+// ws://…` (take-over server; prints the listening line and waits), and `resume <id> --remote …`
+// (the human's TUI; logs and exits). Wire shapes are the ones probed from codex-cli 0.162.1.
+import { appendFileSync, readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+
+const LOG = process.env.FAKE_CODEX_LOG;
+const log = (o) => { if (LOG) appendFileSync(LOG, JSON.stringify({ pid: process.pid, ...o }) + '\n'); };
+const argv = process.argv.slice(2);
+log({ argv, cwd: process.cwd() });
+
+if (argv[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
+
+if (argv[0] === 'resume') {
+  // The human's interactive session. Records which env var carried the token and its value.
+  const envVar = argv[argv.indexOf('--remote-auth-token-env') + 1];
+  log({ tui: true, thread: argv[1], remote: argv[argv.indexOf('--remote') + 1], token: process.env[envVar] ?? null });
+  process.exit(Number(process.env.FAKE_CODEX_TUI_EXIT ?? 0));
+}
+
+if (argv[0] === 'app-server' && argv.includes('--listen')) {
+  const file = argv[argv.indexOf('--ws-token-file') + 1];
+  log({ listen: argv[argv.indexOf('--listen') + 1], token: readFileSync(file, 'utf8').trim() });
+  if (process.env.FAKE_CODEX_NO_LISTEN !== '1') {
+    process.stderr.write('codex app-server (WebSockets)\n  listening on: ws://127.0.0.1:45454\n');
+  }
+  process.on('SIGTERM', () => { log({ serverExit: true }); process.exit(0); });
+  setInterval(() => {}, 1 << 30);
+} else if (argv[0] === 'app-server') {
+  stdioServer();
+} else {
+  process.stderr.write(`fake-codex: unknown args ${argv.join(' ')}\n`);
+  process.exit(2);
+}
+
+function stdioServer() {
+  const send = (o) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...o }) + '\n');
+  const notify = (method, params) => send({ method, params });
+  let thread = null;
+  let total = 0;
+  let turn = null;          // { id, texts: [] }
+  let turns = 0;
+  let serverReq = 0;
+  const waitingReply = new Map();
+  const text = (input) => input.map((i) => i.text).join('\n');
+  const complete = (status = 'completed') => {
+    const t = turn; turn = null;
+    if (status === 'completed') {
+      const failed = t.texts.some((s) => s.includes('FAIL'));
+      notify('item/completed', { threadId: thread, turnId: t.id,
+        item: { type: 'agentMessage', id: `m-${t.id}`, text: `echo: ${t.texts.join(' | ')}`, phase: 'final_answer' } });
+      total += 100;
+      notify('thread/tokenUsage/updated', { threadId: thread, turnId: t.id, tokenUsage: { total: { totalTokens: total }, last: { totalTokens: 100 } } });
+      notify('turn/completed', { threadId: thread, turn: failed
+        ? { id: t.id, status: 'failed', error: { message: 'model refused' } }
+        : { id: t.id, status: 'completed' } });
+    } else {
+      notify('turn/completed', { threadId: thread, turn: { id: t.id, status } });
+    }
+  };
+  const begin = (input) => {
+    turns++;
+    turn = { id: `turn-${turns}`, texts: [text(input)] };
+    notify('turn/started', { threadId: thread, turn: { id: turn.id, status: 'inProgress' } });
+    // Another thread's traffic on the same server: the adapter must ignore it.
+    notify('item/completed', { threadId: 'thr-other', item: { type: 'agentMessage', id: 'x', text: 'NOT YOURS', phase: 'final_answer' } });
+    const s = turn.texts[0];
+    if (s.includes('TOOL')) {
+      notify('item/started', { threadId: thread, item: { type: 'mcpToolCall', id: 'c1', server: 'agent-team', tool: 'report_progress', arguments: { note: 'hi' }, status: 'inProgress' } });
+      notify('item/completed', { threadId: thread, item: { type: 'mcpToolCall', id: 'c1', server: 'agent-team', tool: 'report_progress', arguments: { note: 'hi' }, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }] } } });
+    }
+    if (s.includes('ASK')) {
+      // Server requests the adapter must answer before the turn can go on.
+      for (const [method, params] of [
+        ['mcpServer/elicitation/request', { threadId: thread, serverName: 'agent-team', mode: 'form', message: 'Allow?' }],
+        ['mcpServer/elicitation/request', { threadId: thread, serverName: 'figma', mode: 'form', message: 'Allow?' }],
+        ['item/commandExecution/requestApproval', { threadId: thread, itemId: 'c2', command: 'rm -rf /' }],
+        ['execCommandApproval', { conversationId: thread, callId: 'c3', command: ['ls'] }],
+        ['item/tool/requestUserInput', { threadId: thread }]
+      ]) {
+        const id = `srv-${++serverReq}`;
+        waitingReply.set(id, method);
+        send({ id, method, params });
+      }
+      return;   // the turn completes once every reply is in
+    }
+    if (!s.includes('HOLD')) setTimeout(() => complete(), 5);
+  };
+
+  createInterface({ input: process.stdin }).on('line', (line) => {
+    const m = JSON.parse(line);
+    if (m.id !== undefined && !m.method) {          // a reply to one of our requests
+      log({ reply: waitingReply.get(m.id), result: m.result ?? null, error: m.error ?? null });
+      waitingReply.delete(m.id);
+      if (turn && waitingReply.size === 0) complete();
+      return;
+    }
+    log({ method: m.method, params: m.params });
+    const ok = (result) => send({ id: m.id, result });
+    const err = (message) => send({ id: m.id, error: { code: -32600, message } });
+    switch (m.method) {
+      case 'initialize': return ok({ userAgent: 'fake' });
+      case 'initialized': return;
+      case 'thread/start':
+        thread = 'thr-1';
+        return ok({ thread: { id: thread } });
+      case 'thread/resume':
+        thread = m.params.threadId;
+        total = Number(process.env.FAKE_CODEX_RESUME_TOKENS ?? 1000);
+        ok({ thread: { id: thread } });
+        return notify('thread/tokenUsage/updated', { threadId: thread, tokenUsage: { total: { totalTokens: total }, last: { totalTokens: 0 } } });
+      case 'turn/start':
+        if (turn) return err('a turn is already running');
+        begin(m.params.input);
+        return ok({ turn: { id: turn?.id ?? `turn-${turns}`, status: 'inProgress' } });
+      case 'turn/steer': {
+        if (!turn || m.params.expectedTurnId !== turn.id) return err('no active turn to steer');
+        const s = text(m.params.input);
+        turn.texts.push(s);
+        ok({ turnId: turn.id });
+        if (s.includes('RELEASE')) setTimeout(() => complete(), 5);
+        return;
+      }
+      case 'turn/interrupt':
+        ok({});
+        if (process.env.FAKE_CODEX_LINGER !== '1' && turn) setTimeout(() => complete('interrupted'), 5);
+        return;
+      default: return err(`unknown method ${m.method}`);
+    }
+  });
+  // LINGER: ignores SIGTERM and stdin EOF, so only SIGKILL ends it (the orphan test).
+  if (process.env.FAKE_CODEX_LINGER === '1') process.on('SIGTERM', () => log({ sigterm: true }));
+  else process.stdin.on('end', () => process.exit(0));
+}
