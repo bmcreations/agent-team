@@ -3,7 +3,7 @@ import { describe } from './web/feed.js';
 const pad = (n) => String(n).padStart(2, '0');
 const clock = (at) => { const d = new Date(at); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
 // Agent output reaches a terminal here, so control characters (ESC, BEL, OSC) are dropped.
-const plain = (s) => String(s ?? '').replace(/\s+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
+export const plain = (s) => String(s ?? '').replace(/\s+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
 
 export function formatRow(row) {
   if (row.type === 'message') {

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { defaultSocketPath } from './supervisor.js';
 import { isListening, callRpc } from './rpc.js';
+import { plain } from './watch.js';
 
 // The CLI side of the admin RPCs. Only `agent-team serve` listens on the shared socket; a
 // CLI's in-process supervisor has a private one, so its runs cannot be steered from here.
@@ -31,8 +32,8 @@ export function handbackNotice({ skipped = [] } = {}) {
 export function renderQuestions(questions) {
   if (!questions.length) return 'no open questions\n';
   return questions.map((q) => {
-    const options = q.options?.length ? ` [${q.options.join(' | ')}]` : '';
-    return `#${q.id}  run ${q.run_id}  ${q.member}: ${q.question}${options}\n`;
+    const options = q.options?.length ? ` [${q.options.map(plain).join(' | ')}]` : '';
+    return `#${q.id}  run ${q.run_id}  ${plain(q.member)}: ${plain(q.question)}${options}\n`;
   }).join('');
 }
 

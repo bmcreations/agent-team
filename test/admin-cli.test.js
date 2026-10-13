@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
+import { renderQuestions } from '../src/admin.js';
 import { project, supervise, LIVE } from './helpers/live.js';
 
 const BIN = new URL('../bin/agent-team.js', import.meta.url).pathname;
@@ -122,4 +123,10 @@ test('send from the CLI puts a message in the member\'s inbox', async () => {
     assert.match(bad.stderr, /usage: agent-team send <run> <member> <text>/);
     await sup.cancel({ run_id: runId, member: 'solo', subtree: true });
   } finally { await sup.close(); }
+});
+
+test('questions text from a member is stripped of terminal control characters', () => {
+  const out = renderQuestions([{ id: 1, run_id: 2, member: 'a\x1b[31m', question: 'ok?\x1b]0;pwned\x07', options: ['y\x1b[2J', 'n'] }]);
+  assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(out));
+  assert.match(out, /^#1  run 2  /);
 });
