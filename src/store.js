@@ -147,10 +147,6 @@ export function openStore(path) {
     setScopeBudget: (id, n) => q('UPDATE members SET scope_budget = ? WHERE id = ?').run(n, id),
     projects: () => q('SELECT project FROM runs UNION SELECT project FROM members WHERE project IS NOT NULL ORDER BY 1')
       .all().map((r) => r.project),
-    liveMembersIn: (project) => q(
-      "SELECT m.* FROM members m JOIN runs r ON r.id = m.run_id WHERE r.status = 'running' " +
-      'AND (m.project = ?1 OR (m.project IS NULL AND r.project = ?1)) ORDER BY m.id'
-    ).all(project).map(memberRow),
 
     addEvent: (memberId, kind, body) =>
       q('INSERT INTO events (member_id, kind, body, at) VALUES (?, ?, ?, ?)')
