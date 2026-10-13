@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../src/store.js';
@@ -67,4 +67,14 @@ test('watch --json follows a live run from another process and exits 0 when it e
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /unknown run 999/);
   } finally { await sup.close(); }
+});
+
+test('watch with no store says the run is unknown and does not create one', async () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-watch-none-')), 'supervisor.db');
+  const r = await promisify(execFile)(process.execPath, [BIN, 'watch', '5'], {
+    env: { ...process.env, AGENT_TEAM_SUPERVISOR_DB: path }, timeout: 20_000
+  }).catch((e) => e);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /unknown run 5/);
+  assert.equal(existsSync(path), false);
 });

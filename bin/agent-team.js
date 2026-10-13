@@ -233,6 +233,11 @@ if (positionals[0] === 'watch') {
     process.stderr.write('usage: agent-team watch <run> [--json]\n');
     process.exit(2);
   }
+  // Open the store only if it exists, so `watch` never creates one.
+  if (!existsSync(defaultStorePath())) {
+    process.stderr.write(`agent-team: unknown run ${runId}\n`);
+    process.exit(1);
+  }
   const store = openStore(defaultStorePath());
   const stop = new AbortController();
   process.once('SIGINT', () => stop.abort());
