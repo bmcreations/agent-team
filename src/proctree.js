@@ -36,12 +36,12 @@ export function descendants(pid, warn = () => {}) {
 export const merge = (a, b) => [...new Map([...a, ...b].map((d) => [d.pid, d])).values()];
 
 // What to signal: each pid, and `-pgid` for every group a descendant leads (pgid equals some
-// descendant's pid). Never our own group.
+// descendant's pid). That can never be our own group: its leader is us or an ancestor, not a
+// descendant.
 export function targets(list) {
   const pids = new Set(list.map((d) => d.pid));
-  const mine = process.getpgrp?.();
   const out = new Set([...pids]);
-  for (const d of list) if (pids.has(d.pgid) && d.pgid !== mine) out.add(-d.pgid);
+  for (const d of list) if (pids.has(d.pgid)) out.add(-d.pgid);
   return [...out];
 }
 
