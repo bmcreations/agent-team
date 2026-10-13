@@ -239,6 +239,33 @@ test('cancelling a mid-level manager alone cancels its reports; its own manager 
   } finally { await sup.close(); }
 });
 
+test('a mid-level manager that fails cancels its unfinished reports', async () => {
+  const { root, script } = project({
+    lead: LIVE(), mid: LIVE({ reports_to: 'lead' }), worker: LIVE({ reports_to: 'mid' })
+  }, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'mid', task: 'm' }, save: 'r' },
+        { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }
+      ] },
+      // mid works past the run's timeout; the lead and the worker are blocked, which does not count.
+      mid: { steps: [{ tool: 'delegate', args: { to: 'worker', task: 'w' } }, { sleep_ms: 30_000 }] },
+      worker: { steps: [{ tool: 'wait_for', args: {} }] }
+    }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go', timeoutMs: 1500 });
+    const mid = () => store.children(leadId)[0];
+    const worker = () => mid() && store.children(mid().id)[0];
+    await untilOr(() => worker() && store.member(worker().id).state === 'waiting', 'the worker never started waiting');
+    await untilOr(() => store.member(mid().id).state === 'failed', 'mid never timed out');
+    await untilOr(() => store.member(worker().id).state === 'cancelled', 'the worker outlived its failed manager');
+    assert.deepEqual(store.member(worker().id).result, { status: 'failed', summary: 'cancelled by mid (failed)' });
+    assert.equal((await sup.waitRun(runId)).status, 'ok');
+  } finally { await sup.close(); }
+});
+
 const deafAdapters = () => {
   const dir = adapterDir();
   copyFileSync(new URL('./fixtures/session-deaf-stop', import.meta.url).pathname, join(dir, 'deaf'));

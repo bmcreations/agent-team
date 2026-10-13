@@ -748,9 +748,9 @@ export class Supervisor {
   // Also used for members that are not live: a cancelled queued or paused member.
   #conclude(m, state, result, workspace = null, by = null) {
     const id = m.id;
-    // A run never ends with members still at work, and a report whose manager was cancelled
-    // has nobody left to report to. Pausing a manager alone leaves its reports working.
-    if (m.parent_id == null || state === 'cancelled') this.#cancelReports(m, by ?? `${m.name} (${state})`);
+    // A run never ends with members still at work, and a report whose manager was cancelled or
+    // failed has nobody left to report to. Pausing a manager alone leaves its reports working.
+    if (m.parent_id == null || state !== 'done') this.#cancelReports(m, by ?? `${m.name} (${state})`);
     this.store.setState(id, state);
     this.store.setResult(id, result);
     this.store.addEvent(id, 'finished', { status: result.status, state });
