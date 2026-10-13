@@ -391,6 +391,19 @@ but cannot `attach` until the fleet spec adds a browser terminal.
   downgrade, linked identities, subtree steering, and the `watch` ceiling.
 - The demo scenario is checked end to end in the browser.
 
+## Roadmap: one-stop dashboard
+
+After threads and auth, the web view becomes the one place to follow a run: its emulators, its
+Figma boards, the decisions waiting on a human, and progress, side by side in the run and
+member views.
+
+- Emulators: 1c proxies loupe's target list and screenshots and links out to loupe. Next is a
+  live device view inside the run page, tied to the member driving that device.
+- Figma: 1c renders single frames by node id. Next is browsing a file's boards and following a
+  prototype flow inside the dashboard, next to the member doing the work.
+- Decisions: `ask_human` questions and thread requests in one queue, answered in place.
+- Progress: the live task rows per teammate that the run page already shows.
+
 ## Out of scope
 
 - Fleet: workers on other machines, repo mirrors, and a browser terminal for take-over.
