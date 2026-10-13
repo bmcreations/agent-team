@@ -195,3 +195,11 @@ export const threadRunIds = (t) => [...new Set([t.from_run, t.run_id, t.owner?.r
 export const canPostToThread = (thread, runs) =>
   (thread.state === 'open' || thread.state === 'accepted') &&
   threadRunIds(thread).some((id) => runs.find((r) => r.id === id)?.steerable === true);
+
+// A message too long to show whole in the conversation: a finished report or a delegated brief
+// can run to thousands of lines, which made a phone scroll for tens of thousands of pixels.
+export const CLAMP_LINES = 6;
+export const isLongText = (text) => {
+  const t = String(text ?? '');
+  return t.length > 480 || t.split('\n').length > CLAMP_LINES;
+};
