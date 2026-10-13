@@ -457,3 +457,21 @@ test('an app-server that crashes mid-turn takes its shell commands with it', { t
     assert.equal(await s.exit, 0);
   });
 });
+
+test('a command that ended in an earlier turn is not signalled when the session ends', { timeout: 15000 }, async () => {
+  const s = session();
+  s.send(START('SHORTCMD'));
+  await s.next('idle');
+  const stale = s.logged().find((l) => l.short_pid)?.short_pid;
+  assert.ok(stale, 'the fake started a command');
+  assert.ok(await gone(stale, 3000), 'the command exited on its own');
+  s.send({ type: 'stop' });
+  const result = await s.next('result');
+  assert.equal(await s.exit, 0);
+  // The pid may since have been reused; the sweep must not reach back to it.
+  const sweeps = readFileSync(result.log_path, 'utf8').split('\n').filter((l) => /^agent-team: SIG/.test(l));
+  for (const l of sweeps) {
+    const pids = l.split(' ').slice(2).map(Number);
+    assert.ok(!pids.includes(stale) && !pids.includes(-stale), `swept a stale pid: ${l}`);
+  }
+});

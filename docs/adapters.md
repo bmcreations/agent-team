@@ -264,10 +264,12 @@ under that policy; each is answered so a turn cannot hang, and none approves any
 
 Ending a session (stop, interrupt, a closed stdin, SIGTERM) also ends the shell commands its
 app-server started, including ones in their own process group; the same holds for the take-over server.
-So does an app-server that crashes mid-turn: the adapter refreshes its list of the server's
-descendants at each turn start and each command start, and kills that list when the server
-exits for any reason. The list comes from `ps`; if `ps` is missing or fails, the session log
-says so and no commands are swept.
+So does an app-server that crashes mid-turn: while a turn runs, the adapter refreshes its list
+of the server's descendants at the turn's start and as each command starts and ends, and kills
+that list when the server exits. The list is dropped when the turn completes, and each ending
+starts from a fresh look, so a pid recorded long ago (and perhaps reused since) is never
+signalled. Each sweep is written to the session log. The list comes from `ps`; if `ps` is
+missing, fails or takes over 2 s, the session log says so and the last list is kept.
 
 **Tokens, not dollars.** codex reports no dollar figure. `idle.tokens` is the turn's tokens,
 and `start.tokens` is the member's recorded total: `thread/resume` re-emits the restored total

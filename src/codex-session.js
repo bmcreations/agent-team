@@ -104,7 +104,9 @@ export function runCodexSession({ artifacts }) {
   const finish = (result) => process.stdout.write(JSON.stringify({ type: 'result', ...result }) + '\n', () => process.exit(0));
   const textInput = (text) => [{ type: 'text', text, text_elements: [] }];
   const serverAlive = () => !!server && server.exitCode === null && server.signalCode === null;
-  // Everything the server has started, as last seen while it was alive. Commands run in their
+  // What the server has started, as seen while it was alive. A kill sequence adds a fresh look
+  // to it, so every entry is either from the turn that is running or from the last few seconds;
+  // a pid recorded long ago may have been reused by an unrelated process. Commands run in their
   // own process groups, so they are ended by pid once the server is gone.
   let tree = [];
   let psWarned = false;
@@ -113,13 +115,22 @@ export function runCodexSession({ artifacts }) {
     psWarned = true;
     log.write(`agent-team: ${why}; the shell commands codex starts will not be ended with it\n`);
   };
-  const snapshot = () => { if (serverAlive()) tree = merge(tree, descendants(server.pid, psFailed)); };
-  // While a turn runs, the tree is refreshed as commands start, so a server that crashes on its
-  // own still leaves a list to end. A refresh replaces the tree rather than adding to it: while the
-  // server lives, everything it started is still its descendant, and pids of commands that have
-  // long finished are not kept around to be signalled after the system reuses them.
-  const refresh = () => { if (serverAlive()) tree = descendants(server.pid, psFailed); };
-  const endCommands = (signal) => endTree(tree, signal);
+  const snapshot = () => { if (serverAlive()) tree = merge(tree, descendants(server.pid, psFailed) ?? []); };
+  // While a turn runs, the tree is refreshed as commands start and end, so a server that crashes
+  // mid-turn still leaves a list to end. A refresh replaces the tree (everything the server
+  // started is still its descendant); a failed `ps` keeps the last list. The tree is cleared
+  // when the turn completes.
+  const refresh = () => {
+    if (!serverAlive()) return;
+    const now = descendants(server.pid, psFailed);
+    if (now) tree = now;
+  };
+  // Each sweep is logged, so what was signalled can be checked afterwards.
+  const endCommands = (signal) => {
+    const list = targets(tree);
+    if (list.length && !log.writableEnded) log.write(`agent-team: ${signal} ${list.join(' ')}\n`);
+    endTree(tree, signal);
+  };
   const endServer = () => {
     stopping = true;
     killedByUs = true;
@@ -182,7 +193,7 @@ export function runCodexSession({ artifacts }) {
       else out({ type: 'event', kind: 'tool_result', name, is_error: item.status !== 'completed', text: mcpResultText(item).slice(0, 2000) });
       return;
     }
-    if (item.type === 'commandExecution' && phase === 'started') refresh();
+    if (item.type === 'commandExecution') refresh();
     if (phase !== 'completed') return;
     if (item.type === 'agentMessage') {
       out({ type: 'event', kind: 'text', text: item.text ?? '' });
@@ -198,6 +209,7 @@ export function runCodexSession({ artifacts }) {
 
   function onTurnCompleted(turn) {
     inTurn = false;
+    tree = [];
     turns++;
     const delta = Math.max(0, total - baseline);
     baseline = total;

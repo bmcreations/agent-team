@@ -113,6 +113,15 @@ function stdioServer() {
       }
       return;   // the turn completes once every reply is in
     }
+    // SHORTCMD: a command in its own group that exits well before the turn completes.
+    if (s.includes('SHORTCMD')) {
+      const c = spawn('sleep', ['0.2'], { detached: true, stdio: 'ignore' });
+      c.unref();
+      log({ short_pid: c.pid });
+      notify('item/started', { threadId: thread, turnId: turn.id, item: { type: 'commandExecution', id: 'cmd-s', command: 'sleep 0.2', status: 'inProgress' } });
+      const mine = turn;
+      return void setTimeout(() => { if (turn === mine) complete(); }, 600);
+    }
     if (!s.includes('HOLD')) setTimeout(() => complete(), 5);
     else if (process.env.FAKE_CODEX_HOLD_MS) {
       const mine = turn;

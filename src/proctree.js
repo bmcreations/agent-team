@@ -3,14 +3,16 @@
 // leaves them behind. Stdlib only; `ps -A -o pid=,ppid=,pgid=` is the same on macOS and Linux.
 import { spawnSync } from 'node:child_process';
 
-// Every live descendant of `pid` (not `pid` itself) as [{ pid, pgid }]. When `ps` is missing or
-// fails, nothing can be found; `warn` is told why, so the caller can say so instead of sweeping
-// nothing in silence.
+// How long `ps` may take before the list is given up on; it runs on the adapter's event loop.
+const PS_TIMEOUT_MS = 2000;
+
+// Every live descendant of `pid` (not `pid` itself) as [{ pid, pgid }], or null when `ps` is
+// missing, fails or times out, so a caller can keep what it last saw. `warn` is told why.
 export function descendants(pid, warn = () => {}) {
-  const ps = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { encoding: 'utf8' });
+  const ps = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { encoding: 'utf8', timeout: PS_TIMEOUT_MS });
   if (ps.status !== 0 || typeof ps.stdout !== 'string') {
     warn(`ps failed: ${ps.error?.message ?? (ps.stderr?.trim() || `exit ${ps.status ?? ps.signal}`)}`);
-    return [];
+    return null;
   }
   const rows = ps.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((r) => r.length === 3 && r.every(Number.isInteger));
   const kids = new Map();

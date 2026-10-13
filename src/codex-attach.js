@@ -121,11 +121,11 @@ function listening(server) {
 async function stop(child) {
   if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   const exited = new Promise((resolve) => child.once('exit', resolve));
-  let tree = descendants(child.pid);
+  let tree = descendants(child.pid) ?? [];
   child.kill('SIGTERM');
   endTree(tree, 'SIGTERM');
   const timer = setTimeout(() => {
-    tree = merge(tree, descendants(child.pid));
+    tree = merge(tree, descendants(child.pid) ?? []);
     child.kill('SIGKILL');
     endTree(tree, 'SIGKILL');
   }, KILL_AFTER_MS);
