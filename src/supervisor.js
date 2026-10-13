@@ -196,6 +196,7 @@ export class Supervisor {
   // runs `argv` in `cwd` and calls handback when the human is done.
   async takeover({ by = 'local', ...who } = {}) {
     const target = this.#target(who);
+    if (TERMINAL.has(target.state)) throw new Error(`"${target.name}" has already finished (${target.state})`);
     const r = await this.#resolve(target);
     const m = this.store.member(target.id);   // it may have moved while resolving
     if (r.resolved?.agent !== 'claude') {
@@ -203,6 +204,9 @@ export class Supervisor {
     }
     // Already taken over (an attach that died): hand the same session out again.
     if (m.state === 'taken_over') return this.#takeoverPayload(m);
+    // Checked before pausing, so a member with no session to hand over is left as it was.
+    if (m.state === 'queued') throw new Error(`"${m.name}" has not started yet — there is no session to take over`);
+    if (!TERMINAL.has(m.state) && !m.resume) throw new Error(`"${m.name}" has no claude session yet — try again in a moment`);
     if (m.state !== 'paused') {
       const rt = this.#live.get(m.id);
       this.#halt(m, 'pause', { now: true, by });
@@ -310,9 +314,11 @@ export class Supervisor {
     return this.#owned(matches.filter((m) => !TERMINAL.has(m.state)).at(-1) ?? matches.at(-1));
   }
 
-  // Another supervisor (a CLI's in-process one) may be running this member's run.
+  // Another supervisor (a CLI's in-process one) may be running this member's run. A finished
+  // run is forgotten once its members are, and every member in it has finished: let the
+  // caller say so.
   #owned(m) {
-    if (!this.#runs.has(m.run_id)) {
+    if (!this.#runs.has(m.run_id) && this.store.run(m.run_id).status === 'running') {
       throw new Error(`run ${m.run_id} is run by another supervisor (${this.store.run(m.run_id).owner})`);
     }
     return m;
@@ -567,6 +573,7 @@ export class Supervisor {
   }
 
   #drain() {
+    if (this.#closing) return;
     for (const id of [...this.#pending]) {
       if (this.#running() >= this.maxRunning) return;
       const m = this.store.member(id);
@@ -576,7 +583,10 @@ export class Supervisor {
         if (running >= config.defaults.max_parallel) continue;
       }
       this.#pending.splice(this.#pending.indexOf(id), 1);
-      this.#launch(id).catch((err) => this.#finish(id, { status: 'failed', summary: err.message }));
+      this.#launch(id).catch((err) => {
+        this.#live.get(id)?.session?.end(this.graceMs);   // #finish forgets it, so it must not outlive us
+        this.#finish(id, { status: 'failed', summary: err.message });
+      });
     }
   }
 
@@ -591,7 +601,7 @@ export class Supervisor {
   }
 
   // Each member is resolved once, starting when it is created; #launch and #sendTo share the
-  // answer. A failure is kept as { error } so it fails the launch, not the delegate call.
+  // answer. A failure is returned as { error } so it fails the launch, not the delegate call.
   #resolve(m) {
     let p = this.#resolutions.get(m.id);
     if (!p) {
@@ -600,6 +610,8 @@ export class Supervisor {
         ? Promise.resolve({ team: true })
         : resolveCaps(this.#ctx(m)).catch((error) => ({ error }));
       this.#resolutions.set(m.id, p);
+      // A failure is not kept past this launch, so a resume tries again.
+      p.then((r) => { if (r.error && this.#resolutions.get(m.id) === p) this.#resolutions.delete(m.id); });
     }
     return p;
   }
@@ -620,8 +632,10 @@ export class Supervisor {
     const ctx = this.#ctx(m);
     const r = await this.#resolve(m);
     if (this.#closing) return;   // close() has recorded any halt; a working member is recovered
+    // Paused or cancelled while resolving. A cancel wins over a failed resolution; a paused
+    // member resolves afresh on resume.
+    if (rt.halt) return this.#halted(id, rt);
     if (r.error) throw r.error;
-    if (rt.halt) return this.#halted(id, rt);   // paused or cancelled while resolving
     // Teams in other projects and v1 adapters keep today's one-shot loop, with no session
     // for send_to to deliver to.
     if (r.team || r.caps.protocol !== 2) {
@@ -748,7 +762,18 @@ export class Supervisor {
       for (const resolve of this.#runWaiters.get(m.run_id) ?? []) resolve(this.store.member(id).result);
       this.#runWaiters.delete(m.run_id);
     }
+    this.#resolutions.delete(id);
+    this.#forgetRun(m.run_id);
     this.#drain();
+  }
+
+  // A finished run is dropped once none of its members is live or queued; reports cancelled
+  // with their root can still be stopping when the run ends.
+  #forgetRun(runId) {
+    if (this.store.run(runId).status === 'running') return;
+    for (const rt of this.#live.values()) if (rt.member.run_id === runId) return;
+    if (this.#pending.some((id) => this.store.member(id).run_id === runId)) return;
+    this.#runs.delete(runId);
   }
 
   // Deepest first, as cancel --subtree does. A report already halting or finished is skipped.
@@ -936,11 +961,11 @@ export class Supervisor {
         throw new Error(`"${target.name}" runs one-shot and cannot receive messages — wait for its result`);
       }
     }
-    // Same guard as send(): a stopping or cancelling member will not read another message. Re-read: the
+    // Same guard as send(): a stopping, cancelling, or timing-out member will not read another message. Re-read: the
     // target can have finished during the await.
     target = this.store.member(target.id);
     const live = this.#live.get(target.id);
-    if (TERMINAL.has(target.state) || live?.stopping || live?.halt?.kind === 'cancel') {
+    if (TERMINAL.has(target.state) || live?.stopping || (live?.halt && live.halt.kind !== 'pause')) {
       throw new Error(`"${target.name}" has finished — delegate a new task`);
     }
     const messageId = this.store.enqueue({

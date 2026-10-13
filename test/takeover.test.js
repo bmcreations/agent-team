@@ -196,3 +196,13 @@ test('handback leaves a member paused when its run is at its cost cap, and says 
     assert.equal((await sup.waitRun(runId)).status, 'ok');
   } finally { await sup.close(); }
 });
+
+test('take-over of a queued member fails without pausing it', async () => {
+  const { root, script } = project({ solo: { agent: 'claude', isolation: 'workspace' } }, {});
+  const { sup, store } = await supervise(script, { maxRunning: 0, env: { PATH } });
+  try {
+    const { memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    await assert.rejects(sup.takeover({ member_id: memberId }), /has not started yet/);
+    assert.equal(store.member(memberId).state, 'queued');
+  } finally { await sup.close(); }
+});

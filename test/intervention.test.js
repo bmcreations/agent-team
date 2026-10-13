@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, copyFileSync, chmodSync } from 'node:fs';
+import { existsSync, copyFileSync, chmodSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { project, supervise, adapterDir, LIVE } from './helpers/live.js';
 import { callRpc } from '../src/rpc.js';
@@ -270,5 +270,56 @@ test('cancel reaches a member that is stopping', async () => {
     sup.cancel({ member_id: memberId });
     assert.deepEqual(await sup.waitRun(runId), { status: 'failed', summary: 'cancelled by local' });
     assert.equal(store.member(memberId).state, 'cancelled');
+  } finally { await sup.close(); }
+});
+
+test('cancel while a failing resolution is pending ends the member cancelled', async () => {
+  const { root, script } = project({ solo: { agent: 'late', isolation: 'none' } }, {}, { on_unavailable: 'nope' });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    sup.cancel({ member_id: memberId });
+    assert.deepEqual(await sup.waitRun(runId), { status: 'failed', summary: 'cancelled by local' });
+    assert.equal(store.member(memberId).state, 'cancelled');
+  } finally { await sup.close(); }
+});
+
+test('a member paused while its resolution fails resolves afresh on resume', async () => {
+  const { root, script } = project({ solo: { agent: 'late', isolation: 'none' } },
+    { by_member: { solo: { steps: [{ say: 'ran' }] } } }, { on_unavailable: 'nope' });
+  const dir = adapterDir();
+  const { sup, store } = await supervise(script, { adapterDir: dir });
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    sup.pause({ member_id: memberId });
+    await untilOr(() => store.member(memberId).state !== 'running', 'the pause never landed');
+    assert.equal(store.member(memberId).state, 'paused');
+    symlinkSync(join(dir, 'mock-live'), join(dir, 'late'));   // the agent is installed now
+    sup.resume({ member_id: memberId });
+    assert.equal((await sup.waitRun(runId)).status, 'ok');
+  } finally { await sup.close(); }
+});
+
+test('send_to refuses a report that is being stopped for its timeout', async () => {
+  const dir = adapterDir();
+  copyFileSync(new URL('./fixtures/session-deaf-work', import.meta.url).pathname, join(dir, 'deafwork'));
+  chmodSync(join(dir, 'deafwork'), 0o755);
+  const { root, script } = project({ lead: LIVE(), worker: { agent: 'deafwork', isolation: 'none', reports_to: 'lead' } }, {
+    by_member: {
+      lead: { steps: [
+        { tool: 'delegate', args: { to: 'worker', task: 'w' } },
+        { tool: 'wait_for', args: { timeout_s: 2 } },
+        { tool: 'send_to', args: { to: 'worker', text: 'still there?' } }
+      ] }
+    }
+  });
+  const { sup, store } = await supervise(script, { adapterDir: dir, graceMs: 4000 });
+  try {
+    const { memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go', timeoutMs: 1000 });
+    const sent = () => store.events(leadId).filter((e) => e.kind === 'tool_result')[2];
+    await untilOr(() => sent(), 'the lead never called send_to');
+    const worker = store.children(leadId)[0];
+    assert.ok(kinds(store, worker.id).includes('timed_out'), 'the worker had not timed out yet');
+    assert.match(sent().body.result.error ?? '', /"worker" has finished — delegate a new task/);
   } finally { await sup.close(); }
 });
