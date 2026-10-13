@@ -63,6 +63,7 @@ agent-team cancel <run> <member> [--subtree]
 agent-team questions [<run>] [--json]
 agent-team answer <question-id> <answer>
 agent-team attach <run> <member>
+agent-team handback <run> <member>
 ```
 
 `pause` lets the current turn finish; `--now` interrupts it, so a command it started may have
@@ -76,7 +77,9 @@ exited, `claude --resume <session>` starts in its workspace in your terminal. It
 told it was taken over. Claude may first ask whether to trust the workspace folder. When you
 exit claude, however you exit, the member resumes headless and is told that you drove the
 session; your turns are in its history. While you have it, `pause` refuses it and a
-supervisor restart leaves it alone. Taking over a codex member comes in a later plan.
+supervisor restart leaves it alone. If `attach` dies before it can hand back (a closed
+terminal, a stopped supervisor), the member stays taken over: run `attach` again to reopen the
+same session, or `agent-team handback <run> <member>` to resume it headless. Taking over a codex member comes in a later plan.
 
 ## Resolving the agent
 

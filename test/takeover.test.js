@@ -115,3 +115,55 @@ test('a restart leaves a taken-over member to its human', async () => {
     assert.equal(store.member(memberId).state, 'taken_over');
   } finally { await sup.close(); }
 });
+
+test('a member stranded by a dead attach is recovered by re-attach or the handback verb', { timeout: 20_000 }, async () => {
+  const { root, script } = project({
+    lead: LIVE(), solo: { agent: 'claude', isolation: 'workspace', reports_to: 'lead' }
+  }, {
+    by_member: { lead: { steps: [
+      { tool: 'delegate', args: { to: 'solo', task: 'HOLD it' }, save: 'r' },
+      { tool: 'wait_for', args: {}, until_finished: ['$r.report_id'] }
+    ] } }
+  });
+  const { sup, store } = await supervise(script, { env: { PATH } });
+  try {
+    const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go' });
+    await until(() => store.children(leadId)[0]?.resume);
+    const soloId = store.children(leadId)[0].id;
+    const first = await sup.takeover({ member_id: soloId });   // the attach CLI then dies
+    assert.equal(store.member(soloId).state, 'taken_over');
+    const again = await sup.takeover({ member_id: soloId });
+    assert.deepEqual(again, first);
+    assert.equal(store.events(soloId).filter((e) => e.kind === 'taken_over').length, 1);
+
+    // a failed handback call says how to recover, and fails
+    const logs = [];
+    await assert.rejects(attach({ member_id: soloId }, {
+      call: async (m) => { if (m === 'handback') throw new Error('no supervisor'); return first; },
+      run: () => ({ status: 0 }), log: (s) => logs.push(s)
+    }), /no supervisor/);
+    assert.match(logs.join(''), /still taken over.*agent-team handback/s);
+
+    const { code, stdout, stderr } = await cli(['handback', String(runId), 'solo'], sup.socketPath);
+    assert.equal(code, 0, stderr);
+    assert.deepEqual(JSON.parse(stdout), { members: [{ id: soloId, name: 'solo' }], skipped: [] });
+    const result = await sup.waitRun(runId);
+    assert.equal(result.status, 'ok');
+    const seen = result.tool_results.flatMap((t) => t.result.messages ?? []).map((m) => m.text);
+    assert.ok(seen.includes(`handed back by ${ME}`), JSON.stringify(seen));
+  } finally { await sup.close(); }
+});
+
+test('handback after a claude that never started carries no "drove" note', async () => {
+  const { root, script } = project({ solo: { agent: 'claude', isolation: 'workspace' } }, {});
+  const log = join(mkdtempSync(join(tmpdir(), 'at-tol-')), 'c.jsonl');
+  const { sup, store } = await supervise(script, { env: { PATH, FAKE_CLAUDE_LOG: log } });
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'HOLD the work' });
+    await until(() => store.member(memberId).resume);
+    const call = async (method, params) => (method === 'takeover' ? sup.takeover(params) : sup.handback(params));
+    await attach({ member_id: memberId }, { call, run: () => ({ error: new Error('spawn claude ENOENT') }), log: () => {} });
+    const result = await sup.waitRun(runId);
+    assert.doesNotMatch(result.summary, /drove this session/);
+  } finally { await sup.close(); }
+});

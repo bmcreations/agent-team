@@ -47,7 +47,8 @@ const USAGE =
   '       agent-team cancel <run> <member> [--subtree]\n' +
   '       agent-team questions [<run>] [--json]\n' +
   '       agent-team answer <question-id> <answer>\n' +
-  '       agent-team attach <run> <member>\n';
+  '       agent-team attach <run> <member>\n' +
+  '       agent-team handback <run> <member>\n';
 
 // Any throw here — a broken config, a bad org chart, a member resolution failure — must
 // reach the caller (the delegate skill included) as the same JSON shape a normal run
@@ -179,6 +180,7 @@ const ADMIN = {
     ...memberArgs(p), subtree: values.subtree, by: whoAmI(), note: values.note ?? null,
     max_cost_usd: usd(values['max-cost-usd'])
   }],
+  handback: (p) => ['handback', { ...memberArgs(p), by: whoAmI() }],
   questions: ([run]) => {
     if (run != null && !(Number.isInteger(Number(run)) && Number(run) > 0)) throw new Error('usage: agent-team questions [<run>]');
     return ['questions', { run_id: run == null ? null : Number(run) }];

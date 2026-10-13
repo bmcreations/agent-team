@@ -48,5 +48,11 @@ export async function attach(who, { call = adminCall, run = spawnSync, log = (s)
     process.off('SIGINT', ignore);
   }
   if (r.error) log(`agent-team: could not run ${t.argv[0]}: ${r.error.message}\n`);
-  return call('handback', { member_id: t.member_id, by });
+  try {
+    return await call('handback', { member_id: t.member_id, by, drove: !r.error });
+  } catch (err) {
+    log(`agent-team: ${t.name} is still taken over: ${err.message}\n` +
+        `agent-team: hand it back with \`agent-team handback <run> ${t.name}\` once \`agent-team serve\` is up.\n`);
+    throw err;
+  }
 }

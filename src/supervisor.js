@@ -182,32 +182,42 @@ export class Supervisor {
   // has exited (so two processes never write one session) it is marked taken_over. The caller
   // runs `argv` in `cwd` and calls handback when the human is done.
   async takeover({ by = 'local', ...who } = {}) {
-    const m = this.#target(who);
-    const r = await this.#resolve(m);
+    const target = this.#target(who);
+    const r = await this.#resolve(target);
+    const m = this.store.member(target.id);   // it may have moved while resolving
     if (r.resolved?.agent !== 'claude') {
       throw new Error(`"${m.name}" runs ${r.team ? 'a team in another project' : r.resolved?.agent ?? 'nothing'}; only claude members can be taken over`);
     }
+    // Already taken over (an attach that died): hand the same session out again.
+    if (m.state === 'taken_over') return this.#takeoverPayload(m);
     if (m.state !== 'paused') {
       const rt = this.#live.get(m.id);
       this.#halt(m, 'pause', { now: true, by });
       await rt?.session?.exited;
     }
     const now = this.store.member(m.id);
+    if (TERMINAL.has(now.state)) throw new Error(`"${m.name}" has already finished (${now.state})`);
     if (now.state !== 'paused') throw new Error(`"${m.name}" is still pausing — run attach again in a moment`);
     if (!now.resume || !now.workspace) throw new Error(`"${m.name}" has no claude session yet — resume it instead`);
     this.store.setState(m.id, 'taken_over');
     this.store.addEvent(m.id, 'taken_over', { by });
     this.#notifyManager(now, `taken over by ${by}`);
-    return { member_id: m.id, name: m.name, cwd: now.workspace, argv: ['claude', '--resume', now.resume] };
+    return this.#takeoverPayload(now);
+  }
+
+  #takeoverPayload(m) {
+    return { member_id: m.id, name: m.name, cwd: m.workspace, argv: ['claude', '--resume', m.resume] };
   }
 
   // The human's terminal session has ended: run the member headless again from that session.
-  handback({ by = 'local', ...who } = {}) {
+  // drove is false when the human's claude never started, so there is nothing to tell it.
+  handback({ by = 'local', drove = true, ...who } = {}) {
     const m = this.#target(who);
     if (m.state !== 'taken_over') throw new Error(`"${m.name}" is not taken over (${m.state})`);
     this.store.setState(m.id, 'paused');
     this.store.addEvent(m.id, 'handed_back', { by });
-    this.#unpause(this.store.member(m.id), { note: null, by, drove: true });
+    this.#notifyManager(m, `handed back by ${by}`);
+    this.#unpause(this.store.member(m.id), { note: null, by, drove });
     return { members: [{ id: m.id, name: m.name }], skipped: [] };
   }
 
