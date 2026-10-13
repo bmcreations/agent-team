@@ -35,7 +35,10 @@ export function loupeGet(cfg, path, query = {}) {
   const url = new URL(path, cfg.base);
   for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
   const https = url.protocol === 'https:';
-  return new Promise((resolve, reject) => {
+  return new Promise((resolveRaw, rejectRaw) => {
+    let deadline;
+    const resolve = (v) => { clearTimeout(deadline); resolveRaw(v); };
+    const reject = (e) => { clearTimeout(deadline); rejectRaw(e); };
     const req = (https ? httpsRequest : httpRequest)(url, {
       headers: { Authorization: `Bearer ${cfg.token()}` },
       ...(https ? { rejectUnauthorized: false } : {}),
@@ -44,8 +47,13 @@ export function loupeGet(cfg, path, query = {}) {
       const chunks = [];
       let size = 0;
       res.on('data', (c) => { size += c.length; if (size > 32 * 1024 * 1024) req.destroy(new Error('loupe sent over 32 MiB')); else chunks.push(c); });
+      // A loupe that drops the connection mid-body emits neither 'end' nor a request error.
+      res.on('error', (err) => reject(new Error(`loupe is not reachable at ${cfg.base.origin}: ${err.message}`)));
+      res.on('close', () => { if (!res.complete) reject(new Error('loupe cut its answer short')); });
       res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'] ?? '', body: Buffer.concat(chunks) }));
     });
+    deadline = setTimeout(() => req.destroy(new Error('loupe did not answer within 15s')), 15_000);
+    deadline.unref();
     req.on('timeout', () => req.destroy(new Error('loupe did not answer within 10s')));
     req.on('error', (err) => reject(new Error(`loupe is not reachable at ${cfg.base.origin}: ${err.message}`)));
     req.end();

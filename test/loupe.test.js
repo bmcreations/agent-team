@@ -101,3 +101,20 @@ test('with loupe unset the device routes say how to turn it on', async () => {
     assert.match(shot.json.error, /AGENT_TEAM_LOUPE_URL/);
   } finally { await s.close(); }
 });
+
+test('a loupe that cuts its answer short gets a prompt 502, not a hung request', async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': '100000' });
+    res.write(Buffer.alloc(10));
+    setTimeout(() => req.socket.destroy(), 20);
+  }).listen(0, '127.0.0.1');
+  await new Promise((r) => server.once('listening', r));
+  const s = await setup({ AGENT_TEAM_LOUPE_URL: `http://127.0.0.1:${server.address().port}`, LOUPE_TOKEN: TOKEN });
+  try {
+    const t0 = Date.now();
+    const shot = await get(s.web.url, '/api/loupe/screenshot?target=sim:ABCD-1234');
+    assert.equal(shot.status, 502);
+    assert.match(shot.json.error, /aborted|cut its answer short/);
+    assert.ok(Date.now() - t0 < 5000);
+  } finally { await s.close(); server.close(); }
+});
