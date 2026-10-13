@@ -4,5 +4,8 @@
   "type": "module",
   "private": true,
   "engines": { "node": ">=22.13" },
-  "scripts": { "test": "node --test 'test/**/*.test.js'" }
+  "scripts": {
+    "test": "node --import ./test/helpers/guard.js --test 'test/**/*.test.js'",
+    "test:live": "AGENT_TEAM_LIVE_SMOKE=1 node --test 'test/live/*.test.js'"
+  }
 }

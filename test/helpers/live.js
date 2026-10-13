@@ -1,3 +1,4 @@
+import './guard.js';   // before anything can spawn an adapter
 import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, chmodSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
