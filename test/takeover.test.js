@@ -38,6 +38,7 @@ test('attach hands a running claude member to a human and resumes it headless on
     const { code, stdout, stderr } = await cli(['attach', String(runId), 'solo'], sup.socketPath, { FAKE_CLAUDE_LOG: log });
     assert.equal(code, 0, stderr);
     assert.match(stderr, /solo is paused and yours\. claude may first ask whether to trust /);
+    assert.match(stderr, /agent-team: exit claude to hand the session back\./);
     assert.deepEqual(JSON.parse(stdout), { members: [{ id: memberId, name: 'solo' }], skipped: [] });
 
     const result = await sup.waitRun(runId);
@@ -88,13 +89,13 @@ test('while a human drives, the manager is told and pause refuses; any exit hand
   } finally { await sup.close(); }
 });
 
-test('only claude members can be taken over', async () => {
+test('a member whose adapter declares no take-over cannot be taken over', async () => {
   const { root, script } = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }] } } });
   const { sup, store } = await supervise(script);
   try {
     const { memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
     await until(() => store.member(memberId).state === 'waiting');
-    await assert.rejects(sup.takeover({ member_id: memberId }), /^Error: "solo" runs mock-live; only claude members can be taken over$/);
+    await assert.rejects(sup.takeover({ member_id: memberId }), /^Error: "solo" runs mock-live, which does not support take-over$/);
     assert.equal(store.member(memberId).state, 'waiting');
     assert.throws(() => sup.handback({ member_id: memberId }), /^Error: "solo" is not taken over \(waiting\)$/);
   } finally { await sup.close(); }
@@ -275,7 +276,7 @@ test('take-over of a member paused before its session started points to resume a
     const { memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
     sup.pause({ member_id: memberId });   // still launching: paused before claude starts
     await until(() => store.member(memberId).state === 'paused');
-    await assert.rejects(sup.takeover({ member_id: memberId }), /has no claude session yet — resume it instead/);
+    await assert.rejects(sup.takeover({ member_id: memberId }), /has no harness session yet — resume it instead/);
     assert.equal(store.member(memberId).state, 'paused');
   } finally { await sup.close(); }
 });

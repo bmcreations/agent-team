@@ -36,14 +36,16 @@ export function renderQuestions(questions) {
   }).join('');
 }
 
-// `agent-team attach`: take the member over, run its harness session in this terminal, and
-// hand it back when the human exits, whatever the exit. Ctrl-C belongs to the harness while it
-// runs; without ignoring it here, this process would die before handing back.
+// `agent-team attach`: take the member over, run its harness session in this terminal (the
+// adapter's `attach`), and hand it back when the human exits, whatever the exit. Ctrl-C
+// belongs to the harness while it runs; without ignoring it here, this process would die
+// before handing back. Exit code 3 from the adapter means the harness never started, so the
+// human cannot have driven it.
 export async function attach(who, { call = adminCall, run = spawnSync, log = (s) => process.stderr.write(s) } = {}) {
   const by = whoAmI();
   const t = await call('takeover', { ...who, by });
-  log(`agent-team: ${t.name} is paused and yours. claude may first ask whether to trust ${t.cwd}.\n` +
-      'agent-team: exit claude to hand the session back.\n');
+  log(`agent-team: ${t.name} is paused and yours.${t.notice ? ' ' + t.notice : ''}\n` +
+      `agent-team: exit ${t.harness} to hand the session back.\n`);
   const ignore = () => {};
   process.on('SIGINT', ignore);
   let r;
@@ -53,8 +55,9 @@ export async function attach(who, { call = adminCall, run = spawnSync, log = (s)
     process.off('SIGINT', ignore);
   }
   if (r.error) log(`agent-team: could not run ${t.argv[0]}: ${r.error.message}\n`);
+  const drove = !r.error && r.status !== 3;
   try {
-    const back = await call('handback', { member_id: t.member_id, by, drove: !r.error });
+    const back = await call('handback', { member_id: t.member_id, by, drove });
     log(handbackNotice(back));
     return back;
   } catch (err) {

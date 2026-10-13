@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { loadConfig } from './config.js';
 import { buildBrief } from './brief.js';
-import { resolveCaps, prepareMember, runMember, teamKeys } from './dispatch.js';
+import { resolveCaps, prepareMember, runMember, teamKeys, adapterPath } from './dispatch.js';
 import { pruneWorkspace } from './workspace.js';
 import { MemberSession } from './sessions.js';
 import { serveRpc, isListening } from './rpc.js';
@@ -14,6 +14,13 @@ const TERMINAL = new Set(['done', 'failed', 'cancelled']);
 // Who a cascade names in its reports' "cancelled by ..." summary: whoever cancelled the
 // manager, or the manager itself and how it ended. The live path and close() share it.
 const cascadeBy = (m, state, by) => by ?? `${m.name} (${state})`;
+// An adapter's `takeover` capability, shape-checked (adapter output is untrusted): null when
+// the adapter does not declare it, else { notice: string | null }.
+const takeoverCap = (caps) => {
+  const t = caps?.takeover;
+  if (!t || typeof t !== 'object') return null;
+  return { notice: typeof t.notice === 'string' ? t.notice : null };
+};
 const WAIT_DEFAULT_S = 600;
 const WAIT_MAX_S = 1800;
 const ASK_DEFAULT_S = 1800;
@@ -194,22 +201,23 @@ export class Supervisor {
     return { members, skipped };
   }
 
-  // Hands a claude member's session to a human: its turn is interrupted, and once its adapter
+  // Hands a member's harness session to a human: its turn is interrupted, and once its adapter
   // has exited (so two processes never write one session) it is marked taken_over. The caller
-  // runs `argv` in `cwd` and calls handback when the human is done.
+  // runs `argv` (the adapter's `attach`) in `cwd` and calls handback when the human is done.
+  // Any adapter that declares the `takeover` capability can be taken over.
   async takeover({ by = 'local', ...who } = {}) {
     const target = this.#target(who);
     if (TERMINAL.has(target.state)) throw new Error(`"${target.name}" has already finished (${target.state})`);
     const r = await this.#resolve(target);
     const m = this.store.member(target.id);   // it may have moved while resolving
-    if (r.resolved?.agent !== 'claude') {
-      throw new Error(`"${m.name}" runs ${r.team ? 'a team in another project' : r.resolved?.agent ?? 'nothing'}; only claude members can be taken over`);
+    if (r.team || !takeoverCap(r.caps)) {
+      throw new Error(`"${m.name}" runs ${r.team ? 'a team in another project' : r.resolved?.agent ?? 'nothing'}, which does not support take-over`);
     }
     // Already taken over (an attach that died): hand the same session out again.
-    if (m.state === 'taken_over') return this.#takeoverPayload(m);
+    if (m.state === 'taken_over') return this.#takeoverPayload(m, r);
     // Checked before pausing, so a member with no session to hand over is left as it was.
     if (m.state === 'queued') throw new Error(`"${m.name}" has not started yet — there is no session to take over`);
-    if (!TERMINAL.has(m.state) && m.state !== 'paused' && !m.resume) throw new Error(`"${m.name}" has no claude session yet — try again in a moment`);
+    if (!TERMINAL.has(m.state) && m.state !== 'paused' && !m.resume) throw new Error(`"${m.name}" has no harness session yet — try again in a moment`);
     if (m.state !== 'paused') {
       const rt = this.#live.get(m.id);
       this.#halt(m, 'pause', { now: true, by });
@@ -218,19 +226,26 @@ export class Supervisor {
     const now = this.store.member(m.id);
     if (TERMINAL.has(now.state)) throw new Error(`"${m.name}" has already finished (${now.state})`);
     if (now.state !== 'paused') throw new Error(`"${m.name}" is still pausing — run attach again in a moment`);
-    if (!now.resume || !now.workspace) throw new Error(`"${m.name}" has no claude session yet — resume it instead`);
+    if (!now.resume || !now.workspace) throw new Error(`"${m.name}" has no harness session yet — resume it instead`);
     this.store.setState(m.id, 'taken_over');
     this.store.addEvent(m.id, 'taken_over', { by });
     this.#notifyManager(now, `taken over by ${by}`);
-    return this.#takeoverPayload(now);
+    return this.#takeoverPayload(now, r);
   }
 
-  #takeoverPayload(m) {
-    return { member_id: m.id, name: m.name, cwd: m.workspace, argv: ['claude', '--resume', m.resume] };
+  // `notice` is what the human should know before the harness starts; {cwd} is the workspace.
+  #takeoverPayload(m, r) {
+    const { notice } = takeoverCap(r.caps);
+    return {
+      member_id: m.id, name: m.name, cwd: m.workspace,
+      argv: [adapterPath(this.adapterDir, r.resolved.agent), 'attach', m.resume],
+      harness: r.resolved.agent,
+      notice: notice?.replaceAll('{cwd}', m.workspace) ?? null
+    };
   }
 
   // The human's terminal session has ended: run the member headless again from that session.
-  // drove is false when the human's claude never started, so there is nothing to tell it.
+  // drove is false when the human's harness never started, so there is nothing to tell it.
   // A run at its cost cap leaves the member paused until a resume raises the cap; `skipped`
   // says why. The cap is met here by what other members spent while this one was taken over:
   // the human's own turns are not seen until the member's next turn after it resumes, when the
@@ -674,7 +689,7 @@ export class Supervisor {
     });
     brief.task += TEAM_NOTE;
     rt.session = new MemberSession({
-      execPath: join(this.adapterDir, resolved.agent), cwd: prep.workspace.dir,
+      execPath: adapterPath(this.adapterDir, resolved.agent), cwd: prep.workspace.dir,
       env: { ...this.env, AGENT_TEAM_TEAM_SOCKET: this.socketPath, AGENT_TEAM_TEAM_TOKEN: m.token },
       onLine: (msg) => this.#onLine(id, msg),
       onExit: (code, stderr) => this.#onExit(id, code, stderr)

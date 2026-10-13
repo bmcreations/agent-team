@@ -149,10 +149,20 @@ if (sub === 'probe') {
   process.stdout.write(r.stdout.toString().trim() + '\n', () => process.exit(0));
 } else if (sub === 'capabilities') {
   process.stdout.write(JSON.stringify({
-    write: true, workspace: true, structured_output: true, tool_dialect: 'claude', protocol: 2
+    write: true, workspace: true, structured_output: true, tool_dialect: 'claude', protocol: 2,
+    takeover: { notice: 'claude may first ask whether to trust {cwd}.' }
   }) + '\n', () => process.exit(0));
 } else if (sub === 'session') {
   runClaudeSession({ artifacts: artifactsOf });
+} else if (sub === 'attach') {
+  // The human's take-over: their own claude on the member's session, in this terminal. Ctrl-C
+  // belongs to claude; this process must outlive it to report its exit. Exit 3 says claude
+  // never started.
+  if (!process.argv[3]) { process.stderr.write('usage: claude attach <session-id>\n'); process.exit(2); }
+  process.on('SIGINT', () => {});
+  const r = spawnSync('claude', ['--resume', process.argv[3]], { stdio: 'inherit' });
+  if (r.error) process.stderr.write(`agent-team: could not run claude: ${r.error.message}\n`);
+  process.exit(r.error ? 3 : r.status ?? 1);
 } else if (sub === 'run') {
   const brief = JSON.parse(readFileSync(0, 'utf8'));
   const logDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-'));

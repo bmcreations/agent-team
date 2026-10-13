@@ -10,7 +10,7 @@ import { createWorkspace, pruneWorkspace, runLogPath, mainCheckoutRoot } from '.
 import { buildBrief, loadDialect } from './brief.js';
 import { runAdapter, DEFAULT_TIMEOUT_MS } from './adapter.js';
 
-const adapterPath = (dir, agent) => join(dir, agent);
+export const adapterPath = (dir, agent) => join(dir, agent);
 
 function makeProbe(adapterDir, env) {
   return (agent) => {
