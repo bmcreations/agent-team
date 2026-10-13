@@ -135,6 +135,7 @@ test('refusals: unknown team, self, in-process, exhausted budget, cloud team', a
 
   const self = await requestOutcome(ask(({ a }) => ({ team: a, text: 'x' })));
   assert.match(self.result.error, /already in this chain/);
+  assert.ok(self.result.error.endsWith(`(${basename(self.aReal)})`), self.result.error);   // not "a -> a"
 
   const inProcess = await requestOutcome(ask(({ b }) => ({ team: b, text: 'x' })), {}, { shared: false });
   assert.match(inProcess.result.error, /threads need `agent-team serve`/);
