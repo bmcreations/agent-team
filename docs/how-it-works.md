@@ -18,9 +18,8 @@ SIGINT or SIGTERM, with the web view at `http://127.0.0.1:4747/` (`--port 0` pic
 the address is printed at start). The view binds to `127.0.0.1` only and has no sign-in yet:
 any user or process on this machine that can reach the port can read every run and steer the
 runs `serve` owns. A member another repository's team runs is tagged with that team, and its
-panel shows that repository's `deny_paths`. `--max-running` (default 6) caps the members working at once across every
-project. When the
-root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol-2),
+panel shows that repository's `deny_paths`. `--max-running` (default 6) caps the members
+working at once across every project. When the root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol-2),
 `agent-team --member ...` runs it through the supervisor: it submits to a running one, or
 starts an in-process one if none is listening. An in-process supervisor listens on a
 private `inproc-<pid>-<n>.sock` beside the shared socket, so another CLI never submits to it;
@@ -246,12 +245,12 @@ Delegating to it starts that repository's entry member as a report of the manage
 the run's tree, can be messaged (by the name the manager knows, or its own), paused, resumed,
 cancelled and taken over like any member, and its own reports work under that repository's
 config — its `deny_paths` build their workspaces and its `max_depth` bounds the tree below the
-entry member. Every delegation inside it spends the run's `max_delegations` and the entered
-team's own, whichever runs out first. A team the run has already passed through is refused.
+entry member. Every delegation inside it spends the run's `max_delegations` and that of every
+team it is inside, whichever runs out first. A team the run has already passed through is refused.
 Without `serve` (a CLI run with its own in-process supervisor), a team member still runs
 one-shot, as below. Teams named by GitHub repository always run one-shot.
 
-Its runs still spend this dispatch's `max_delegations`. The other team starts with whichever
+A one-shot team's runs still spend this dispatch's `max_delegations`. The other team starts with whichever
 is smaller, its own `max_delegations` or what this dispatch has left, and what it uses comes
 off this dispatch's budget.
 
