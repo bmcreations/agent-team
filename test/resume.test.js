@@ -35,7 +35,7 @@ test('resume relaunches the session in its workspace and delivers what was sent 
       `[resume ${sid}] Resumed by ann.\nann: carry on`,
       '[from: local (human)] while you were out'
     ]);
-    assert.equal(store.member(memberId).workspace, workspace, 'resume used a new workspace');
+    assert.equal(store.member(memberId).workspace, workspace, 'resume did not reuse the workspace');
     assert.equal(store.member(memberId).resume, sid);
     assert.deepEqual(store.events(memberId).filter((e) => e.kind === 'resumed').map((e) => e.body), [{ by: 'ann' }]);
   } finally { await sup.close(); }
@@ -106,5 +106,25 @@ test('a paused subtree resumes together and the run finishes', async () => {
     assert.deepEqual(res.members.map((m) => m.name), ['lead', 'worker']);
     assert.equal((await sup.waitRun(runId)).status, 'ok');
     assert.deepEqual(store.members(runId).map((m) => m.state), ['done', 'done']);
+  } finally { await sup.close(); }
+});
+
+test('a member paused before its adapter launched starts fresh on resume, in one workspace', async () => {
+  const { root, script } = project({ solo: LIVE({ isolation: 'workspace' }) }, { by_member: { solo: { steps: [{ say: 'ran' }] } } });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    // Still launching: submit() awaits the adapter's capabilities first.
+    sup.pause({ member_id: memberId });
+    await until(() => store.member(memberId).state === 'paused');
+    assert.equal(store.member(memberId).workspace, null, 'a workspace was made before launch');
+    assert.equal(store.member(memberId).resume, null);
+
+    sup.resume({ member_id: memberId, by: 'ann' });
+    const result = await sup.waitRun(runId);
+    assert.equal(result.status, 'ok');
+    assert.ok(!result.received.some((r) => r.startsWith('[resume')), 'a fresh start was sent a resume id');
+    assert.ok(store.events(memberId).some((e) => e.kind === 'text' && e.body.text === 'ran'));
+    assert.deepEqual(store.events(memberId).filter((e) => e.kind === 'resumed').map((e) => e.body), [{ by: 'ann' }]);
   } finally { await sup.close(); }
 });
