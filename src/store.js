@@ -81,7 +81,9 @@ const MIGRATIONS = [
      side TEXT NOT NULL, author TEXT NOT NULL, text TEXT NOT NULL, state TEXT, at INTEGER NOT NULL);
    CREATE INDEX thread_posts_thread ON thread_posts(thread_id, id);
    ALTER TABLE runs ADD COLUMN thread_id INTEGER;
-   ALTER TABLE messages ADD COLUMN thread_id INTEGER;`
+   ALTER TABLE messages ADD COLUMN thread_id INTEGER;`,
+  // threadsInState runs on every pump; this keeps it from reading the whole thread history.
+  `CREATE INDEX IF NOT EXISTS threads_state ON threads(state, id);`
 ];
 
 function migrate(db) {
