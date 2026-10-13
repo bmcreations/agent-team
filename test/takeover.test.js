@@ -197,6 +197,32 @@ test('handback leaves a member paused when its run is at its cost cap, and says 
   } finally { await sup.close(); }
 });
 
+test('a handback held at the cost cap tells the manager the member is still paused', async () => {
+  const { root, script } = project({ lead: LIVE(), worker: LIVE({ reports_to: 'lead' }) }, {
+    by_member: {
+      lead: { steps: [{ tool: 'delegate', args: { to: 'worker', task: 'w' } }] },
+      worker: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [] } }
+    }
+  });
+  const { sup, store } = await supervise(script);
+  try {
+    const { runId, memberId: leadId } = sup.submit({ projectRoot: root, member: 'lead', task: 'go', maxCostUsd: 1 });
+    await until(() => store.children(leadId)[0]?.state === 'waiting');
+    const workerId = store.children(leadId)[0].id;
+    sup.pause({ member_id: workerId });
+    await until(() => store.member(workerId).state === 'paused');
+    store.setState(workerId, 'taken_over');
+    store.addRunCost(runId, 1.5);
+    assert.equal(sup.handback({ member_id: workerId, by: 'ann' }).skipped.length, 1);
+    const told = () => store.events(leadId).filter((e) => e.kind === 'user').map((e) => e.body.text);
+    await until(() => told().some((t) => t.includes('handed back')));
+    assert.deepEqual(told().filter((t) => t.includes('handed back')),
+      ['[from: worker (report)] handed back by ann, still paused: run is at its cost cap ($1.50 of $1.00)']);
+    sup.resume({ member_id: workerId, max_cost_usd: 5 });
+    assert.equal((await sup.waitRun(runId)).status, 'ok');
+  } finally { await sup.close(); }
+});
+
 test('take-over of a queued member fails without pausing it', async () => {
   const { root, script } = project({ solo: { agent: 'claude', isolation: 'workspace' } }, {});
   const { sup, store } = await supervise(script, { maxRunning: 0, env: { PATH } });

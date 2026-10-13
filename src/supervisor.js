@@ -238,13 +238,14 @@ export class Supervisor {
     if (m.state !== 'taken_over') throw new Error(`"${m.name}" is not taken over (${m.state})`);
     this.store.setState(m.id, 'paused');
     this.store.addEvent(m.id, 'handed_back', { by });
-    this.#notifyManager(m, `handed back by ${by}`);
     const { cost_usd: spent, max_cost_usd: cap } = this.store.run(m.run_id);
     if (cap != null && spent >= cap) {
       this.store.addEvent(m.id, 'cost_cap', { cost_usd: spent, max_cost_usd: cap });
       const reason = `run is at its cost cap ($${spent.toFixed(2)} of $${cap.toFixed(2)})`;
+      this.#notifyManager(m, `handed back by ${by}, still paused: ${reason}`);
       return { members: [], skipped: [{ id: m.id, name: m.name, reason }] };
     }
+    this.#notifyManager(m, `handed back by ${by}`);
     this.#unpause(this.store.member(m.id), { note: null, by, drove });
     return { members: [{ id: m.id, name: m.name }], skipped: [] };
   }
