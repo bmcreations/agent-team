@@ -131,14 +131,14 @@ A v2 adapter is a long-lived process speaking newline-delimited JSON in both dir
 
 | Direction | Message | Meaning |
 |---|---|---|
-| in | `start {brief}` | Begin, with the brief composed as today. |
+| in | `start {brief, resume, note}` | Begin, with the brief composed as today. `resume` is null for a fresh start; otherwise it is the string the adapter sent in `session {resume}`, and `note` is the first user turn after resuming. |
 | in | `message {id, from, text}` | Inbox delivery. |
 | in | `stop` | Finish after the current turn. |
 | in | `interrupt` | Finish now. |
 | out | `session {harness_id, resume}` | The harness session id and how to resume it. Sent first. |
 | out | `event {kind, …}` | Text, tool call, tool result, or turn end, normalized across harnesses. |
 | out | `ack {message_id}` | The harness consumed the message: for `claude`, the user message echoed back by `--replay-user-messages`. Writing it to stdin is not enough. A message written but not acked by the end of the turn goes back to the queue. |
-| out | `idle` | The turn ended. |
+| out | `idle {interrupted?, cost_usd?}` | The turn ended. `cost_usd` is the turn's cost, if the harness reports one; the supervisor sums it against `max_cost_usd`. |
 | out | `result {status, summary, usage}` | Final outcome. |
 
 v2 adapters in this spec:
@@ -208,7 +208,9 @@ its session id, and resume that session either headless or interactively.
   delivers anything that queued while paused.
 - **Cancel** stops the member and keeps its workspace for inspection, matching today's rule
   that only `ok` runs prune their workspace.
-- Pause and cancel apply to one member or its whole subtree.
+- Pause and cancel apply to one member or its whole subtree. Cancelling a manager also
+  cancels its unfinished reports, and a root that ends for any reason cancels the rest of its
+  run. Pausing a manager alone leaves its reports working.
 - **Take-over** is `agent-team attach <run> <member>`. It pauses the member and runs
   `claude --resume <sid>` or `codex resume <id>` in the workspace, in the user's own terminal.
   On exit the member resumes headless with a note that a human drove it. The web view's "Take
@@ -355,8 +357,9 @@ but cannot `attach` until the fleet spec adds a browser terminal.
 - **Stalls and timeouts.** A member with no events for `stall_minutes` (default 10) emits
   `stalled` to its manager and the web view. The existing wall-clock timeout interrupts, then
   fails. It counts only time the member is working, not time blocked in `wait_for` or `ask_human`. `wait_for` times out after 10 minutes by default and returns "nothing yet", leaving
-  the manager to decide whether to keep waiting. `ask_human` defaults to 30 minutes. `wait_for`
-  also returns on a paused report instead of waiting on it.
+  the manager to decide whether to keep waiting. `ask_human` defaults to 30 minutes. When a
+  report is paused, its manager gets one `paused by` notice, which ends a blocked `wait_for`.
+  A paused report still counts as open, so a later `wait_for` waits for it to resume or finish.
 - **Messages to finished members** are rejected back to the sender.
 - **Author spoofing.** Each member's MCP server receives a per-member token in its environment.
   The supervisor sets a message's author from that token, never from what the member claims.

@@ -212,6 +212,11 @@ maximum. A read-only member runs in plan mode; the team tools work there because
 Resume works only on the same machine and in the same directory: claude keeps sessions per
 working directory under `~/.claude/projects`.
 
+If the adapter's stdin closes, its supervisor is gone. The adapter interrupts claude's open
+turn, or closes claude's stdin if it is between turns, then sends claude SIGTERM after 2 seconds
+and SIGKILL after 4 if it is still running. A restarted supervisor resumes the session, and
+two claude processes must not write it at once.
+
 ### codex
 
 | Brief field | Becomes |

@@ -23,7 +23,8 @@ only `serve` listens on the shared path. The `claude` adapter speaks protocol 2,
 and fails the member. A working member with no events for `defaults.stall_minutes` (default
 10) is reported to its manager as `stalled`. `defaults.max_cost_usd` (default none) caps what a
 run may spend, summed from the costs harnesses report; past it the whole run is paused, and
-`resume` needs a higher cap. Its reports are
+`resume` needs a higher cap. A member that has finished its work and does not exit within
+10 seconds of being told to stop is ended and fails. Its reports are
 started with the `delegate` tool and run in parallel, each in its own workspace. A v1 member
 keeps the `{"status":"delegating"}` loop described under [Delegation](#delegation).
 
@@ -44,6 +45,10 @@ workspaces, within the caps, with a note that their last turn was cut off; a man
 given its reports' states. A one-shot (v1) member cannot be resumed and fails. A run whose
 project config can no longer be read fails with the reason. `serve` does not watch for
 in-process supervisors that die while it runs; it adopts their runs at its next start.
+A pause, cancel, or timeout that is still in progress when a supervisor stops is recorded as
+it would have ended, so the restart does not relaunch that member. A claude member's adapter
+that loses its supervisor interrupts claude's turn and kills claude within 4 seconds, so a
+restarted supervisor never resumes a session that the old claude is still writing.
 A run recorded before runs had an owner (written by an older agent-team) is failed, not
 relaunched.
 
@@ -66,10 +71,15 @@ agent-team attach <run> <member>
 agent-team handback <run> <member>
 ```
 
-`pause` lets the current turn finish; `--now` interrupts it, so a command it started may have
-partly run. `resume` starts the member again from its harness session in the same workspace
+`pause` lets the current turn finish, and that turn still counts toward the timeout: one that
+runs past it fails the member as timed out. `--now` interrupts the turn, so a command it
+started may have partly run. A member that has finished its work and is stopping cannot be
+paused, but `cancel` still ends it. `resume` starts the member again from its harness session in the same workspace
 and delivers anything sent to it while paused. `cancel` keeps the workspace. `--subtree`
-applies the verb to the member and every report under it. Each verb is signed with your OS
+applies the verb to the member and every report under it. Cancelling a manager also cancels
+its unfinished reports, and a root member that finishes, fails, or is cancelled cancels every
+unfinished member of its run, queued ones included. Pausing a manager alone leaves its reports
+working. A one-shot (v1) report cannot be cancelled and runs until it finishes. Each verb is signed with your OS
 user name, which is what the member and its manager are told.
 
 `attach` hands a claude member to you: its turn is interrupted, and once its process has
@@ -79,7 +89,9 @@ exit claude, however you exit, the member resumes headless and is told that you 
 session; your turns are in its history. While you have it, `pause` refuses it and a
 supervisor restart leaves it alone. If `attach` dies before it can hand back (a closed
 terminal, a stopped supervisor), the member stays taken over: run `attach` again to reopen the
-same session, or `agent-team handback <run> <member>` to resume it headless. Taking over a codex member comes in a later plan.
+same session, or `agent-team handback <run> <member>` to resume it headless. If the run is
+at its `max_cost_usd` cap when you hand back (your turns cost too), the member stays paused
+and `attach` or `handback` says so; resume it with `--max-cost-usd`. Taking over a codex member comes in a later plan.
 
 ## Resolving the agent
 
@@ -245,8 +257,9 @@ Config errors and dispatcher refusals come back in the same shape,
 | `delegated` | dispatcher | Full results of every report that ran, in order. |
 
 A v1 adapter is killed, with its whole process group, when `--timeout` expires (900 seconds by
-default), and the result is `status: "timeout"`. A v2 session is not killed yet; see
-[Live runs](#live-runs).
+default), and the result is `status: "timeout"`. A v2 member's timeout counts only its
+working time; past it the supervisor interrupts the session, kills the adapter if it has not
+exited 5 seconds later, and fails the member. See [Live runs](#live-runs).
 
 ## The run log
 
