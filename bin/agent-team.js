@@ -89,7 +89,7 @@ if (positionals[0] === 'serve') {
   const store = openStore(defaultStorePath());
   const sup = new Supervisor({
     store, adapterDir: join(ROOT, 'adapters'), skillsDir: join(ROOT, 'skills'),
-    socketPath: defaultSocketPath(), maxRunning
+    socketPath: defaultSocketPath(), maxRunning, shared: true
   });
   try {
     await sup.start();

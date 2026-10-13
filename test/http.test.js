@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../src/store.js';
@@ -48,6 +48,24 @@ test('runs and a run\'s members come back without member tokens', async () => {
     assert.ok(!('token' in m) && !('resume' in m));
     assert.ok(!detail.text.includes(v.store.member(memberId).token));
   } finally { await v.close(); }
+});
+
+test('a member entered into another project carries project and alias, and that project\'s deny_paths', async () => {
+  const { store, runId, lead } = seeded();
+  const { root } = project({ solo: LIVE() }, { by_member: {} });
+  const cfg = join(root, '.claude', 'agent-team.json');
+  writeFileSync(cfg, JSON.stringify({ ...JSON.parse(readFileSync(cfg, 'utf8')), deny_paths: ['secret/**'] }));
+  const m = store.addMember({ runId, parentId: lead.id, name: 'b-lead', task: 'x', depth: 1, project: root, alias: 'loupe', scopeBudget: 3 });
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const detail = await get(web.url, `/api/runs/${runId}`);
+    const got = detail.json.members.find((x) => x.id === m.id);
+    assert.equal(got.project, root);
+    assert.equal(got.alias, 'loupe');
+    assert.ok(!('scope_budget' in got));
+    assert.equal(detail.json.members.find((x) => x.id === lead.id).project, null);
+    assert.deepEqual(detail.json.deny_paths_by_project, { [root]: ['secret/**'] });
+  } finally { await web.close(); }
 });
 
 test('the timeline returns a tail with a cursor, pages after it, and clips huge bodies', async () => {

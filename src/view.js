@@ -3,7 +3,7 @@ import { loadConfig } from './config.js';
 // What leaves the server about the store. Member rows go out through an allowlist: a row's
 // `token` is the member's MCP credential, and new columns stay private until listed here.
 const MEMBER_FIELDS = ['id', 'run_id', 'parent_id', 'name', 'task', 'depth', 'state', 'agent', 'model',
-                       'workspace', 'cost_usd', 'tokens', 'created_at', 'updated_at'];
+                       'workspace', 'cost_usd', 'tokens', 'project', 'alias', 'created_at', 'updated_at'];
 
 export const READ_ONLY_NOTE = 'started without `agent-team serve`, so this page can watch it but not steer it. ' +
   'Run the team while `agent-team serve` is up to steer it from here.';
@@ -63,7 +63,12 @@ export function runDetail(store, runId, ownSocket) {
   if (!state) return null;
   let denyPaths = null;
   try { denyPaths = loadConfig(state.run.project).deny_paths; } catch { /* moved or broken */ }
-  return { ...state, deny_paths: denyPaths };
+  const byProject = {};
+  for (const m of state.members) {
+    if (m.project == null || Object.hasOwn(byProject, m.project)) continue;
+    try { byProject[m.project] = loadConfig(m.project).deny_paths; } catch { byProject[m.project] = null; }
+  }
+  return { ...state, deny_paths: denyPaths, deny_paths_by_project: byProject };
 }
 
 // The "Needs you" section: open ask_human questions, working members gone quiet, and runs the
