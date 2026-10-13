@@ -42,16 +42,24 @@ export class Supervisor {
   #pending = [];              // memberIds waiting for a slot
   #runs = new Map();          // runId -> { projectRoot, config, budget }
   #runWaiters = new Map();    // runId -> [resolve]
+  #closing = false;
 
-  constructor({ store, adapterDir, skillsDir = null, socketPath, env = {}, maxRunning = 6, timeoutMs = DEFAULT_TIMEOUT_MS }) {
-    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs });
+  constructor({ store, adapterDir, skillsDir = null, socketPath, env = {}, maxRunning = 6,
+                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000 }) {
+    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs });
   }
 
   async start() {
     this.server = await serveRpc(this.socketPath, (req) => this.#handle(req));
   }
 
+  // Ends every live adapter and leaves the members' states as they are, so the next start
+  // can recover them. Blocked tool calls are settled first, or their RPC connections hang.
   async close() {
+    this.#closing = true;
+    const live = [...this.#live.values()];
+    for (const rt of live) this.#settle(rt, { error: 'the agent-team supervisor is shutting down' });
+    await Promise.all(live.map((rt) => rt.session?.end(this.graceMs)));
     await this.server?.close();
   }
 
@@ -198,6 +206,11 @@ export class Supervisor {
   #onExit(id, code, stderr) {
     const rt = this.#live.get(id);
     if (!rt) return;
+    if (this.#closing) {
+      this.#live.delete(id);
+      for (const mid of rt.offered) this.store.requeue(mid);
+      return;
+    }
     this.#finish(id, rt.result ?? {
       status: 'failed',
       summary: `adapter exited with code ${code} before a result: ${stderr.trim().slice(-1000)}`
@@ -206,19 +219,11 @@ export class Supervisor {
 
   #finish(id, result) {
     const rt = this.#live.get(id);
-    if (!rt) return;
+    // A v1 member finishing after close() has nothing to write to: the store may be closed.
+    if (!rt || this.#closing) return;
     this.#live.delete(id);
     for (const mid of rt.offered) this.store.requeue(mid);
-    // A blocked call must settle, or its RPC connection hangs.
-    if (rt.waiter) {
-      clearTimeout(rt.waiter.timer);
-      rt.waiter.resolve({ error: 'member finished' });
-    }
-    if (rt.question) {
-      clearTimeout(rt.question.timer);
-      this.store.closeQuestion(rt.question.id);
-      rt.question.resolve({ error: 'member finished' });
-    }
+    this.#settle(rt, { error: 'member finished' });
     const state = result.status === 'ok' ? 'done' : 'failed';
     this.store.setState(id, state);
     this.store.setResult(id, result);
@@ -274,6 +279,21 @@ export class Supervisor {
     const msgs = this.store.claimForWait(id, reportIds);
     for (const m of msgs) { rt.offered.delete(m.id); rt.staleOffers.delete(m.id); }
     return msgs;
+  }
+
+  // Ends a blocked wait_for or ask_human with `value`, leaving the member's state alone.
+  #settle(rt, value) {
+    if (rt.waiter) {
+      clearTimeout(rt.waiter.timer);
+      rt.waiter.resolve(value);
+      rt.waiter = null;
+    }
+    if (rt.question) {
+      clearTimeout(rt.question.timer);
+      this.store.closeQuestion(rt.question.id);
+      rt.question.resolve(value);
+      rt.question = null;
+    }
   }
 
   #resolveWaiter(id, value) {

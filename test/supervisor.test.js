@@ -80,3 +80,33 @@ test('a message to a member that is stopping is refused and nothing is left queu
     assert.equal((await sup.waitRun(runId)).status, 'ok');
   } finally { await sup.close(); }
 });
+
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+test('close() ends live adapters and leaves their members for recovery', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ say: 'working' }, { sleep_ms: 30_000 }] } }
+  });
+  const { sup, store } = await supervise(script, { graceMs: 200 });
+  const { memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+  while (!store.events(memberId).some((e) => e.kind === 'text')) await new Promise((r) => setTimeout(r, 20));
+  const pid = Number(store.member(memberId).harness_id.split('-').at(-1));
+  const started = Date.now();
+  await sup.close();
+  assert.ok(Date.now() - started < 3000, 'close() waited on the adapter');
+  assert.equal(alive(pid), false, 'the adapter process outlived close()');
+  assert.equal(store.member(memberId).state, 'running');
+  assert.ok(!store.events(memberId).some((e) => e.kind === 'finished'));
+});
+
+test('close() settles a blocked wait_for instead of leaving its connection open', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ tool: 'wait_for', args: {} }] } }
+  });
+  const { sup, store } = await supervise(script, { graceMs: 200 });
+  const { memberId } = sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+  while (store.member(memberId).state !== 'waiting') await new Promise((r) => setTimeout(r, 20));
+  await sup.close();
+  const results = store.events(memberId).filter((e) => e.kind === 'tool_result');
+  assert.deepEqual(results.map((e) => e.body.result), [{ error: 'the agent-team supervisor is shutting down' }]);
+});

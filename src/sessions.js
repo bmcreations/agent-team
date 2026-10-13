@@ -19,11 +19,22 @@ export class MemberSession {
       if (m) onLine(m);
     });
     // 'close' rather than 'exit', so every stdout line has been read before onExit runs.
-    this.child.on('close', (code) => onExit(code, this.stderr));
+    this.exited = new Promise((resolve) => {
+      this.child.on('close', (code) => { onExit(code, this.stderr); resolve(code); });
+    });
     this.child.on('error', (err) => { this.stderr += `\n${err.message}`; });
   }
 
   send(message) {
     if (this.child.stdin.writable) this.child.stdin.write(encode(message));
+  }
+
+  // Asks the adapter to end its turn and exit, then escalates: SIGTERM after graceMs, SIGKILL
+  // after twice that. Resolves with the exit code once the process has closed.
+  end(graceMs = 5000) {
+    this.send({ type: 'interrupt' });
+    const term = setTimeout(() => this.child.kill('SIGTERM'), graceMs);
+    const kill = setTimeout(() => this.child.kill('SIGKILL'), graceMs * 2);
+    return this.exited.finally(() => { clearTimeout(term); clearTimeout(kill); });
   }
 }
