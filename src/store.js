@@ -57,7 +57,26 @@ const MIGRATIONS = [
   // the name its manager delegated to, and the entered team's own delegation counter.
   `ALTER TABLE members ADD COLUMN project TEXT;
    ALTER TABLE members ADD COLUMN alias TEXT;
-   ALTER TABLE members ADD COLUMN scope_budget INTEGER;`
+   ALTER TABLE members ADD COLUMN scope_budget INTEGER;`,
+  // Peer threads. A thread has an owner on each side: from_member asked, owner_member (the
+  // receiving lead) answers. run_id is the run that works a task thread; runs.thread_id
+  // points back. chain is the JSON list of team keys the request passed through.
+  `CREATE TABLE threads (
+     id INTEGER PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL,
+     from_project TEXT NOT NULL, from_run INTEGER NOT NULL REFERENCES runs(id),
+     from_member INTEGER NOT NULL REFERENCES members(id),
+     to_project TEXT NOT NULL, to_member TEXT NOT NULL, owner_member INTEGER REFERENCES members(id),
+     run_id INTEGER REFERENCES runs(id), parent_thread INTEGER REFERENCES threads(id),
+     chain TEXT NOT NULL, task TEXT, result TEXT,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+   CREATE INDEX threads_to ON threads(to_project, state);
+   CREATE INDEX threads_from ON threads(from_member, state);
+   CREATE TABLE thread_posts (
+     id INTEGER PRIMARY KEY, thread_id INTEGER NOT NULL REFERENCES threads(id),
+     side TEXT NOT NULL, author TEXT NOT NULL, text TEXT NOT NULL, state TEXT, at INTEGER NOT NULL);
+   CREATE INDEX thread_posts_thread ON thread_posts(thread_id, id);
+   ALTER TABLE runs ADD COLUMN thread_id INTEGER;
+   ALTER TABLE messages ADD COLUMN thread_id INTEGER;`
 ];
 
 function migrate(db) {
@@ -91,6 +110,7 @@ export function openStore(path) {
   const q = (sql) => db.prepare(sql);
   const memberRow = (row) => row && { ...row, result: parse(row.result) };
   const eventRow = (row) => row && { ...row, body: parse(row.body) };
+  const threadRow = (row) => row && { ...row, chain: parse(row.chain), result: parse(row.result) };
   const questionRow = (row) => row && { ...row, options: parse(row.options) };
   const setMessageState = (id, from, to) =>
     q('UPDATE messages SET state = ? WHERE id = ? AND state = ?').run(to, id, from);
@@ -100,9 +120,9 @@ export function openStore(path) {
   return {
     close: () => db.close(),
 
-    createRun: ({ project, task, timeoutMs = null, budget = null, maxCostUsd = null, owner = null }) => Number(
-      q("INSERT INTO runs (project, task, status, created_at, timeout_ms, budget, max_cost_usd, owner) VALUES (?, ?, 'running', ?, ?, ?, ?, ?)")
-        .run(project, task, now(), timeoutMs, budget, maxCostUsd, owner).lastInsertRowid),
+    createRun: ({ project, task, timeoutMs = null, budget = null, maxCostUsd = null, owner = null, threadId = null }) => Number(
+      q("INSERT INTO runs (project, task, status, created_at, timeout_ms, budget, max_cost_usd, owner, thread_id) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)")
+        .run(project, task, now(), timeoutMs, budget, maxCostUsd, owner, threadId).lastInsertRowid),
     setRunOwner: (id, owner) => q('UPDATE runs SET owner = ? WHERE id = ?').run(owner, id),
     // Atomic adoption: true only for the caller whose update changed the owner.
     claimRun: (id, from, to) => q('UPDATE runs SET owner = ? WHERE id = ? AND owner IS ?').run(to, id, from).changes > 0,
@@ -154,10 +174,10 @@ export function openStore(path) {
     events: (memberId) => q('SELECT * FROM events WHERE member_id = ? ORDER BY id').all(memberId)
       .map((e) => ({ ...e, body: parse(e.body) })),
 
-    enqueue: ({ to, fromKind, fromName, reportId = null, text }) => Number(q(
-      "INSERT INTO messages (to_member, from_kind, from_name, report_id, text, state, at) " +
-      "VALUES (?, ?, ?, ?, ?, 'queued', ?)"
-    ).run(to, fromKind, fromName, reportId, text, now()).lastInsertRowid),
+    enqueue: ({ to, fromKind, fromName, reportId = null, text, threadId = null }) => Number(q(
+      "INSERT INTO messages (to_member, from_kind, from_name, report_id, text, state, at, thread_id) " +
+      "VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)"
+    ).run(to, fromKind, fromName, reportId, text, now(), threadId).lastInsertRowid),
     // The wait_for path: the tool result itself is the delivery, so these go straight to
     // delivered. Messages from reports not in reportIds stay queued for a later call.
     takeQueued(memberId, reportIds = null) {
@@ -194,6 +214,52 @@ export function openStore(path) {
     requeueOffered: (memberId) =>
       q("UPDATE messages SET state = 'queued' WHERE to_member = ? AND state = 'offered'").run(memberId),
     message: (id) => q('SELECT * FROM messages WHERE id = ?').get(id),
+
+    addThread({ kind, fromProject, fromRun, fromMember, toProject, toMember, parentThread = null, chain, text, task = null }) {
+      const author = q('SELECT name FROM members WHERE id = ?').get(fromMember)?.name ?? String(fromMember);
+      const t = now();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const id = Number(q(
+          "INSERT INTO threads (kind, state, from_project, from_run, from_member, to_project, to_member, " +
+          "parent_thread, chain, task, created_at, updated_at) VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(kind, fromProject, fromRun, fromMember, toProject, toMember, parentThread,
+              JSON.stringify(chain), task, t, t).lastInsertRowid);
+        q("INSERT INTO thread_posts (thread_id, side, author, text, at) VALUES (?, 'requester', ?, ?, ?)")
+          .run(id, author, text, t);
+        db.exec('COMMIT');
+        return id;
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+    },
+    thread: (id) => threadRow(q('SELECT * FROM threads WHERE id = ?').get(id)),
+    threads({ project = null, state = null, limit = 200 } = {}) {
+      const where = [], args = [];
+      if (project != null) { where.push('(from_project = ? OR to_project = ?)'); args.push(project, project); }
+      if (state != null) { where.push('state = ?'); args.push(state); }
+      return q(`SELECT * FROM threads ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ?`)
+        .all(...args, limit).map(threadRow);
+    },
+    // Conditional on the current state, so two racing moves cannot both win.
+    moveThread: (id, from, to, { result = null } = {}) =>
+      q('UPDATE threads SET state = ?, result = COALESCE(?, result), updated_at = ? WHERE id = ? AND state = ?')
+        .run(to, result == null ? null : JSON.stringify(result), now(), id, from).changes > 0,
+    setThreadOwner: (id, memberId) =>
+      q('UPDATE threads SET owner_member = ?, updated_at = ? WHERE id = ?').run(memberId, now(), id),
+    setThreadRun: (id, runId) =>
+      q('UPDATE threads SET run_id = ?, updated_at = ? WHERE id = ?').run(runId, now(), id),
+    addThreadPost: ({ threadId, side, author, text, state = null }) => Number(
+      q('INSERT INTO thread_posts (thread_id, side, author, text, state, at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(threadId, side, author, text, state, now()).lastInsertRowid),
+    threadPosts: (threadId) => q('SELECT * FROM thread_posts WHERE thread_id = ? ORDER BY id').all(threadId),
+    openThreadsFrom: (memberId) =>
+      q("SELECT * FROM threads WHERE from_member = ? AND state IN ('open', 'accepted') ORDER BY id")
+        .all(memberId).map(threadRow),
+    unownedThreadsTo: (project, member) =>
+      q("SELECT * FROM threads WHERE state = 'open' AND owner_member IS NULL AND to_project = ? AND to_member = ? ORDER BY id")
+        .all(project, member).map(threadRow),
+    threadsInState: (states) => q(
+      `SELECT * FROM threads WHERE state IN (${states.map(() => '?').join(',') || "''"}) ORDER BY id`)
+      .all(...states).map(threadRow),
 
     addQuestion: ({ memberId, question, options = null }) => Number(
       q('INSERT INTO questions (member_id, question, options, at) VALUES (?, ?, ?, ?)')
