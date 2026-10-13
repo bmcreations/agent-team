@@ -178,9 +178,12 @@ const ADMIN = {
     ...memberArgs(p), subtree: values.subtree, by: whoAmI(), note: values.note ?? null,
     max_cost_usd: usd(values['max-cost-usd'])
   }],
-  questions: ([run]) => ['questions', { run_id: run == null ? null : Number(run) }],
+  questions: ([run]) => {
+    if (run != null && !(Number.isInteger(Number(run)) && Number(run) > 0)) throw new Error('usage: agent-team questions [<run>]');
+    return ['questions', { run_id: run == null ? null : Number(run) }];
+  },
   answer: ([id, ...text]) => {
-    if (!Number.isInteger(Number(id)) || !text.length) throw new Error('usage: agent-team answer <question-id> <answer>');
+    if (!(id?.trim() && Number.isInteger(Number(id)) && Number(id) > 0) || !text.length) throw new Error('usage: agent-team answer <question-id> <answer>');
     return ['answer', { question_id: Number(id), answer: text.join(' '), by: whoAmI() }];
   }
 };

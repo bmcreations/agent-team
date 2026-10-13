@@ -100,4 +100,6 @@ test('bad steering arguments fail before reaching the supervisor', async () => {
   assert.match((await cli(['resume', '1', 'lead', '--max-cost-usd', 'lots'], sock)).stderr,
     /^agent-team: --max-cost-usd must be a positive number of dollars, got "lots"/);
   assert.match((await cli(['answer', '7'], sock)).stderr, /^agent-team: usage: agent-team answer <question-id> <answer>/);
+  assert.match((await cli(['answer', '0', 'yes'], sock)).stderr, /^agent-team: usage: agent-team answer <question-id> <answer>/);
+  assert.match((await cli(['questions', 'abc'], sock)).stderr, /^agent-team: usage: agent-team questions \[<run>\]/);
 });
