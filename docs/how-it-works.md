@@ -45,6 +45,15 @@ shows the `agent-team attach <run> <member>` command to copy. A run started by a
 read-only, and `send` and `answer` refuse it too, because only the supervisor running a member
 can deliver to it.
 
+The page's sidebar lists recent runs by project, with each running member's harness and state.
+"Needs you" holds open `ask_human` questions, members reported stalled, and runs paused by the
+cost cap, each answerable in place. Activity is the default view: each member's task with its
+tool calls nested under it, identical consecutive calls collapsed into a count. A run's page
+shows its org tree beside the conversation between members and humans; a member's panel shows
+its transcript, workspace, `read_only` and `deny_paths`, a message box, and the controls. The
+page holds the newest 2,000 events of what it shows; long tool output is cut to 4,000
+characters per field, and clicking a call loads it whole.
+
 | What | Where | Override |
 |---|---|---|
 | Store | `~/.cache/agent-team/supervisor/supervisor.db` | `AGENT_TEAM_SUPERVISOR_DB` |

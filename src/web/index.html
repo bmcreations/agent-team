@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-team</title>
+<link rel="stylesheet" href="/style.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<header class="top">
+  <a href="#/" class="brand">agent-team</a>
+  <span id="conn" class="muted">connecting…</span>
+  <span class="muted local">this machine only · no sign-in</span>
+</header>
+<div class="layout">
+  <nav id="side" aria-label="Projects">
+    <input id="search" type="search" placeholder="Search members, projects, tasks" aria-label="Search">
+    <div id="projects"></div>
+  </nav>
+  <main>
+    <section id="needs" aria-label="Needs you" hidden></section>
+    <section id="view"></section>
+  </main>
+</div>
+<p id="flash" role="status"></p>
+</body>
+</html>
