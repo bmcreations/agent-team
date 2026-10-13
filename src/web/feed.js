@@ -64,6 +64,44 @@ export function todayCount(events, now = Date.now()) {
   return events.filter((e) => e.kind === 'tool_call' && e.at >= start.getTime()).length;
 }
 
+// Tool calls in each hour of today, for the chart on the Activity page.
+export function hourly(events, now = Date.now()) {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  const bins = new Array(24).fill(0);
+  for (const e of events) {
+    if (e.kind === 'tool_call' && e.at >= start.getTime() && e.at <= now) bins[new Date(e.at).getHours()]++;
+  }
+  return bins;
+}
+
+// "now", "4m", "2h", "3d": how long ago, as the page's rows show it.
+export function ago(at, now = Date.now()) {
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  if (s < 45) return 'now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+
+const list = (names) => (names.length <= 3 ? names : [...names.slice(0, 2), `${names.length - 2} others`])
+  .reduce((out, n, i, all) => out + (i === 0 ? '' : i === all.length - 1 ? ' and ' : ', ') + n, '');
+
+// One sentence for the top of the Activity page: who is working, who is paused, who needs you.
+export function summary(live = [], needs = { questions: [] }) {
+  const asking = [...new Set(needs.questions.map((q) => q.member))];
+  const working = [...new Set(live.filter((m) => (m.state === 'running' || m.state === 'waiting') && !asking.includes(m.name)).map((m) => m.name))];
+  const paused = live.filter((m) => m.state === 'paused').length;
+  const parts = [];
+  if (working.length) parts.push(`${list(working)} ${working.length === 1 ? 'is' : 'are'} working`);
+  if (paused) parts.push(`${paused} ${paused === 1 ? 'teammate is' : 'teammates are'} paused`);
+  if (asking.length) parts.push(`${list(asking)} ${asking.length === 1 ? 'needs' : 'need'} you`);
+  if (!parts.length) return 'All quiet. No team is running right now.';
+  const s = list(parts);
+  return `${s[0].toUpperCase()}${s.slice(1)}.`;
+}
+
 // What the page holds is bounded: the newest `cap` events and messages.
 export function mergeTimeline(model, batch, cap = 2000) {
   const merge = (have, add = []) => {
@@ -83,9 +121,11 @@ export function conversation({ events, messages }) {
   const rows = [
     ...events.filter((e) => TEAM_KINDS.has(e.kind)).map((e) => {
       const said = describe(e);
-      return { type: 'event', at: e.at, key: `e${e.id}`, who: e.member, text: said ? `${e.kind}: ${said}` : e.kind };
+      return { type: 'event', at: e.at, key: `e${e.id}`, who: e.member, text: said ? `${e.kind}: ${said}` : e.kind,
+               kind: e.kind, said };
     }),
-    ...messages.map((m) => ({ type: 'message', at: m.at, key: `m${m.id}`, who: `${m.from_name} (${m.from_kind}) → ${m.to_name}`, text: m.text }))
+    ...messages.map((m) => ({ type: 'message', at: m.at, key: `m${m.id}`, who: `${m.from_name} (${m.from_kind}) → ${m.to_name}`, text: m.text,
+                              from: m.from_name, from_kind: m.from_kind, to: m.to_name }))
   ];
   return rows.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
 }

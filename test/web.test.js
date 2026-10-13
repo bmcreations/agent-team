@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, countLabel, mergeTimeline, conversation, matches } from '../src/web/feed.js';
+import { describe, memberTree, activity, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary } from '../src/web/feed.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
 const XSS = '<img src=x onerror="alert(1)"></script><script>alert(2)</script>';
@@ -14,7 +14,8 @@ test('the page and its assets are served with their types and a CSP with no inli
   const web = await startHttp({ store, port: 0 });
   try {
     for (const [path, type] of [['/', /^text\/html/], ['/app.js', /^text\/javascript/],
-                                ['/feed.js', /^text\/javascript/], ['/style.css', /^text\/css/]]) {
+                                ['/feed.js', /^text\/javascript/], ['/style.css', /^text\/css/],
+                                ['/icon.svg', /^image\/svg\+xml/]]) {
       const r = await get(web.url, path);
       assert.equal(r.status, 200, path);
       assert.match(r.headers['content-type'], type, path);
@@ -118,4 +119,33 @@ test('every script in src/web parses as a module', async () => {
   for (const f of readdirSync(new URL('../src/web/', import.meta.url)).filter((n) => n.endsWith('.js'))) {
     execFileSync(process.execPath, ['--check', new URL(`../src/web/${f}`, import.meta.url).pathname], { stdio: 'pipe' });
   }
+});
+
+test('hourly bins today\'s tool calls by hour and ignores other days and kinds', () => {
+  const now = new Date(2026, 9, 13, 15, 30).getTime();
+  const at = (h) => new Date(2026, 9, 13, h, 5).getTime();
+  const bins = hourly([{ kind: 'tool_call', at: at(9) }, { kind: 'tool_call', at: at(9) }, { kind: 'text', at: at(10) },
+                       { kind: 'tool_call', at: at(14) }, { kind: 'tool_call', at: now - 86_400_000 }], now);
+  assert.equal(bins.length, 24);
+  assert.equal(bins[9], 2);
+  assert.equal(bins[10], 0);
+  assert.equal(bins[14], 1);
+  assert.equal(bins.reduce((a, b) => a + b), 3);
+});
+
+test('ago rounds to now, minutes, hours and days', () => {
+  const now = 10_000_000_000;
+  assert.equal(ago(now - 10_000, now), 'now');
+  assert.equal(ago(now - 4 * 60_000, now), '4m');
+  assert.equal(ago(now - 2 * 3_600_000, now), '2h');
+  assert.equal(ago(now - 3 * 86_400_000, now), '3d');
+  assert.equal(ago(now + 60_000, now), 'now');
+});
+
+test('summary names who is working, paused and asking in one sentence', () => {
+  assert.equal(summary([], { questions: [] }), 'All quiet. No team is running right now.');
+  const live = [{ name: 'lead', state: 'waiting' }, { name: 'engineer', state: 'running' }, { name: 'designer', state: 'paused' }];
+  assert.equal(summary(live, { questions: [{ member: 'lead' }] }), 'Engineer is working, 1 teammate is paused and lead needs you.');
+  const many = ['a', 'b', 'c', 'd'].map((name) => ({ name, state: 'running' }));
+  assert.equal(summary(many, { questions: [] }), 'A, b and 2 others are working.');
 });
