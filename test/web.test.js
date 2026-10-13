@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount, threadTouched, canPostToThread, threadRunIds } from '../src/web/feed.js';
+import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, openThreadCount, threadTouched, canPostToThread, threadRunIds } from '../src/web/feed.js';
 import { publicMessage } from '../src/view.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
@@ -243,4 +243,15 @@ test('a thread result status is cut to 100 characters', async () => {
     assert.equal(r.json.thread.result.status.length, 101);
     assert.equal(r.json.thread.result.summary, 'ok');
   } finally { await web.close(); store.close(); }
+});
+
+test('task titles: the first line of a brief, without heading marks, and whether there is more', () => {
+  const brief = '\n# Brief: flexible New device create\n\nApproved by Brandon.\n## Goal\nMake it create either.';
+  assert.equal(taskTitle(brief), 'Brief: flexible New device create');
+  assert.equal(hasMoreThanTitle(brief), true);
+  assert.equal(taskTitle('fix the rotate crash'), 'fix the rotate crash');
+  assert.equal(hasMoreThanTitle('fix the rotate crash'), false);
+  assert.equal(taskTitle('x'.repeat(200)).length, 121);
+  assert.equal(hasMoreThanTitle('x'.repeat(200)), false);
+  assert.equal(taskTitle(null), '');
 });

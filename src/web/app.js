@@ -1,4 +1,4 @@
-import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, openThreadCount, threadTouched, canPostToThread, TERMINAL } from './feed.js';
+import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, openThreadCount, threadTouched, canPostToThread, TERMINAL } from './feed.js';
 
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
@@ -233,7 +233,7 @@ function drawSidebar() {
     h('h2', { title: project }, shortPath(project)),
     h('ul', {}, items.map(({ run, members }) => h('li', {},
       h('a', { href: `#/run/${run.id}`, class: `run-link${run.id === S.route?.run ? ' current' : ''}`, title: run.task },
-        dot(run.status), h('span', { class: 'label' }, run.task || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
+        dot(run.status), h('span', { class: 'label' }, taskTitle(run.task) || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
       members.length ? h('ul', { class: 'members' }, members.map((m) => h('li', {},
         h('a', { href: memberHref(m.run_id, m.id), class: `member-link${m.id === S.route?.member ? ' current' : ''}` },
           avatar(m.name, { agent: m.agent, size: 'sm' }), h('span', { class: 'label' }, m.name), dot(m.state))))) : null)))));
@@ -322,7 +322,19 @@ function threadPill(t) {
   const [cls, label] = THREAD_PILL[t.state] ?? ['', stateLabel(t.state)];
   return pill(t.state === 'done' && t.result?.status && t.result.status !== 'ok' ? 'bad' : cls, label);
 }
-const threadTitle = (t) => snippet(t.task || (t.kind === 'question' ? 'A question' : 'A request'), 120);
+// A long task's full text, folded under its headline. The element is kept per `key` on `holder`
+// so a live re-render does not close it while someone reads.
+function fullText(holder, key, text, label) {
+  if (!hasMoreThanTitle(text)) return null;
+  if (holder.full?.key !== key) {
+    const body = h('div', { class: 'full-text' });
+    holder.full = { key, body, el: h('details', { class: 'more-facts full' }, h('summary', {}, icon('chevron'), label), body) };
+  }
+  if (holder.full.body.textContent !== text) holder.full.body.textContent = text;
+  return holder.full.el;
+}
+
+const threadTitle = (t) => taskTitle(t.task || (t.kind === 'question' ? 'A question' : 'A request'), 120);
 const runLink = (id, label) => (id == null ? null : h('a', { href: `#/run/${id}` }, label));
 const sides = (t) => `${t.from_member?.name ?? 'someone'} → ${t.owner?.name ?? 'waiting for a lead'}`;
 function threadLinks(t) {
@@ -415,7 +427,7 @@ function runRow(run) {
   return h('li', {}, h('a', { class: 'run-card', href: `#/run/${run.id}` },
     mates.length ? h('span', { class: 'stack' }, mates.slice(0, 4).map((m) => avatar(m.name, { agent: m.agent, size: 'sm' })))
       : avatar(run.root ?? run.task, { size: 'sm' }),
-    h('span', { class: 'body' }, h('div', { class: 'title' }, run.task || `Run ${run.id}`),
+    h('span', { class: 'body' }, h('div', { class: 'title' }, taskTitle(run.task) || `Run ${run.id}`),
       h('div', { class: 'meta' }, present(shortPath(run.project), ` · #${run.id}`, money(run.cost_usd) ? ` · ${money(run.cost_usd)}` : null, ' · ', when(run.created_at)))),
     pill(run.status)));
 }
@@ -533,7 +545,8 @@ function drawRun() {
   S.panel.head.replaceChildren(...present(
     h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Activity'), icon('chevron'), h('span', { title: run.project }, shortPath(run.project)),
       icon('chevron'), h('span', {}, `Run #${run.id}`)),
-    h('h1', {}, run.task),
+    h('h1', {}, taskTitle(run.task) || `Run ${run.id}`),
+    fullText(S.panel, `run${run.id}`, run.task, 'Full brief'),
     h('div', { class: 'facts-row' }, present(pill(run.status), h('span', { class: 'pill quiet' }, `${members.length} ${members.length === 1 ? 'teammate' : 'teammates'}`),
       money(run.cost_usd) ? h('span', { class: 'pill quiet' }, money(run.cost_usd)) : null,
       tokens(run.tokens) ? h('span', { class: 'pill quiet' }, tokens(run.tokens)) : null,
@@ -551,7 +564,7 @@ function drawRun() {
           h('div', { class: 'name' }, m.name,
             m.project ? [' ', h('span', { class: 'pill quiet', title: m.project }, `team ${shortPath(m.project)}`)] : null,
             m.alias ? [' ', h('span', { class: 'muted' }, `as ${m.alias}`)] : null),
-          h('div', { class: 'task' }, m.task ?? '')),
+          h('div', { class: 'task' }, taskTitle(m.task))),
         pill(m.state)),
       m.children.length ? h('ul', {}, m.children.map((c) => node(c, project))) : null);
   };
@@ -586,13 +599,14 @@ function drawMember(run, m) {
     p.controls = memberControls(m);
     p.mhead = h('div', { class: 'mhead' });
     p.mtask = h('p', { class: 'mtask' });
+    p.mfull = h('div');
     p.result = h('div', { class: 'result' });
     p.facts = h('dl', { class: 'facts' });
     p.transcript = h('ol', { class: 'transcript' });
     p.task = h('div', { class: 'progress now' });
     p.member.replaceChildren(
       h('a', { class: 'back', href: `#/run/${run.id}` }, icon('back'), 'Team'),
-      p.mhead, p.mtask, p.result, p.controls.el,
+      p.mhead, p.mtask, p.mfull, p.result, p.controls.el,
       h('details', { class: 'more-facts' }, h('summary', {}, icon('chevron'), 'Details'), p.facts),
       ...extras(m), h('h3', { class: 'subhead' }, 'Transcript'), p.task, p.transcript);
   }
@@ -601,7 +615,8 @@ function drawMember(run, m) {
     h('div', { class: 'body' }, h('h2', {}, m.name),
       h('div', { class: 'tags' }, present(pill(m.state), hn ? h('span', { class: `pill ${hn.cls}` }, hn.label) : null,
         m.model ? h('span', { class: 'pill quiet' }, m.model) : null, m.read_only ? h('span', { class: 'pill quiet' }, 'read-only') : null))));
-  p.mtask.textContent = m.task ?? '';
+  p.mtask.textContent = taskTitle(m.task);
+  p.mfull.replaceChildren(...present(fullText(p, `m${m.id}`, m.task, 'Full task')));
   p.result.replaceChildren(...present(m.result
     ? h('div', { class: `banner ${m.result.status === 'ok' ? 'info' : ''}`.trim() }, icon(m.result.status === 'ok' ? 'spark' : 'x'),
       h('span', {}, `Finished${m.result.status === 'ok' ? '' : ` (${m.result.status})`}`, m.result.summary ? `: ${m.result.summary}` : ''))

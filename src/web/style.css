@@ -239,7 +239,7 @@ time { font-variant-numeric: tabular-nums; }
 .banner.info { background: var(--sunk); color: var(--muted); }
 .banner .icon { margin-top: 2px; }
 .run { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 440px); gap: 18px; align-items: start; }
-.run-main { display: grid; gap: 18px; min-width: 0; }
+.run-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; min-width: 0; }
 .run-side { position: sticky; top: 80px; min-width: 0; max-height: calc(100vh - 100px); overflow: auto; }
 .back { display: none; align-items: center; gap: 4px; font-size: 14px; color: var(--muted); margin-bottom: 12px; }
 .back .icon { width: 16px; height: 16px; }
@@ -296,6 +296,7 @@ li.task > .icon, .progress.now > .icon { width: 15px; height: 15px; }
 .mhead .body { flex: 1; min-width: 0; }
 .mhead h2 { font-size: 22px; letter-spacing: -.02em; }
 .mhead .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.full-text { margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; color: var(--muted); max-height: 50vh; overflow: auto; }
 .mtask { margin: 14px 0 0; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
 .result { margin-top: 12px; }
 .composer { margin-top: 16px; display: flex; align-items: flex-end; gap: 8px; padding: 6px 6px 6px 14px; border-radius: 22px;

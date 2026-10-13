@@ -168,6 +168,16 @@ export const snippet = (text, max = 120) => {
   return one.length > max ? `${one.slice(0, max)}…` : one;
 };
 
+// A task's headline: its first non-empty line without Markdown heading marks, cut to `max`.
+// A brief pasted as the task stays readable; the full text is shown on request.
+export const taskTitle = (text, max = 120) => {
+  const first = (text ?? '').split('\n').map((l) => l.replace(/^\s*#+\s*/, '').trim()).find(Boolean) ?? '';
+  return snippet(first, max);
+};
+
+// Whether a task has more to it than its headline.
+export const hasMoreThanTitle = (text) => oneLine(text ?? '') !== taskTitle(text, Infinity);
+
 // The sidebar badge: threads a team still has to answer or finish. `pairs` is the server's grouping.
 export const openThreadCount = (pairs) => pairs.reduce((n, g) => n + g.threads.filter((t) => t.state === 'open' || t.state === 'accepted').length, 0);
 
