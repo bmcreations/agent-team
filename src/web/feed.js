@@ -15,6 +15,7 @@ export function describe(e) {
     case 'tool_call': return `${b.name ?? 'tool'} ${clip(oneLine(json(b.args)))}`.trim();
     case 'tool_result': return `${b.name ?? 'tool'} → ${clip(oneLine(typeof b.text === 'string' ? b.text : json(b.result ?? b)))}`;
     case 'command': return clip(oneLine(b.command ?? json(b)));
+    case 'titled': return `named the run "${b.title ?? ''}"`;
     case 'delegated': return `delegated to ${b.to}`;
     case 'stalled': return `quiet for ${Math.round((b.quiet_s ?? 0) / 60)} min`;
     case 'cost_cap': return `cost cap: $${(b.cost_usd ?? 0).toFixed(2)} of $${(b.max_cost_usd ?? 0).toFixed(2)}`;
@@ -175,6 +176,42 @@ export const taskTitle = (text, max = 120) => {
   const first = (text ?? '').split('\n').map((l) => l.replace(/^\s*#+\s*/, '').trim()).find(Boolean) ?? '';
   return snippet(first, max);
 };
+
+const LABEL = /^(?:brief|objective|goal|task|summary|context)\s*[:\-\u2013\u2014]\s*/i;
+const DISCLAIMER = /^(?:exploration|research|investigation|analysis|design|planning|read-only)\b[^.!?]{0,60}?\b(?:only|no implementation|no code|no changes)\b[^.!?]{0,40}[.!?]\s+/i;
+
+const stripLabels = (s) => {
+  let out = s.trim();
+  for (let prev = null; prev !== out;) { prev = out; out = out.replace(LABEL, '').trim(); }
+  return out;
+};
+
+// A readable run name from its brief, for when nobody named the run: the first Markdown
+// heading, else the first sentence once any "Exploration only, ..." disclaimer and leading
+// "Goal:"-style label are gone. Cut at a word boundary to about `max` characters.
+export function deriveTitle(task, max = 50) {
+  const text = String(task ?? '');
+  let pick = '';
+  const heading = /^\s*#+\s*(.+)$/m.exec(text);
+  if (heading) pick = stripLabels(heading[1]);
+  if (!pick) {
+    let flat = stripLabels(oneLine(text.replace(/^\s*#+\s*/gm, '')));
+    flat = stripLabels(flat.replace(DISCLAIMER, ''));
+    const end = /[.!?](?:\s|$)/.exec(flat);
+    pick = end ? flat.slice(0, end.index) : flat;
+  }
+  pick = oneLine(pick);
+  if (!pick) return '';
+  if (pick.length > max) {
+    const cut = pick.slice(0, max + 1);
+    const space = cut.lastIndexOf(' ');
+    pick = `${(space > max / 2 ? cut.slice(0, space) : cut.slice(0, max)).replace(/[\s,;:(\-\u2013\u2014]+$/, '')}\u2026`;
+  }
+  return pick[0].toUpperCase() + pick.slice(1);
+}
+
+// What the page calls a run: the title it was given, else one derived from its brief.
+export const runTitle = (run) => run.title?.trim() || deriveTitle(run.task);
 
 // Whether a task has more to it than its headline.
 export const hasMoreThanTitle = (text) => oneLine(text ?? '') !== taskTitle(text, Infinity);

@@ -123,3 +123,24 @@ test('a relative project root is submitted to a running supervisor as an absolut
     assert.equal(store.run(1).project, root);
   } finally { await sup.close(); }
 });
+
+test('a client resubmitting the same task attaches to the active run; fresh starts another; the title is carried', async () => {
+  const { root, script } = project({ solo: LIVE() }, { by_member: { solo: { steps: [{ sleep_ms: 1200 }], result: { status: 'ok', summary: 'once' } } } });
+  const e = env(script);
+  const store = openStore(':memory:');
+  const sup = new Supervisor({ store, adapterDir, socketPath: e.AGENT_TEAM_SUPERVISOR_SOCK, env: { AGENT_TEAM_MOCK_SCRIPT: script } });
+  await sup.start();
+  try {
+    const seen = [];
+    const go = (extra) => runThroughSupervisor({ projectRoot: root, member: 'solo', task: 'go', adapterDir, env: e,
+      onSubmitted: (s) => seen.push(s), ...extra });
+    const first = go({ title: 'Named by hand' });
+    while (seen.length < 1) await new Promise((r) => setTimeout(r, 10));
+    const second = go({});
+    const third = go({ fresh: true });
+    await Promise.all([first, second, third]);
+    assert.deepEqual(seen.map((s) => [s.runId, s.attached, s.remote]), [[1, false, true], [1, true, true], [2, false, true]]);
+    assert.equal(store.run(1).title, 'Named by hand');
+    assert.equal(store.run(2).title, null);
+  } finally { await sup.close(); }
+});

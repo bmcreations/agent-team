@@ -83,7 +83,10 @@ const MIGRATIONS = [
    ALTER TABLE runs ADD COLUMN thread_id INTEGER;
    ALTER TABLE messages ADD COLUMN thread_id INTEGER;`,
   // threadsInState runs on every pump; this keeps it from reading the whole thread history.
-  `CREATE INDEX IF NOT EXISTS threads_state ON threads(state, id);`
+  `CREATE INDEX IF NOT EXISTS threads_state ON threads(state, id);`,
+  // A short name for the run. title_by is 'human' (--title; final) or 'agent' (set_title).
+  `ALTER TABLE runs ADD COLUMN title TEXT;
+   ALTER TABLE runs ADD COLUMN title_by TEXT;`
 ];
 
 function migrate(db) {
@@ -127,9 +130,12 @@ export function openStore(path) {
   return {
     close: () => db.close(),
 
-    createRun: ({ project, task, timeoutMs = null, budget = null, maxCostUsd = null, owner = null, threadId = null }) => Number(
-      q("INSERT INTO runs (project, task, status, created_at, timeout_ms, budget, max_cost_usd, owner, thread_id) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)")
-        .run(project, task, now(), timeoutMs, budget, maxCostUsd, owner, threadId).lastInsertRowid),
+    createRun: ({ project, task, timeoutMs = null, budget = null, maxCostUsd = null, owner = null, threadId = null, title = null }) => Number(
+      q("INSERT INTO runs (project, task, status, created_at, timeout_ms, budget, max_cost_usd, owner, thread_id, title, title_by) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(project, task, now(), timeoutMs, budget, maxCostUsd, owner, threadId, title, title == null ? null : 'human').lastInsertRowid),
+    setRunTitle: (id, title, by) => q('UPDATE runs SET title = ?, title_by = ? WHERE id = ?').run(title, by, id),
+    // A run still going whose root member, project and task are these: what a resubmit attaches to.
+    activeRunLike: ({ project, member, task }) => q("SELECT r.* FROM runs r JOIN members m ON m.id = r.root_member WHERE r.status = 'running' AND r.project = ? AND m.name = ? AND r.task = ? AND r.thread_id IS NULL ORDER BY r.id DESC LIMIT 1").get(project, member, task),
     setRunOwner: (id, owner) => q('UPDATE runs SET owner = ? WHERE id = ?').run(owner, id),
     // Atomic adoption: true only for the caller whose update changed the owner.
     claimRun: (id, from, to) => q('UPDATE runs SET owner = ? WHERE id = ? AND owner IS ?').run(to, id, from).changes > 0,

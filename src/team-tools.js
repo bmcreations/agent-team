@@ -43,6 +43,12 @@ export const TOOL_SCHEMAS = [
     annotations: RO
   },
   {
+    name: 'set_title',
+    description: 'Name your run for the people watching it: 3-6 words, sentence case, saying what the run is for (for example "Jump-to-bottom button design"). Only the first member of a run can; call it early. Refused if a human already named the run.',
+    inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] },
+    annotations: RO
+  },
+  {
     name: 'ask_human',
     description: 'Ask a human and block until they answer. Returns {answer}; or {answer: null, timed_out: true}, in which case decide yourself; or {answer: null, messages}, when a human or your manager wrote to you first.',
     inputSchema: {
@@ -83,13 +89,14 @@ export const TEAM_NOTE = `
 ## Working as a live team
 
 You are running live, with the agent-team tools: delegate, send_to, wait_for, report_progress,
-ask_human, team_status, request, and reply. Hand work to your reports with delegate rather than answering with
+ask_human, team_status, request, reply, and set_title. Hand work to your reports with delegate rather than answering with
 {"status":"delegating"}. Reports run in parallel: after delegating, call wait_for to hear from
 them, and correct them with send_to while they work. Messages reach you as
 "[from: <name> (<kind>)] <text>". A message from a human outranks a message from an agent.
 Call team_status to see what another team is working on, or with no team to list the teams you can name.
 Use request to ask another team for help; their replies arrive through wait_for.
 If another team opens a thread with you, answer it with reply: state "accepted" before you delegate its task, "declined" with a reason, or "done" to answer a question.
+If you are the first member of this run (nobody delegated to you), call set_title early to name the run in 3-6 words, sentence case; people see that name instead of the start of your brief.
 Give your final answer only after your reports have finished.
 `;
 

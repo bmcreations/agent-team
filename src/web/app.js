@@ -1,4 +1,4 @@
-import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, splitDiff, changeCounts, TERMINAL } from './feed.js';
+import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, runTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, splitDiff, changeCounts, TERMINAL } from './feed.js';
 
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
@@ -233,7 +233,7 @@ function drawSidebar() {
     h('h2', { title: project }, shortPath(project)),
     h('ul', {}, items.map(({ run, members }) => h('li', {},
       h('a', { href: `#/run/${run.id}`, class: `run-link${run.id === S.route?.run ? ' current' : ''}`, title: run.task },
-        dot(run.status), h('span', { class: 'label' }, taskTitle(run.task) || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
+        dot(run.status), h('span', { class: 'label' }, runTitle(run) || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
       members.length ? h('ul', { class: 'members' }, members.map((m) => h('li', {},
         h('a', { href: memberHref(m.run_id, m.id), class: `member-link${m.id === S.route?.member ? ' current' : ''}` },
           avatar(m.name, { agent: m.agent, size: 'sm' }), h('span', { class: 'label' }, m.name), dot(m.state))))) : null)))));
@@ -442,7 +442,7 @@ function runRow(run) {
   return h('li', {}, h('a', { class: 'run-card', href: `#/run/${run.id}` },
     mates.length ? h('span', { class: 'stack' }, mates.slice(0, 4).map((m) => avatar(m.name, { agent: m.agent, size: 'sm' })))
       : avatar(run.root ?? run.task, { size: 'sm' }),
-    h('span', { class: 'body' }, h('div', { class: 'title' }, taskTitle(run.task) || `Run ${run.id}`),
+    h('span', { class: 'body' }, h('div', { class: 'title' }, runTitle(run) || `Run ${run.id}`),
       h('div', { class: 'meta' }, present(shortPath(run.project), ` · #${run.id}`, money(run.cost_usd) ? ` · ${money(run.cost_usd)}` : null, ' · ', when(run.created_at)))),
     pill(run.status)));
 }
@@ -617,7 +617,7 @@ function drawRun() {
   S.panel.head.replaceChildren(...present(
     h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Activity'), icon('chevron'), h('span', { title: run.project }, shortPath(run.project)),
       icon('chevron'), h('span', {}, `Run #${run.id}`)),
-    h('h1', {}, taskTitle(run.task) || `Run ${run.id}`),
+    h('h1', {}, runTitle(run) || `Run ${run.id}`),
     fullText(S.panel, `run${run.id}`, run.task, 'Full brief'),
     h('div', { class: 'facts-row' }, present(pill(run.status), h('span', { class: 'pill quiet' }, `${members.length} ${members.length === 1 ? 'teammate' : 'teammates'}`),
       money(run.cost_usd) ? h('span', { class: 'pill quiet' }, money(run.cost_usd)) : null,

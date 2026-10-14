@@ -193,7 +193,8 @@ test('a version 3 database gains token columns at 0, and reopening changes nothi
   const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   first.close();
   const raw = new DatabaseSync(path);   // rewind to version 3: no token columns
-  raw.exec('DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
+  raw.exec('ALTER TABLE runs DROP COLUMN title; ALTER TABLE runs DROP COLUMN title_by; ' +
+           'DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
            'ALTER TABLE messages DROP COLUMN thread_id; ' +
            'ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
            'ALTER TABLE members DROP COLUMN scope_budget; ' +
@@ -221,7 +222,8 @@ test('a version 4 database gains agent, model and read_only, unset', () => {
   const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   first.close();
   const raw = new DatabaseSync(path);
-  raw.exec('DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
+  raw.exec('ALTER TABLE runs DROP COLUMN title; ALTER TABLE runs DROP COLUMN title_by; ' +
+           'DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
            'ALTER TABLE messages DROP COLUMN thread_id; ' +
            'ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
            'ALTER TABLE members DROP COLUMN scope_budget; ' +
@@ -295,7 +297,8 @@ test('a version 5 database gains project, alias and scope_budget, unset', () => 
   const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   first.close();
   const raw = new DatabaseSync(path);
-  raw.exec('DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
+  raw.exec('ALTER TABLE runs DROP COLUMN title; ALTER TABLE runs DROP COLUMN title_by; ' +
+           'DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
            'ALTER TABLE messages DROP COLUMN thread_id; ' +
            'ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
            'ALTER TABLE members DROP COLUMN scope_budget; PRAGMA user_version = 5');
@@ -324,7 +327,8 @@ test('a version 6 database gains threads, posts, and the thread columns', () => 
   const path = join(mkdtempSync(join(tmpdir(), 'at-mig7-')), 's.db');
   openStore(path).close();
   const raw = new DatabaseSync(path);
-  raw.exec('DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
+  raw.exec('ALTER TABLE runs DROP COLUMN title; ALTER TABLE runs DROP COLUMN title_by; ' +
+           'DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
            'ALTER TABLE messages DROP COLUMN thread_id; PRAGMA user_version = 6');
   raw.close();
   const store = openStore(path);
@@ -346,14 +350,30 @@ test('a version 7 database gains the open-thread index', () => {
   const path = join(mkdtempSync(join(tmpdir(), 'at-mig8-')), 's.db');
   openStore(path).close();
   const raw = new DatabaseSync(path);
-  raw.exec('DROP INDEX threads_state; PRAGMA user_version = 7');
+  raw.exec('ALTER TABLE runs DROP COLUMN title; ALTER TABLE runs DROP COLUMN title_by; DROP INDEX threads_state; PRAGMA user_version = 7');
   raw.close();
   openStore(path).close();
   const check = new DatabaseSync(path);
-  assert.equal(check.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.equal(check.prepare('PRAGMA user_version').get().user_version, 9);
   const plan = check.prepare("EXPLAIN QUERY PLAN SELECT * FROM threads WHERE state IN ('open','accepted') ORDER BY id").all();
   assert.ok(plan.some((r) => /threads_state/.test(r.detail)), JSON.stringify(plan));
   check.close();
+});
+
+test('a version 8 database gains the run title columns, unset', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig9-')), 's.db');
+  const first = openStore(path);
+  const id = first.createRun({ project: '/p', task: 't' });
+  first.close();
+  const raw = new DatabaseSync(path);
+  raw.exec('ALTER TABLE runs DROP COLUMN title; ALTER TABLE runs DROP COLUMN title_by; PRAGMA user_version = 8');
+  raw.close();
+  const store = openStore(path);
+  assert.equal(store.run(id).title, null);
+  assert.equal(store.run(id).title_by, null);
+  store.setRunTitle(id, 'Named', 'agent');
+  assert.equal(store.run(id).title, 'Named');
+  store.close();
 });
 
 const mkThread = (store, run, m, over = {}) => store.addThread({

@@ -108,22 +108,36 @@ export class Supervisor {
     await this.server?.close();
   }
 
-  submit({ projectRoot, member, task, timeoutMs, maxCostUsd, threadId = null }) {
+  // An identical submit (same project, member and task) while that run is still going attaches
+  // to it: a client that exited and reran its command must not start a second copy. `fresh`
+  // (the CLI's --new) skips the lookup. The run must be one this supervisor is working.
+  submit({ projectRoot, member, task, timeoutMs, maxCostUsd, threadId = null, title = null, fresh = false }) {
     const config = loadConfig(projectRoot);
     if (!Object.hasOwn(config.members, member)) throw new Error(`unknown member "${member}"`);
     const limits = { budget: config.defaults.max_delegations,
                      timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : this.timeoutMs,
                      maxCostUsd: maxCostUsd ?? config.defaults.max_cost_usd };
     if (limits.maxCostUsd != null) checkCap(limits.maxCostUsd);
+    if (!fresh && threadId == null) {
+      const same = this.store.activeRunLike({ project: projectRoot, member, task });
+      if (same && this.#runs.has(same.id)) {
+        if (typeof title === 'string' && title.trim() && same.title_by !== 'human') {
+          this.store.setRunTitle(same.id, title.trim(), 'human');
+          this.store.addEvent(same.root_member, 'titled', { title: title.trim(), by: 'human' });
+        }
+        return { runId: same.id, memberId: same.root_member, attached: true };
+      }
+    }
     // Limits and owner are stored so a restarted supervisor can rebuild the run.
-    const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath, threadId });
+    const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath, threadId,
+                                       title: typeof title === 'string' && title.trim() ? title.trim() : null });
     this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs,
                             configs: new Map(), keys: new Map() });
     const { id } = this.store.addMember({ runId, parentId: null, name: member, task, depth: 0 });
     this.store.setRunRoot(runId, id);
     this.#resolve(this.store.member(id));
     this.#schedule(id);
-    return { runId, memberId: id };
+    return { runId, memberId: id, attached: false };
   }
 
   waitRun(runId) {
@@ -1082,6 +1096,7 @@ export class Supervisor {
       send_to: (id, p) => this.#sendTo(id, p),
       wait_for: (id, p) => this.#waitFor(id, p),
       report_progress: (id, p) => this.#reportProgress(id, p),
+      set_title: (id, p) => this.#setTitle(id, p),
       ask_human: (id, p) => this.#askHuman(id, p),
       team_status: (id, p) => this.#teamStatus(id, p),
       request: (id, p) => this.#request(id, p),
@@ -1098,6 +1113,20 @@ export class Supervisor {
     const { projectRoot, config } = this.#scope(this.store.member(id));
     if (team == null || team === '') return { teams: knownTeams({ store: this.store, projectRoot, config }) };
     return teamStatus(this.store, resolveTeam({ store: this.store, projectRoot, config, team }));
+  }
+
+  // Names the run for the web view. Only the run's root member may, and a title a human gave
+  // with --title is final.
+  #setTitle(id, { title } = {}) {
+    if (typeof title !== 'string' || !title.trim()) throw new Error('set_title needs "title" (3-6 words, sentence case)');
+    const m = this.#live.get(id).member;
+    const run = this.store.run(m.run_id);
+    if (run.root_member !== id) throw new Error('set_title: only the root member of a run can name it');
+    if (run.title_by === 'human') return { ok: false, title: run.title, note: 'the title was set by a human with --title; leaving it as is' };
+    const clean = title.replace(/\s+/g, ' ').trim().slice(0, 80);
+    this.store.setRunTitle(run.id, clean, 'agent');
+    this.store.addEvent(id, 'titled', { title: clean, by: 'agent' });
+    return { ok: true, title: clean };
   }
 
   #reportProgress(id, { text }) {

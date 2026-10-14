@@ -26,6 +26,8 @@ const { values, positionals, tokens } = parseArgs({
   options: {
     member: { type: 'string' },
     task: { type: 'string' },
+    title: { type: 'string' },
+    new: { type: 'boolean', default: false },
     project: { type: 'string', default: process.cwd() },
     timeout: { type: 'string', default: '900' },
     all: { type: 'boolean', default: false },
@@ -41,7 +43,7 @@ const { values, positionals, tokens } = parseArgs({
 });
 
 const USAGE =
-  'usage: agent-team --member <member> --task <text> [--project <dir>] [--timeout <sec>]\n' +
+  'usage: agent-team --member <member> --task <text> [--title <text>] [--new] [--project <dir>] [--timeout <sec>]\n' +
   '       agent-team org [--project <dir>]\n' +
   '       agent-team report [--project <dir>] [--all] [--json]\n' +
   '       agent-team mcp\n' +
@@ -333,7 +335,15 @@ try {
     task: values.task,
     adapterDir: join(ROOT, 'adapters'),
     skillsDir: join(ROOT, 'skills'),
-    timeoutMs: Number(values.timeout) * 1000
+    timeoutMs: Number(values.timeout) * 1000,
+    title: values.title,
+    fresh: values.new,
+    onSubmitted: ({ runId, attached, remote }) => {
+      // Known before the wait, so a session whose client dies can still find the run.
+      if (remote) process.stderr.write(`agent-team: run ${runId} on serve (http://127.0.0.1:${values.port}/#/run/${runId})\n`);
+      else process.stderr.write(`agent-team: run ${runId}\n`);
+      if (attached) process.stderr.write(`agent-team: attached to running run ${runId} (same task)\n`);
+    }
   };
   const { live, preresolved } = await resolveRootMember(opts);
   const result = live

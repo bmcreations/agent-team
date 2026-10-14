@@ -106,7 +106,7 @@ The supervisor sets two variables for the session process:
 
 A real harness is configured with `agent-team mcp` as an MCP server and passes both variables
 through to it. `agent-team mcp` serves the eight team tools (`delegate`, `send_to`, `wait_for`,
-`report_progress`, `ask_human`, `team_status`, `request`, `reply`) over stdio and forwards each call to the socket.
+`report_progress`, `set_title`, `ask_human`, `team_status`, `request`, `reply`) over stdio and forwards each call to the socket.
 It forwards only those tool names. `request` and `reply` are the peer-thread tools; see
 [Threads between teams](how-it-works.md#threads-between-teams). The socket also serves admin methods (`submit`, `wait_run`, `send`,
 `answer`, `questions`, `pause`, `resume`, `cancel`, `takeover`, `handback`, `thread_reply`), which the bridge refuses. They are reachable by anything that can open the socket,

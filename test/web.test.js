@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, threadRunIds } from '../src/web/feed.js';
+import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, deriveTitle, runTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, threadRunIds } from '../src/web/feed.js';
 import { publicMessage } from '../src/view.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
@@ -279,4 +279,24 @@ test('splitDiff gives one entry per file with each line tagged by kind, and coun
   assert.equal(changeCounts(files[0]), '+1 −1');
   assert.deepEqual(splitDiff(''), []);
   assert.deepEqual(splitDiff(null), []);
+});
+
+test('deriveTitle names a run from the brief when nobody did', () => {
+  assert.equal(deriveTitle("Exploration only, no implementation. Goal: decide the design for a floating 'jump to bottom' button in the chat list."),
+    "Decide the design for a floating 'jump to bottom'…");
+  assert.equal(deriveTitle('Objective: render the new system-message content type in private group chats, with a fallback.'),
+    'Render the new system-message content type in…');
+  assert.equal(deriveTitle('# Brief: flexible New device create (Android + iOS)\n\nApproved by Chris.'),
+    'Flexible New device create (Android + iOS)');
+  assert.equal(deriveTitle('Intro line\n\n## Real heading\nbody'), 'Real heading');
+  assert.equal(deriveTitle('fix the rotate crash. Then more'), 'Fix the rotate crash');
+  assert.equal(deriveTitle('Task: Goal: nested labels'), 'Nested labels');
+  assert.equal(deriveTitle(null), '');
+  assert.equal(deriveTitle('x'.repeat(200)).length, 51);
+});
+
+test('runTitle prefers the run title and falls back to the brief', () => {
+  assert.equal(runTitle({ title: 'Jump button design', task: 'Goal: something else' }), 'Jump button design');
+  assert.equal(runTitle({ title: null, task: 'Goal: something else' }), 'Something else');
+  assert.equal(runTitle({ title: '  ', task: 'Do it' }), 'Do it');
 });
