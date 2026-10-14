@@ -212,3 +212,11 @@ test('reply with no supervisor listening says to start serve; bad usage is refus
   assert.match((await runCli(['reply', '1'], env)).stderr, /^agent-team: usage: agent-team reply <thread> <text>/);
   assert.match((await runCli(['reply', 'x', 'hi'], env)).stderr, /usage: agent-team reply/);
 });
+
+test('--help prints the usage and exits 0 instead of crashing in parseArgs', async () => {
+  const { code, stdout, stderr } = await runCli(['--help']);
+  assert.equal(code, 0);
+  assert.match(stdout, /^usage: agent-team --member/);
+  assert.match(stdout, /--title <text>\] \[--new\]/);
+  assert.equal(stderr, '');
+});

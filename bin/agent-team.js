@@ -28,6 +28,7 @@ const { values, positionals, tokens } = parseArgs({
     task: { type: 'string' },
     title: { type: 'string' },
     new: { type: 'boolean', default: false },
+    help: { type: 'boolean', short: 'h', default: false },
     project: { type: 'string', default: process.cwd() },
     timeout: { type: 'string', default: '900' },
     all: { type: 'boolean', default: false },
@@ -62,6 +63,11 @@ const USAGE =
   '       agent-team reply <thread> <text>\n' +
   '       agent-team attach <run> <member>\n' +
   '       agent-team handback <run> <member>\n';
+
+if (values.help) {
+  process.stdout.write(USAGE);
+  process.exit(0);
+}
 
 // Any throw here — a broken config, a bad org chart, a member resolution failure — must
 // reach the caller (the delegate skill included) as the same JSON shape a normal run
