@@ -3,7 +3,7 @@ import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
 const $ = (id) => document.getElementById(id);
-const S = { expanded: new Set(), gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null,
+const S = { expanded: new Set(), sideOpen: new Map(), gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null,
             query: '', panel: null, open: new Set(), threads: null, thread: null };
 
 const safeHref = (v) => { const s = String(v); return s.startsWith('#') || (s.startsWith('/') && !s.startsWith('//')) ? s : '#'; };
@@ -231,12 +231,20 @@ function drawSidebar() {
   $('threads-count').hidden = !n;
   const groups = [...byProject].map(([project, items]) => h('div', { class: 'project' },
     h('h2', { title: project }, shortPath(project)),
-    h('ul', {}, items.map(({ run, members }) => h('li', {},
-      h('a', { href: `#/run/${run.id}`, class: `run-link${run.id === S.route?.run ? ' current' : ''}`, title: run.task },
-        dot(run.status), h('span', { class: 'label' }, runTitle(run) || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
-      members.length ? h('ul', { class: 'members' }, members.map((m) => h('li', {},
+    h('ul', {}, items.map(({ run, members }) => {
+      // A run's teammates fold under it; the run you are on starts open, a toggle sticks.
+      const open = S.sideOpen.get(run.id) ?? run.id === S.route?.run;
+      return h('li', {},
+      h('div', { class: 'run-row' },
+        h('a', { href: `#/run/${run.id}`, class: `run-link${run.id === S.route?.run ? ' current' : ''}`, title: run.task },
+          dot(run.status), h('span', { class: 'label' }, runTitle(run) || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
+        members.length ? h('button', { type: 'button', class: `fold${open ? ' open' : ''}`, 'aria-expanded': String(open),
+          'aria-label': `${open ? 'Hide' : 'Show'} ${members.length} teammates of run ${run.id}`,
+          onclick: () => { S.sideOpen.set(run.id, !open); drawSidebar(); } }, h('span', { class: 'count' }, String(members.length)), icon('chevron')) : null),
+      members.length && open ? h('ul', { class: 'members' }, members.map((m) => h('li', {},
         h('a', { href: memberHref(m.run_id, m.id), class: `member-link${m.id === S.route?.member ? ' current' : ''}` },
-          avatar(m.name, { agent: m.agent, size: 'sm' }), h('span', { class: 'label' }, m.name), dot(m.state))))) : null)))));
+          avatar(m.name, { agent: m.agent, size: 'sm' }), h('span', { class: 'label' }, m.name), dot(m.state))))) : null);
+    }))));
   $('projects').replaceChildren(...(groups.length ? groups
     : [h('p', { class: 'empty-side' }, S.query ? 'Nothing matches that search.' : S.state ? 'No runs yet.' : 'Connecting…')]));
 }
