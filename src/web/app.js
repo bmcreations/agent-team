@@ -28,7 +28,7 @@ const ICONS = {
   pause: 'M9 6v12M15 6v12', now: 'M7 6v12M12 6v12M17 9l3 3-3 3', play: 'M8 5.5v13l10-6.5z', x: 'M6 6l12 12M18 6 6 18',
   tool: 'M14.5 6.5a4 4 0 0 0 5 5L13 18a2.1 2.1 0 0 1-3-3l6.5-6.5a4 4 0 0 0-2-2z', term: 'M5 7l5 5-5 5M12 17h7',
   lock: 'M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z', spark: 'M12 3v5M12 16v5M3 12h5M16 12h5M5.6 5.6l3.5 3.5M14.9 14.9l3.5 3.5M5.6 18.4l3.5-3.5M14.9 9.1l3.5-3.5',
-  check: 'M5 12.5l4.5 4.5L19 7', device: 'M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM11 18h2', ext: 'M14 5h5v5M19 5l-8 8M17 14v5H5V7h5'
+  check: 'M5 12.5l4.5 4.5L19 7', pencil: 'M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16zM13.5 6.5l4 4', device: 'M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM11 18h2', ext: 'M14 5h5v5M19 5l-8 8M17 14v5H5V7h5'
 };
 function icon(name, cls = '') {
   const svg = document.createElementNS(SVG, 'svg');
@@ -606,6 +606,31 @@ function deployPanel(runId) {
   };
 }
 
+// The run title with a rename button. The form is built once per page so a redraw from the
+// stream keeps what is being typed; Enter saves, Escape cancels, empty clears back to the brief.
+function renameControl(run) {
+  const c = S.panel.rename ??= { editing: false, input: null, form: null };
+  if (!c.form) {
+    const input = h('input', { type: 'text', class: 'rename-input', maxlength: '80', 'aria-label': 'Run name', placeholder: 'Name this run' });
+    const stop = () => { c.editing = false; drawRun(); };
+    const save = () => act(`/api/runs/${c.runId}/title`, { title: input.value }, 'Renamed').then((r) => { if (r) stop(); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); save(); } else if (e.key === 'Escape') { e.preventDefault(); stop(); }
+    });
+    c.input = input;
+    c.form = h('div', { class: 'rename' }, input,
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Save name', title: 'Save', onclick: save }, icon('check')),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Cancel rename', title: 'Cancel', onclick: stop }, icon('x')));
+  }
+  c.runId = run.id;
+  if (c.editing) return c.form;
+  const ok = run.steerable;
+  const why = run.read_only_note ?? 'Only a running run can be renamed.';
+  return h('div', { class: 'title-row' }, h('h1', {}, runTitle(run) || `Run ${run.id}`),
+    h('button', { type: 'button', class: 'icon-btn rename-btn', disabled: !ok, 'aria-label': 'Rename run', title: ok ? 'Rename run' : why,
+      onclick: () => { c.editing = true; drawRun(); c.input.value = run.title ?? runTitle(run); c.input.focus(); c.input.select(); } }, icon('pencil')));
+}
+
 function drawRun() {
   const run = S.state?.run?.id === S.route.run ? S.state.run : S.detail?.run;
   if (!run) return $('view').replaceChildren(h('p', { class: 'loading' }, 'Loading…'));
@@ -625,7 +650,7 @@ function drawRun() {
   S.panel.head.replaceChildren(...present(
     h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Activity'), icon('chevron'), h('span', { title: run.project }, shortPath(run.project)),
       icon('chevron'), h('span', {}, `Run #${run.id}`)),
-    h('h1', {}, runTitle(run) || `Run ${run.id}`),
+    renameControl(run),
     fullText(S.panel, `run${run.id}`, run.task, 'Full brief'),
     h('div', { class: 'facts-row' }, present(pill(run.status), h('span', { class: 'pill quiet' }, `${members.length} ${members.length === 1 ? 'teammate' : 'teammates'}`),
       money(run.cost_usd) ? h('span', { class: 'pill quiet' }, money(run.cost_usd)) : null,
