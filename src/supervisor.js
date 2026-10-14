@@ -1135,7 +1135,8 @@ export class Supervisor {
     if (typeof title !== 'string') throw new Error('title must be text');
     const run = this.store.run(run_id);
     if (!run) throw new Error(`unknown run ${run_id}`);
-    if (run.status !== 'running' || run.owner !== this.socketPath || !this.#runs.has(run.id)) throw new Error('run by another supervisor');
+    // A finished run has no owner working it, so its name can still change; a running one only here.
+    if (run.status === 'running' && (run.owner !== this.socketPath || !this.#runs.has(run.id))) throw new Error('run by another supervisor');
     const clean = title.replace(/\s+/g, ' ').trim().slice(0, 80);
     if (clean) this.store.setRunTitle(run.id, clean, 'human');
     else this.store.setRunTitle(run.id, null, null);

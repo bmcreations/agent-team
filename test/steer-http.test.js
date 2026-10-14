@@ -230,6 +230,19 @@ test('a run is renamed from the page, cleared, and refused cross-site', async ()
   } finally { await v.close(); }
 });
 
+test('a finished run can still be renamed', async () => {
+  const { root, script } = project({ solo: LIVE() }, { by_member: { solo: LONG } });
+  const v = await view(script, { http: { by: 'tester' } });
+  try {
+    const { runId, memberId } = v.sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    v.sup.cancel({ member_id: memberId, by: 'tester' });
+    for (let i = 0; i < 200 && v.store.run(runId).status === 'running'; i++) await new Promise((r) => setTimeout(r, 25));
+    assert.notEqual(v.store.run(runId).status, 'running');
+    assert.equal((await post(v.base, `/api/runs/${runId}/title`, { title: 'Old run' })).status, 200);
+    assert.deepEqual([v.store.run(runId).title, v.store.run(runId).title_by], ['Old run', 'human']);
+  } finally { await v.close(); }
+});
+
 test('renaming needs a supervisor', async () => {
   const { script } = project({ solo: LIVE() }, {});
   const v = await view(script, { http: { sup: null } });

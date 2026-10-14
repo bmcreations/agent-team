@@ -624,7 +624,7 @@ function renameControl(run) {
   }
   c.runId = run.id;
   if (c.editing) return c.form;
-  const ok = run.steerable;
+  const ok = run.steerable || run.status !== 'running';
   const why = run.read_only_note ?? 'Only a running run can be renamed.';
   return h('div', { class: 'title-row' }, h('h1', {}, runTitle(run) || `Run ${run.id}`),
     h('button', { type: 'button', class: 'icon-btn rename-btn', disabled: !ok, 'aria-label': 'Rename run', title: ok ? 'Rename run' : why,
