@@ -14,6 +14,12 @@ export function readRuns(projectRoot) {
   return runs;
 }
 
+// Every run, oldest first: the run log's, and any an extension's report source supplied
+// (src/extensions.js). `extra` holds records shaped like the log's.
+export function allRuns(projectRoot, { extra = [] } = {}) {
+  return [...readRuns(projectRoot), ...extra].sort((a, b) => a.at.localeCompare(b.at));
+}
+
 export function formatDuration(ms) {
   if (ms == null) return '—';
   const s = Math.round(ms / 1000);
@@ -57,17 +63,20 @@ function sumTree(node, pick) {
 // One delegation as a tree: who ran under whom, and what each run cost. Turns, cost and
 // advisor calls are the member's own; elapsed includes the reports it waited on.
 export function renderRun(run) {
-  const header = ['member', 'model', 'status', 'elapsed', 'turns', 'cost', 'advisor'];
-  const rows = flatten(run.tree, '', true, true, []).map(([n, label]) => [
+  const nodes = flatten(run.tree, '', true, true, []);
+  const withTokens = nodes.some(([n]) => n.usage?.tokens);
+  const header = ['member', 'model', 'status', 'elapsed', 'turns', 'cost', ...(withTokens ? ['tokens'] : []), 'advisor'];
+  const rows = nodes.map(([n, label]) => [
     label, workModel(n), n.status, formatDuration(n.elapsed_ms),
-    formatCount(n.usage?.turns), formatCost(n.usage?.cost_usd), formatCount(n.usage?.advisor_calls)
+    formatCount(n.usage?.turns), formatCost(n.usage?.cost_usd),
+    ...(withTokens ? [formatCount(n.usage?.tokens)] : []), formatCount(n.usage?.advisor_calls)
   ]);
   const cost = sumTree(run.tree, (n) => n.usage?.cost_usd ?? null);
   const advisor = sumTree(run.tree, (n) => n.usage?.advisor_calls ?? null);
   return [
     `${run.at}  ${run.task ?? ''}`.trimEnd(),
     '',
-    table([header, ...rows], new Set([3, 4, 5, 6])),
+    table([header, ...rows], new Set(withTokens ? [3, 4, 5, 6, 7] : [3, 4, 5, 6])),
     '',
     `total ${formatDuration(run.tree.elapsed_ms)}  ${formatCost(cost)}  advisor calls ${formatCount(advisor)}`
   ].join('\n');
@@ -91,7 +100,8 @@ export function renderTotals(runs) {
   };
   runs.forEach((r) => visit(r.tree));
 
-  const header = ['member', 'runs', 'failed', 'median', 'cost', 'advisor'];
+  const withTokens = [...byMember.values()].some((nodes) => nodes.some((n) => n.usage?.tokens));
+  const header = ['member', 'runs', 'failed', 'median', 'cost', ...(withTokens ? ['tokens'] : []), 'advisor'];
   const rows = [...byMember].map(([member, nodes]) => {
     const costs = nodes.map((n) => n.usage?.cost_usd).filter((c) => c != null);
     const known = nodes.filter((n) => n.usage?.advisor_calls != null);
@@ -99,20 +109,21 @@ export function renderTotals(runs) {
       member, String(nodes.length), String(nodes.filter((n) => n.status !== 'ok').length),
       formatDuration(median(nodes.map((n) => n.elapsed_ms).filter((v) => v != null))),
       costs.length ? formatCost(costs.reduce((a, b) => a + b, 0)) : '—',
+      ...(withTokens ? [formatCount(nodes.reduce((a, n) => a + (n.usage?.tokens ?? 0), 0) || null)] : []),
       known.length ? `${known.filter((n) => n.usage.advisor_calls > 0).length}/${known.length}` : '—'
     ];
   });
   return [
     `${runs.length} delegation(s) since ${runs[0].at}`,
     '',
-    table([header, ...rows], new Set([1, 2, 3, 4]))
+    table([header, ...rows], new Set(withTokens ? [1, 2, 3, 4, 5] : [1, 2, 3, 4]))
   ].join('\n');
 }
 
 // Only runs started through agent-team are logged. A member played by an interactive
 // session (an orchestrator you are talking to) never appears here.
-export function renderReport(projectRoot, { all = false } = {}) {
-  const runs = readRuns(projectRoot);
+export function renderReport(projectRoot, { all = false, extra = [] } = {}) {
+  const runs = allRuns(projectRoot, { extra });
   if (runs.length === 0) {
     return `No delegations logged for ${projectRoot} yet. Only delegations run since ` +
       `the run log was added are recorded.`;

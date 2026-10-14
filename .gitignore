@@ -2,3 +2,4 @@
 .claude/worktrees/
 .claude/state/
 node_modules/
+.superpowers/

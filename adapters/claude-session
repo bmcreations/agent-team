@@ -1,0 +1,60 @@
+#!/usr/bin/env node
+// Experimental: runs a member in a Claude Code session that is already running on this
+// machine, through the agent-team channel (channel/server.js). The task lands in the owner's
+// interactive session and runs with that session's permissions and context; nothing here
+// can enforce deny_paths or read-only, so the brief only asks for them.
+import { readFileSync } from 'node:fs';
+import { askSession, listChannels, pickSession, START_COMMAND } from '../src/channel.js';
+
+const sub = process.argv[2];
+
+// The session runs with its owner's permissions, so the member's limits can only be asked
+// for. They go first, where a long task can't bury them.
+function withLimits(brief) {
+  const limits = [
+    brief.read_only ? '- Do not edit, create or delete files, and do not run commands that change anything.' : null,
+    brief.deny_paths?.length ? `- Do not read or open files matching: ${brief.deny_paths.join(', ')}` : null
+  ].filter(Boolean);
+  return limits.length ? `# Limits for this task\n\n${limits.join('\n')}\n\n---\n\n${brief.task}` : brief.task;
+}
+const emit = (obj) => process.stdout.write(JSON.stringify(obj) + '\n', () => process.exit(0));
+
+if (sub === 'probe') {
+  // Cheap and offline: is any session running the channel at all? Which one a run uses is
+  // decided from the brief, so a wrong project or an ambiguous pick fails the run instead.
+  if (listChannels().length === 0) {
+    process.stderr.write(`claude-session: no Claude Code session is running the agent-team channel — start one with \`${START_COMMAND}\`\n`);
+    process.exit(1);
+  }
+  process.exit(0);
+} else if (sub === 'capabilities') {
+  // live_session: the dispatcher builds no workspace and refuses callers from another
+  // project (src/dispatch.js, prepareSession). The session edits its own checkout, if anything.
+  emit({ write: false, workspace: false, live_session: true, structured_output: false, tool_dialect: 'claude' });
+} else if (sub === 'run') {
+  const brief = JSON.parse(readFileSync(0, 'utf8'));
+  let entry;
+  try {
+    entry = pickSession({ sessionId: brief.session?.id ?? null, projectRoot: brief.session?.project_root ?? process.cwd() });
+  } catch (err) {
+    emit({ status: 'failed', summary: err.message });
+  }
+  if (entry) {
+    // Leave the dispatcher a few seconds to read our answer before its own kill timer fires.
+    const timeoutMs = Math.max(1000, (brief.timeout_s ?? 900) * 1000 - 5000);
+    askSession(entry.session_id, withLimits(brief), { timeoutMs }).then(
+      (reply) => emit({ status: 'ok', summary: reply.text, session_id: entry.session_id, task_id: reply.task_id }),
+      (err) => emit({
+        status: /within \d+ ms/.test(err.message) ? 'timeout' : 'failed',
+        // A session started without the channel flag drops tasks, so say so on a timeout.
+        summary: /within \d+ ms/.test(err.message)
+          ? `${err.message} — the session may have been started without \`${START_COMMAND}\`, or is still working; it keeps the task either way`
+          : err.message,
+        session_id: entry.session_id
+      })
+    );
+  }
+} else {
+  process.stderr.write(`unknown subcommand: ${sub}\n`);
+  process.exit(2);
+}

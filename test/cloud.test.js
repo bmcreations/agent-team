@@ -74,7 +74,7 @@ async function fakeApi(events) {
 const finished = (text, cents = '42') => [
   { id: 'e1', type: 'session.status_running' },
   { id: 'e2', type: 'agent.message', content: [{ type: 'text', text }] },
-  { id: 'e3', type: 'session.usage', list_cost: { amount: cents, currency: 'USD' } },
+  { id: 'e3', type: 'session.usage', usage: { list_cost: { amount: cents, currency: 'USD' } } },
   { id: 'e4', type: 'session.status_idle', stop_reason: { type: 'end_turn' } }
 ];
 
