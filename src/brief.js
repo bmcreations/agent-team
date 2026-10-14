@@ -88,9 +88,26 @@ function advisorSection() {
   ].join('\n');
 }
 
+function threadSection(t) {
+  const how = t.kind === 'task'
+    ? `Accept with reply({ thread: ${t.id}, state: "accepted" }) before you delegate anything; decline with reply({ thread: ${t.id}, text: "<why>", state: "declined" }). When you finish, the thread closes with your result.`
+    : `Answer with reply({ thread: ${t.id}, text: "<answer>", state: "done" }), or decline with a reason.`;
+  return [`# Thread #${t.id}`, '',
+    `Team member ${t.from} opened this ${t.kind} thread with your team.`, '',
+    t.text, ...(t.task ? ['', `Task: ${t.task}`] : []), '', how,
+    'Ask them something with reply({ thread, text }) and wait_for their answer.'].join('\n');
+}
+
+function waitingSection(threads) {
+  return ['# Threads waiting for you', '',
+    ...threads.map((t) => `- #${t.id} (${t.kind}) from ${t.from}: ${t.text}${t.task ? ` Task: ${t.task}` : ''}`), '',
+    'Answer each with reply({ thread, text, state }): accept or decline a task, or answer a question.'].join('\n');
+}
+
 export function buildBrief({
   resolved, task, cwd, denyPaths, skillText = null, dialectText = null,
-  timeoutSec = 900, depth = 0, maxDepth = 3, priorResults = null, cloud = null, session = null
+  timeoutSec = 900, depth = 0, maxDepth = 3, priorResults = null, cloud = null, session = null,
+  thread = null, threads = []
 }) {
   if (!Array.isArray(denyPaths) || denyPaths.length === 0) {
     throw new Error(
@@ -116,6 +133,8 @@ export function buildBrief({
     );
   }
   if (resolved.agent === 'claude' && resolved.advisor) sections.push(advisorSection());
+  if (thread) sections.push(threadSection(thread));
+  if (threads.length) sections.push(waitingSection(threads));
   sections.push(`# Task\n\n${task}`);
 
   return {
@@ -141,6 +160,7 @@ export function buildBrief({
     ...(cloud ? { cloud } : {}),
     // Only for a claude-session member: the session to use, if pinned, and the project whose
     // running session it falls back to.
-    ...(session ? { session } : {})
+    ...(session ? { session } : {}),
+    thread: thread ? { id: thread.id, kind: thread.kind, from: thread.from, text: thread.text, task: thread.task ?? null } : null
   };
 }

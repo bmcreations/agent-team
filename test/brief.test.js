@@ -174,3 +174,19 @@ test('a member without an advisor, or not on claude, gets no advisor section', (
   assert.doesNotMatch(none.task, /# Advisor/);
   assert.doesNotMatch(codex.task, /# Advisor/);
 });
+
+test('a brief for a thread carries the thread and tells the lead how to answer', () => {
+  const b = buildBrief({ resolved: LEAD, ...base, task: 'triage',
+    thread: { id: 4, kind: 'task', from: 'android/manager', text: 'crash on rotate', task: 'fix it' } });
+  assert.deepEqual(b.thread, { id: 4, kind: 'task', from: 'android/manager', text: 'crash on rotate', task: 'fix it' });
+  assert.match(b.task, /# Thread #4/);
+  assert.match(b.task, /reply\(\{ thread: 4, state: "accepted" \}\)/);
+  assert.ok(b.task.indexOf('# Thread #4') < b.task.indexOf('# Task'));
+});
+
+test('a brief lists the other open threads waiting for the lead', () => {
+  const b = buildBrief({ resolved: LEAD, ...base, threads: [{ id: 2, kind: 'question', from: 'a/m', text: 'why?', task: null }] });
+  assert.match(b.task, /# Threads waiting for you/);
+  assert.match(b.task, /#2 \(question\) from a\/m: why\?/);
+  assert.equal(b.thread, null);
+});

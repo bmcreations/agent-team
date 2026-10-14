@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
 import { loadConfig } from '../src/config.js';
 import { renderOrg } from '../src/org.js';
@@ -11,7 +11,8 @@ import { existsSync } from 'node:fs';
 import { runMcpServer } from '../src/mcp.js';
 import { runThroughSupervisor, resolveRootMember } from '../src/client.js';
 import { openStore } from '../src/store.js';
-import { watchRun } from '../src/watch.js';
+import { watchRun, plain } from '../src/watch.js';
+import { threadsView } from '../src/view.js';
 import { startHttp, DEFAULT_PORT } from '../src/http.js';
 import { Supervisor, defaultSocketPath, defaultStorePath, lockSupervisorDir } from '../src/supervisor.js';
 import { adminCall, attach, memberArgs, whoAmI, renderQuestions, handbackNotice } from '../src/admin.js';
@@ -19,8 +20,9 @@ import { askSession, listChannels, pickSession, START_COMMAND } from '../src/cha
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-const { values, positionals } = parseArgs({
+const { values, positionals, tokens } = parseArgs({
   allowPositionals: true,
+  tokens: true,
   options: {
     member: { type: 'string' },
     task: { type: 'string' },
@@ -54,6 +56,8 @@ const USAGE =
   '       agent-team watch <run> [--json]\n' +
   '       agent-team questions [<run>] [--json]\n' +
   '       agent-team answer <question-id> <answer>\n' +
+  '       agent-team threads [--project <dir>] [--json]\n' +
+  '       agent-team reply <thread> <text>\n' +
   '       agent-team attach <run> <member>\n' +
   '       agent-team handback <run> <member>\n';
 
@@ -89,7 +93,7 @@ if (positionals[0] === 'serve') {
   const store = openStore(defaultStorePath());
   const sup = new Supervisor({
     store, adapterDir: join(ROOT, 'adapters'), skillsDir: join(ROOT, 'skills'),
-    socketPath: defaultSocketPath(), maxRunning
+    socketPath: defaultSocketPath(), maxRunning, shared: true
   });
   try {
     await sup.start();
@@ -222,6 +226,10 @@ const ADMIN = {
     if (run != null && !(Number.isInteger(Number(run)) && Number(run) > 0)) throw new Error('usage: agent-team questions [<run>]');
     return ['questions', { run_id: run == null ? null : Number(run) }];
   },
+  reply: ([id, ...text]) => {
+    if (!(id?.trim() && Number.isInteger(Number(id)) && Number(id) > 0) || !text.join(' ').trim()) throw new Error('usage: agent-team reply <thread> <text>');
+    return ['thread_reply', { thread_id: Number(id), text: text.join(' '), by: whoAmI() }];
+  },
   answer: ([id, ...text]) => {
     if (!(id?.trim() && Number.isInteger(Number(id)) && Number(id) > 0) || !text.length) throw new Error('usage: agent-team answer <question-id> <answer>');
     return ['answer', { question_id: Number(id), answer: text.join(' '), by: whoAmI() }];
@@ -250,6 +258,39 @@ if (positionals[0] === 'watch') {
     code = 1;
   } finally { store.close(); }
   // Exit once stdout has flushed: exiting straight after a large write can cut it off.
+  process.stdout.write('', () => process.exit(code));
+  await new Promise(() => {});
+}
+
+if (positionals[0] === 'threads') {
+  // Like `watch`, read straight from the store, and never creating one.
+  const dbPath = defaultStorePath();
+  if (!existsSync(dbPath)) {
+    process.stderr.write(`agent-team: no threads: there is no store at ${dbPath}\n`);
+    process.exit(1);
+  }
+  const store = openStore(dbPath);
+  let code = 0;
+  try {
+    const named = tokens.some((t) => t.kind === 'option' && t.name === 'project');
+    const view = threadsView(store, { project: named ? resolve(values.project) : null });
+    // DEL and C1 controls are legal raw in JSON; escape them so a terminal never sees one.
+    if (values.json) process.stdout.write(JSON.stringify(view, null, 2).replace(/[\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`) + '\n');
+    else {
+      const out = [];
+      for (const { pair, threads } of view.pairs) {
+        out.push(plain(pair));
+        for (const t of threads) {
+          const what = t.task ?? store.threadPosts(t.id)[0]?.text ?? '';
+          out.push(`  #${t.id} ${plain(t.state)} ${plain(t.kind)} ${plain(t.from_member?.name ?? '-')} -> ${plain(t.owner?.name ?? '-')}: ${plain(what).slice(0, 80)}`);
+        }
+      }
+      process.stdout.write(out.length ? out.join('\n') + '\n' : 'no threads\n');
+    }
+  } catch (err) {
+    process.stderr.write(`agent-team: ${err.message}\n`);
+    code = 1;
+  } finally { store.close(); }
   process.stdout.write('', () => process.exit(code));
   await new Promise(() => {});
 }

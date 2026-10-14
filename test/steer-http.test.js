@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { realpathSync, writeFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { project, supervise, LIVE } from './helpers/live.js';
@@ -113,5 +114,92 @@ test('cross-site and malformed requests cannot steer', async () => {
     assert.equal((await post(v.base, `/api/members/${memberId}/resume`, { max_cost_usd: 'lots' })).status, 400);
     assert.equal((await post(v.base, '/api/members/999/pause', {})).status, 404);
     assert.equal(v.store.member(memberId).state !== 'cancelled', true);
+  } finally { await v.close(); }
+});
+
+// Team A's manager opens a task thread with team B's lead; both then wait.
+function threadPair() {
+  const b = project({ 'b-lead': LIVE() }, {});
+  const a = project({ manager: LIVE() }, {});
+  const bReal = realpathSync(b.root);
+  const body = JSON.stringify({ by_member: {
+    manager: { steps: [{ tool: 'request', args: { team: bReal, text: 'crash on rotate', task: 'fix it' } }, { sleep_ms: 30_000 }] },
+    'b-lead': { steps: [{ sleep_ms: 30_000 }] }
+  } });
+  writeFileSync(a.script, body);
+  writeFileSync(b.script, body);
+  return { a, b };
+}
+
+test('a human reply from the page reaches both sides and leaves the thread state alone', async () => {
+  const { a } = threadPair();
+  const v = await view(a.script, { shared: true, http: { by: 'tester' } });
+  try {
+    const { memberId } = v.sup.submit({ projectRoot: a.root, member: 'manager', task: 'ship' });
+    await until(() => v.store.thread(1)?.owner_member != null);
+    const t = v.store.thread(1);
+    const r = await post(v.base, '/api/threads/1/reply', { text: 'try rebooting' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { thread_id: 1, state: 'open' });
+    assert.equal(v.store.thread(1).state, 'open');
+    for (const id of [memberId, t.owner_member]) {
+      const msg = v.store.timeline({ memberId: id }).messages.find((m) => m.text === '[thread #1] try rebooting');
+      assert.ok(msg, `member ${id} got it`);
+      assert.deepEqual([msg.from_kind, msg.from_name, msg.thread_id], ['human', 'tester', 1]);
+    }
+    const post1 = v.store.threadPosts(1).at(-1);
+    assert.deepEqual([post1.side, post1.author, post1.state], ['human', 'tester', null]);
+
+    assert.equal((await post(v.base, '/api/threads/1/reply', { text: '   ' })).status, 400);
+    assert.equal((await post(v.base, '/api/threads/1/reply', {})).status, 400);
+    const withState = await post(v.base, '/api/threads/1/reply', { text: 'decline it', state: 'declined' });
+    assert.equal(withState.status, 400);
+    assert.match(withState.json.error, /humans cannot change a thread's state/);
+    assert.equal(v.store.thread(1).state, 'open');
+    assert.equal((await post(v.base, '/api/threads/99/reply', { text: 'hi' })).status, 404);
+    assert.equal((await post(v.base, '/api/threads/1/reply', { text: 'hi' }, { Origin: 'https://evil.example' })).status, 403);
+    assert.equal((await post(v.base, '/api/threads/1/reply', { text: 'hi' }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+    assert.equal((await call(v.base, 'POST', '/api/threads/1/reply', { body: '{"text":"x"}', headers: { 'Content-Type': 'text/plain' } })).status, 415);
+    assert.equal(v.store.threadPosts(1).filter((p) => p.side === 'human').length, 1);
+  } finally { await v.close(); }
+});
+
+test('a human cannot reply to a closed thread', async () => {
+  const { a } = threadPair();
+  const v = await view(a.script, { shared: true });
+  try {
+    v.sup.submit({ projectRoot: a.root, member: 'manager', task: 'ship' });
+    await until(() => v.store.thread(1)?.owner_member != null);
+    v.store.moveThread(1, 'open', 'declined', { result: { reason: 'no' } });
+    const r = await post(v.base, '/api/threads/1/reply', { text: 'late' });
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /thread #1 is declined/);
+    assert.equal(v.store.threadPosts(1).some((p) => p.side === 'human'), false);
+  } finally { await v.close(); }
+});
+
+test('a human reply with no supervisor needs serve', async () => {
+  const store = openStore(':memory:');
+  const web = await startHttp({ store, port: 0 });
+  try {
+    assert.equal((await post(web.url, '/api/threads/1/reply', { text: 'hi' })).status, 503);
+  } finally { await web.close(); store.close(); }
+});
+
+test('a human reply to a thread whose runs another supervisor owns is refused and stores nothing', async () => {
+  const { a } = threadPair();
+  const v = await view(a.script, { shared: true });
+  try {
+    const run = v.store.createRun({ project: '/a', task: 't', owner: '/elsewhere.sock' });
+    const m = v.store.addMember({ runId: run, parentId: null, name: 'mgr', task: 't', depth: 0 });
+    v.store.setRunRoot(run, m.id);
+    v.store.setState(m.id, 'running');
+    const id = v.store.addThread({ kind: 'question', fromProject: '/a', fromRun: run, fromMember: m.id,
+      toProject: '/b', toMember: 'lead', chain: ['/a'], text: 'q' });
+    const before = v.store.threadPosts(id).length;
+    const r = await post(v.base, `/api/threads/${id}/reply`, { text: 'hello' });
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /^read-only: /);
+    assert.equal(v.store.threadPosts(id).length, before);
   } finally { await v.close(); }
 });

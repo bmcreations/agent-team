@@ -17,9 +17,9 @@ project. One dispatch does the following for the named member:
 SIGINT or SIGTERM, with the web view at `http://127.0.0.1:4747/` (`--port 0` picks a free port;
 the address is printed at start). The view binds to `127.0.0.1` only and has no sign-in yet:
 any user or process on this machine that can reach the port can read every run and steer the
-runs `serve` owns. `--max-running` (default 6) caps the members working at once across every
-project. When the
-root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol-2),
+runs `serve` owns. A member another repository's team runs is tagged with that team, and its
+panel shows that repository's `deny_paths`. `--max-running` (default 6) caps the members
+working at once across every project. When the root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol-2),
 `agent-team --member ...` runs it through the supervisor: it submits to a running one, or
 starts an in-process one if none is listening. An in-process supervisor listens on a
 private `inproc-<pid>-<n>.sock` beside the shared socket, so another CLI never submits to it;
@@ -44,6 +44,9 @@ shows the `agent-team attach <run> <member>` command to copy. A run started by a
 `serve` running belongs to that CLI's in-process supervisor; the page shows it live but
 read-only, and `send` and `answer` refuse it too, because only the supervisor running a member
 can deliver to it.
+
+The Threads page (`#/threads`) lists threads between teams grouped by team pair, shows each
+thread's posts at `#/threads/<id>`, links the runs on both sides, and lets you post to a thread.
 
 `agent-team send <run> <member> <text>` puts one message in the member's inbox and needs
 `serve`, like `pause`, `resume`, `cancel` and `answer`.
@@ -101,6 +104,8 @@ agent-team cancel <run> <member> [--subtree]
 agent-team send <run> <member> <text>
 agent-team questions [<run>] [--json]
 agent-team answer <question-id> <answer>
+agent-team threads [--project <dir>] [--json]
+agent-team reply <thread> <text>
 agent-team attach <run> <member>
 agent-team handback <run> <member>
 ```
@@ -116,6 +121,13 @@ unfinished member of its run, queued ones included. Pausing a manager alone leav
 working. A one-shot (v1) report that is already running cannot be cancelled and runs until it
 finishes. Each verb is signed with your OS
 user name, which is what the member and its manager are told.
+
+`threads` lists the threads between teams, grouped by team pair, newest first; it reads the
+store directly, so it works without `serve` (`--project` narrows it to threads that team is on).
+`reply` posts to a thread as you, and both sides' leads get it. It does not accept or decline
+the thread, and a closed thread takes no more posts. The web view has the same list at
+`GET /api/threads`, one thread with its posts at `GET /api/threads/<id>`, and the reply at
+`POST /api/threads/<id>/reply`.
 
 `attach` hands a claude or codex member to you: its turn is interrupted, and once its process
 has exited, the adapter's `attach` starts in its workspace in your terminal: `claude --resume
@@ -229,6 +241,10 @@ Every adapter run, including each call back to a manager, spends one unit of
 `max_delegations`. When the budget runs out, the current run fails with
 `delegation budget exhausted`.
 
+`team_status(team?)` shows what another team is doing: its running runs, member states, and
+latest checkpoints, never transcripts. With no team, it lists the teams you can name: the
+supervisor's projects and this project's `peers`.
+
 ### Other teams
 
 A report that is a [`team` member](configuration.md#other-teams) runs another project's team.
@@ -236,7 +252,17 @@ The dispatcher loads that project's config and runs its entry member at depth 0 
 team, so the other team's `max_depth` bounds the tree below it. Each of its members works in
 a filtered clone of its own repository, built with its own `deny_paths`.
 
-Its runs still spend this dispatch's `max_delegations`. The other team starts with whichever
+Under `agent-team serve`, a `team:` member that names a local repository joins the run live.
+Delegating to it starts that repository's entry member as a report of the manager: it shows in
+the run's tree, can be messaged (by the name the manager knows, or its own), paused, resumed,
+cancelled and taken over like any member, and its own reports work under that repository's
+config — its `deny_paths` build their workspaces and its `max_depth` bounds the tree below the
+entry member. Every delegation inside it spends the run's `max_delegations` and that of every
+team it is inside, whichever runs out first. A team the run has already passed through is refused.
+Without `serve` (a CLI run with its own in-process supervisor), a team member still runs
+one-shot, as below. Teams named by GitHub repository always run one-shot.
+
+A one-shot team's runs still spend this dispatch's `max_delegations`. The other team starts with whichever
 is smaller, its own `max_delegations` or what this dispatch has left, and what it uses comes
 off this dispatch's budget.
 
@@ -266,6 +292,32 @@ string also fails.
 
 The adapter only checks the shape. Whether each `to` names a direct report is checked by the
 dispatcher, which refuses the whole dispatch when it does not.
+
+## Threads between teams
+
+Under `agent-team serve`, a member can open a thread with any team the supervisor knows (see
+`peers` in configuration) with `request(team, text, task?)`. With `task`, the thread asks the
+other team to do work; without, it asks a question. The call returns at once.
+
+The thread goes to the other team's entry member. If that member is running in this supervisor
+as its own run's lead (not a member another run entered cross-team), it gets the thread in its inbox; otherwise `serve` starts a run in that repository, under its
+own config, budgets and `deny_paths`, with the thread in the lead's brief. Opening a thread
+spends one of the requester's delegations; the work it leads to is charged to the other team.
+
+A thread moves `open -> accepted | declined -> done`. The receiving lead answers with
+`reply(thread, text, state?)`: `accepted` before it delegates any of a task thread's work,
+`declined` with a reason, `done` to answer a question. A reply without a state is a post: a
+question back, an update. If the lead's run finishes without accepting a task thread, the
+thread is declined; if it finishes after accepting, the thread closes `done` with the run's
+result. A question nobody answers closes the same way when its lead finishes: if the lead's run was
+started for the thread, the thread closes `done` with that run's summary; if the lead was already
+running for other work, the thread is declined with "the lead finished without answering", and its
+summary is not passed on. While the lead has posted a question back and is waiting for the
+requester, it stays running and `wait_for` blocks instead of returning "no open reports". The member that asked gets every post and the close through `wait_for`, and stays
+running while a thread it opened is open. If it has finished, its manager gets them instead.
+
+A request whose chain of threads leads back to a team already in it is refused, so A asking B
+asking A cannot loop.
 
 ## The result
 

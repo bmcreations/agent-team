@@ -89,8 +89,10 @@ function session() {
     const vars = {};
     const subst = (v) => {
       if (typeof v === 'string') {
-        const m = /^\$(\w+)\.(\w+)$/.exec(v);
-        return m ? vars[m[1]]?.[m[2]] : v;
+        const m = /^\$(\w+)((?:\.\w+)+)$/.exec(v);
+        if (!m) return v;
+        const root = m[1] === 'brief' ? brief : vars[m[1]];
+        return m[2].slice(1).split('.').reduce((o, k) => o?.[k], root);
       }
       if (Array.isArray(v)) return v.map(subst);
       if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, subst(x)]));
@@ -121,6 +123,22 @@ function session() {
               if (m.text.startsWith('finished ')) done.add(m.report_id);
             }
             if (r.messages.length === 0 && !r.timed_out) break;   // nothing left to wait on
+            if (interrupted) break;
+          }
+          res = error ? { messages, error } : { messages };
+        } else if (step.until_threads) {
+          const ids = subst(step.until_threads).map(Number);
+          const done = new Set();
+          const messages = [];
+          let error = null;
+          while (!ids.every((id) => done.has(id))) {
+            const r = await call('wait_for', args).catch((err) => ({ error: err.message }));
+            if (r.error) { error = r.error; break; }
+            for (const m of r.messages) {
+              messages.push(m);
+              if (m.thread_id != null && new RegExp(`^thread #${m.thread_id} (done|declined)`).test(m.text)) done.add(m.thread_id);
+            }
+            if (r.messages.length === 0) break;   // timed out or nothing left to wait on
             if (interrupted) break;
           }
           res = error ? { messages, error } : { messages };

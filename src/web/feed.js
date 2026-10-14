@@ -161,3 +161,45 @@ export const matches = (query, ...fields) => {
   const q = query.toLowerCase();
   return fields.some((f) => typeof f === 'string' && f.toLowerCase().includes(q));
 };
+
+// A single line of someone's text, cut to `max` characters.
+export const snippet = (text, max = 120) => {
+  const one = oneLine(text ?? '');
+  return one.length > max ? `${one.slice(0, max)}…` : one;
+};
+
+// A task's headline: its first non-empty line without Markdown heading marks, cut to `max`.
+// A brief pasted as the task stays readable; the full text is shown on request.
+export const taskTitle = (text, max = 120) => {
+  const first = (text ?? '').split('\n').map((l) => l.replace(/^\s*#+\s*/, '').trim()).find(Boolean) ?? '';
+  return snippet(first, max);
+};
+
+// Whether a task has more to it than its headline.
+export const hasMoreThanTitle = (text) => oneLine(text ?? '') !== taskTitle(text, Infinity);
+
+// The sidebar badge: threads a team still has to answer or finish. `pairs` is the server's grouping.
+export const openThreadCount = (pairs) => pairs.reduce((n, g) => n + g.threads.filter((t) => t.state === 'open' || t.state === 'accepted').length, 0);
+
+// Whether a stream batch means the thread list (or thread `id`, when given) is stale.
+export const threadTouched = (batch, id = null) =>
+  (batch.messages ?? []).some((m) => m.thread_id != null && (id == null || m.thread_id === id))
+  || (batch.events ?? []).some((e) => e.kind === 'thread_opened');
+
+// The runs a thread involves: the requester's, the run started for it, and the run of the lead
+// that owns it (the same as the second when it started one).
+export const threadRunIds = (t) => [...new Set([t.from_run, t.run_id, t.owner?.run_id].filter((r) => r != null))];
+
+// Humans post only to an open or accepted thread, and only through the serve process that owns a
+// live run on one side; `runs` are the page's public run rows, any that are absent left out.
+export const canPostToThread = (thread, runs) =>
+  (thread.state === 'open' || thread.state === 'accepted') &&
+  threadRunIds(thread).some((id) => runs.find((r) => r.id === id)?.steerable === true);
+
+// A message too long to show whole in the conversation: a finished report or a delegated brief
+// can run to thousands of lines, which made a phone scroll for tens of thousands of pixels.
+export const CLAMP_LINES = 6;
+export const isLongText = (text) => {
+  const t = String(text ?? '');
+  return t.length > 480 || t.split('\n').length > CLAMP_LINES;
+};

@@ -239,7 +239,7 @@ time { font-variant-numeric: tabular-nums; }
 .banner.info { background: var(--sunk); color: var(--muted); }
 .banner .icon { margin-top: 2px; }
 .run { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 440px); gap: 18px; align-items: start; }
-.run-main { display: grid; gap: 18px; min-width: 0; }
+.run-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; min-width: 0; }
 .run-side { position: sticky; top: 80px; min-width: 0; max-height: calc(100vh - 100px); overflow: auto; }
 .back { display: none; align-items: center; gap: 4px; font-size: 14px; color: var(--muted); margin-bottom: 12px; }
 .back .icon { width: 16px; height: 16px; }
@@ -263,6 +263,8 @@ time { font-variant-numeric: tabular-nums; }
 .talk .msg .who-line { margin: 0 4px 3px; }
 .talk li.mine .who-line { text-align: right; }
 .bubble { padding: 9px 14px; border-radius: 18px; background: var(--sunk); white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
+.show-more { align-self: flex-start; margin: 4px 10px 0; padding: 2px 0; border: 0; background: none; color: var(--clay-ink); font: inherit; font-size: 13px; cursor: pointer; }
 .talk li:not(.mine) .bubble { border-bottom-left-radius: 6px; }
 .talk li.mine .bubble { background: var(--clay-soft); border-bottom-right-radius: 6px; }
 .talk li.event { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); padding: 0 4px; }
@@ -296,6 +298,7 @@ li.task > .icon, .progress.now > .icon { width: 15px; height: 15px; }
 .mhead .body { flex: 1; min-width: 0; }
 .mhead h2 { font-size: 22px; letter-spacing: -.02em; }
 .mhead .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.full-text { margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; color: var(--muted); max-height: 50vh; overflow: auto; }
 .mtask { margin: 14px 0 0; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
 .result { margin-top: 12px; }
 .composer { margin-top: 16px; display: flex; align-items: flex-end; gap: 8px; padding: 6px 6px 6px 14px; border-radius: 22px;
@@ -403,3 +406,20 @@ details.more-facts[open] summary .icon { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Threads */
+.threads-link { margin-top: 14px; }
+.threads-link .pill { margin-left: auto; }
+.thread-item + .thread-item { margin-top: 4px; }
+.thread-links { margin: -4px 0 6px 34px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.thread-links a { text-decoration: underline; text-underline-offset: 2px; }
+.thread-item .run-card .pill { flex: none; }
+.talk.posts { max-height: none; }
+.thread-note { margin: 14px 0 0; font-size: 14px; }
+.facts-row { flex-wrap: wrap; }
+@media (max-width: 900px) {
+  .thread-item .run-card { flex-wrap: wrap; }
+  .thread-item .run-card .body { flex-basis: calc(100% - 50px); }
+  .thread-links { margin-left: 0; }
+}
+.run-head .thread-links { margin: 10px 0 0; }

@@ -1,13 +1,16 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { mkdirSync, chmodSync } from 'node:fs';
-import { loadConfig } from './config.js';
+import { join, basename } from 'node:path';
+import { mkdirSync, chmodSync, existsSync, realpathSync } from 'node:fs';
+import { loadConfig, CONFIG_RELPATH } from './config.js';
+import { parseGithubRepo } from './cloud.js';
 import { buildBrief } from './brief.js';
-import { resolveCaps, prepareMember, runMember, teamKeys, adapterPath } from './dispatch.js';
+import { resolveCaps, prepareMember, runMember, teamKeys, teamRoot, teamEntry, refuseCycle, adapterPath } from './dispatch.js';
 import { pruneWorkspace } from './workspace.js';
 import { MemberSession } from './sessions.js';
 import { serveRpc, isListening } from './rpc.js';
-import { TEAM_NOTE } from './team-tools.js';
+import { liveNotes } from './team-tools.js';
+import { knownTeams, resolveTeam, scopeProject } from './teams.js';
+import { teamStatus } from './view.js';
 import { DEFAULT_TIMEOUT_MS } from './adapter.js';
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled']);
@@ -44,7 +47,12 @@ export function lockSupervisorDir(env = process.env) {
 }
 
 const label = (m) => `${m.from_name} (${m.from_kind})`;
-const render = (m) => ({ id: m.id, from: label(m), text: m.text, report_id: m.report_id });
+// Legal thread moves by kind; declined and done are final.
+// A project root as a real path; one that no longer exists stays as given and matches nothing.
+const realRoot = (p) => { try { return realpathSync(p); } catch { return p; } };
+
+const THREAD_MOVES = { task: { open: ['accepted', 'declined'], accepted: ['done'] }, question: { open: ['done', 'declined'] } };
+const render = (m) => ({ id: m.id, from: label(m), text: m.text, report_id: m.report_id, thread_id: m.thread_id ?? null });
 const clampSeconds = (v, dflt, max) => (Number.isInteger(v) && v > 0 ? Math.min(v, max) : dflt);
 
 function checkCap(cap) {
@@ -54,7 +62,7 @@ function checkCap(cap) {
 export class Supervisor {
   #live = new Map();          // memberId -> runtime state of a launched, unfinished member
   #pending = [];              // memberIds waiting for a slot
-  #runs = new Map();          // runId -> { projectRoot, config, budget }
+  #runs = new Map();          // runId -> { projectRoot, config, budget, timeoutMs, configs, keys }
   #runWaiters = new Map();    // runId -> [resolve]
   #resumes = new Map();       // memberId -> { note } for a paused member's next launch
   #closing = false;
@@ -63,10 +71,10 @@ export class Supervisor {
   #resolutions = new Map();   // memberId -> Promise of { resolved, caps } | { team: true } | { error }
 
   constructor({ store, adapterDir, skillsDir = null, socketPath, env = {}, maxRunning = 6,
-                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000, stopMs = null }) {
+                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000, stopMs = null, shared = false }) {
     // How long a member may take to exit after its final stop before it is ended.
     stopMs ??= Math.max(graceMs * 2, 10_000);
-    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs, stopMs });
+    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs, stopMs, shared });
   }
 
   async start() {
@@ -100,7 +108,7 @@ export class Supervisor {
     await this.server?.close();
   }
 
-  submit({ projectRoot, member, task, timeoutMs, maxCostUsd }) {
+  submit({ projectRoot, member, task, timeoutMs, maxCostUsd, threadId = null }) {
     const config = loadConfig(projectRoot);
     if (!Object.hasOwn(config.members, member)) throw new Error(`unknown member "${member}"`);
     const limits = { budget: config.defaults.max_delegations,
@@ -108,8 +116,9 @@ export class Supervisor {
                      maxCostUsd: maxCostUsd ?? config.defaults.max_cost_usd };
     if (limits.maxCostUsd != null) checkCap(limits.maxCostUsd);
     // Limits and owner are stored so a restarted supervisor can rebuild the run.
-    const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath });
-    this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs });
+    const runId = this.store.createRun({ project: projectRoot, task, ...limits, owner: this.socketPath, threadId });
+    this.#runs.set(runId, { projectRoot, config, budget: { runs: limits.budget }, timeoutMs: limits.timeoutMs,
+                            configs: new Map(), keys: new Map() });
     const { id } = this.store.addMember({ runId, parentId: null, name: member, task, depth: 0 });
     this.store.setRunRoot(runId, id);
     this.#resolve(this.store.member(id));
@@ -150,6 +159,30 @@ export class Supervisor {
       this.#resolveQuestion(q.member_id, { answer, answered_by: by, timed_out: false });
     }
     return { ok: true };
+  }
+
+  // A human's post on a thread, delivered to whoever holds each side. A human posts only: no
+  // state change, and a closed thread takes no more posts. A side whose run another supervisor
+  // owns has the post recorded and is skipped.
+  humanReply({ thread_id, text, by = 'local' }) {
+    const t = Number.isInteger(thread_id) ? this.store.thread(thread_id) : null;
+    if (!t) throw new Error(`unknown thread #${thread_id}`);
+    if (typeof text !== 'string' || !text.trim()) throw new Error('a reply needs text');
+    if (t.state === 'done' || t.state === 'declined') throw new Error(`thread #${t.id} is ${t.state}`);
+    // Who can be reached comes first: a post nobody was given is not recorded.
+    const holders = [this.#holder(t), t.owner_member].filter((id) => id != null);
+    const reach = [...new Set(holders)].filter((id) => {
+      const m = this.store.member(id);
+      const rt = this.#live.get(id);
+      return !TERMINAL.has(m.state) && this.#runs.has(m.run_id) && !rt?.stopping && !(rt?.halt && rt.halt.kind !== 'pause');
+    });
+    if (!reach.length) {
+      for (const id of holders) this.#owned(this.store.member(id));   // another supervisor's run: the read-only error
+      throw new Error(`thread #${t.id} has no live member to reach`);
+    }
+    this.store.addThreadPost({ threadId: t.id, side: 'human', author: by, text });
+    for (const to of reach) this.#deliver(t.id, to, { side: 'human', author: by, text, record: false });
+    return { thread_id: t.id, state: t.state };
   }
 
   // Open ask_human questions, newest last, with who asked; `answer` takes their ids.
@@ -334,9 +367,23 @@ export class Supervisor {
       return this.#owned(m);
     }
     if (run_id == null || typeof member !== 'string') throw new Error('name a member: member_id, or run_id and member');
-    const matches = this.store.members(Number(run_id)).filter((m) => m.name === member);
+    const all = this.store.members(Number(run_id));
+    const matches = all.filter((m) => m.name === member || m.alias === member);
+    // A bare id names one member when a name is shared across teams.
+    if (!matches.length && /^\d+$/.test(member)) {
+      const byId = all.find((m) => m.id === Number(member));
+      if (byId) return this.#owned(byId);
+    }
     if (!matches.length) throw new Error(`run ${run_id} has no member "${member}"`);
-    return this.#owned(matches.filter((m) => !TERMINAL.has(m.state)).at(-1) ?? matches.at(-1));
+    const live = matches.filter((m) => !TERMINAL.has(m.state));
+    // The same role twice is the latest one; different teams sharing a name are not.
+    if (new Set(live.map((m) => scopeProject(this.store, m))).size > 1) {
+      throw new Error(
+        `member "${member}" is ambiguous in run ${run_id}: ` +
+        `${live.map((m) => `id ${m.id} (${scopeProject(this.store, m)})`).join(', ')} — name it by id`
+      );
+    }
+    return this.#owned(live.at(-1) ?? matches.at(-1));
   }
 
   // Another supervisor (a CLI's in-process one) may be running this member's run. A finished
@@ -486,7 +533,8 @@ export class Supervisor {
       const finishingTurn = rt.halt?.kind === 'pause' && !rt.halt.now;
       if (rt.waiter || rt.question || rt.idle || (rt.halt && !finishingTurn) || rt.stopping) { rt.quietSince = at; continue; }
       rt.activeMs += elapsed;
-      const { timeoutMs, config } = this.#runs.get(rt.member.run_id);
+      const { timeoutMs } = this.#runs.get(rt.member.run_id);
+      const { config } = this.#scope(rt.member);
       if (rt.activeMs >= timeoutMs) {
         this.store.addEvent(id, 'timed_out', { after_s: timeoutMs / 1000 });
         rt.halt = { kind: 'timeout', now: true, by: 'timeout', seconds: timeoutMs / 1000 };
@@ -538,15 +586,58 @@ export class Supervisor {
         out.failed.push(run.id);
         continue;
       }
-      this.#runs.set(run.id, {
+      const entry = {
         projectRoot: run.project, config,
         budget: { runs: run.budget ?? config.defaults.max_delegations },
-        timeoutMs: run.timeout_ms ?? this.timeoutMs
-      });
+        timeoutMs: run.timeout_ms ?? this.timeoutMs,
+        configs: new Map(), keys: new Map()
+      };
+      this.#runs.set(run.id, entry);
+      // Every config a live member's path needs is loaded up front; one that no longer loads fails
+      // the run. Finished members need none.
+      try {
+        for (const m of this.store.members(run.id)) if (!TERMINAL.has(m.state)) this.#scope(m);
+      } catch (err) {
+        this.#runs.delete(run.id);
+        this.#failRun(run, `could not recover after a supervisor restart: ${err.message}`);
+        out.failed.push(run.id);
+        continue;
+      }
       for (const m of this.store.members(run.id)) this.#recoverMember(m);
       out.recovered.push(run.id);
     }
+    if (this.shared) this.#recoverThreads();
     return out;
+  }
+
+  // Every open or accepted thread ends recovery with a live owner or a running thread-run, or
+  // closed. Runs are already recovered (or failed), so their state says which.
+  #recoverThreads() {
+    const live = (runId) => this.store.run(runId)?.status === 'running';
+    for (const t of this.store.threadsInState(['open', 'accepted'])) {
+      const owner = t.owner_member == null ? null : this.store.member(t.owner_member);
+      if ((owner && !TERMINAL.has(owner.state) && live(owner.run_id)) || (t.run_id != null && live(t.run_id))) continue;
+      try {
+        if (t.run_id != null) {
+          // Its run is over; close the thread the way a finishing run would, once.
+          const run = this.store.run(t.run_id);
+          this.#closeThread(t, 'failed', { status: 'failed', summary: `the run ${run.status} during a supervisor restart` });
+        } else {
+          this.#startThreadRun(t.id);
+        }
+      } catch (err) {
+        // An open thread is declined with the reason; an accepted one can only finish, so it
+        // closes done-failed. Either way the requester is told and the thread does not linger.
+        const reason = `the receiving team could not be recovered: ${err.message}`;
+        try {
+          const cur = this.store.thread(t.id);
+          if (cur.state === 'open') this.#moveThread(cur, 'declined', { text: reason, author: 'agent-team' });
+          else this.#closeThread(cur, 'failed', { status: 'failed', summary: reason });
+        } catch (closeErr) {
+          process.stderr.write(`agent-team: could not close thread #${t.id} on recovery: ${closeErr.message}\n`);
+        }
+      }
+    }
   }
 
   #recoverMember(m) {
@@ -608,7 +699,7 @@ export class Supervisor {
       if (this.#running() >= this.maxRunning) return;
       const m = this.store.member(id);
       if (m.parent_id != null) {
-        const { config } = this.#runs.get(m.run_id);
+        const { config } = this.#scope(this.store.member(m.parent_id));
         const running = this.store.children(m.parent_id).filter((c) => this.#live.has(c.id)).length;
         if (running >= config.defaults.max_parallel) continue;
       }
@@ -620,13 +711,44 @@ export class Supervisor {
     }
   }
 
+  // An entered team's config, loaded once per run. Throws if it no longer loads.
+  #teamConfig(run, root) {
+    if (!run.configs.has(root)) run.configs.set(root, loadConfig(root));
+    return run.configs.get(root);
+  }
+
+  #keys(run, root) {
+    if (!run.keys.has(root)) run.keys.set(root, teamKeys(root));
+    return run.keys.get(root);
+  }
+
+  // The project a member works in and what bounds it there: the nearest entry member at or
+  // above it (members.project set), else the run's own project. Every config read goes
+  // through here, so a team entered live keeps its own deny_paths, max_depth, max_parallel,
+  // stall_minutes and members. `entries` are the enclosing entry members, innermost first;
+  // `teams` is every team key on the path from the run's project, outermost first.
+  #scope(m) {
+    const run = this.#runs.get(m.run_id);
+    const entries = [];
+    for (let cur = m; cur; cur = cur.parent_id == null ? null : this.store.member(cur.parent_id)) {
+      if (cur.project != null) entries.push(cur);
+    }
+    const top = entries[0];
+    const projectRoot = top ? top.project : run.projectRoot;
+    const config = top ? this.#teamConfig(run, top.project) : run.config;
+    const teams = [run.projectRoot, ...entries.map((e) => e.project).reverse()]
+      .flatMap((root) => this.#keys(run, root));
+    return { projectRoot, config, entries, teams };
+  }
+
   #ctx(m) {
     const run = this.#runs.get(m.run_id);
+    const { projectRoot, config, teams } = this.#scope(m);
     return {
-      config: run.config, projectRoot: run.projectRoot, member: m.name, task: m.task,
+      config, projectRoot, member: m.name, task: m.task,
       adapterDir: this.adapterDir, assignments: {}, skillsDir: this.skillsDir, env: this.env,
       timeoutMs: run.timeoutMs, budget: run.budget, depth: m.depth,
-      teams: teamKeys(run.projectRoot), originRoot: run.projectRoot
+      teams, originRoot: run.projectRoot
     };
   }
 
@@ -635,7 +757,7 @@ export class Supervisor {
   #resolve(m) {
     let p = this.#resolutions.get(m.id);
     if (!p) {
-      const { config } = this.#runs.get(m.run_id);
+      const { config } = this.#scope(m);
       p = config.members[m.name].team
         ? Promise.resolve({ team: true })
         : resolveCaps(this.#ctx(m)).catch((error) => ({ error }));
@@ -659,6 +781,7 @@ export class Supervisor {
     this.store.setState(id, 'running');
     this.store.addEvent(id, 'started', {});
 
+    const scope = this.#scope(m);
     const ctx = this.#ctx(m);
     const r = await this.#resolve(m);
     if (this.#closing) return;   // close() has recorded any halt; a working member is recovered
@@ -688,12 +811,14 @@ export class Supervisor {
     const prep = prepareMember(ctx, { resolved, caps }, { workspaceDir: resume ? m.workspace : null });
     rt.workspace = prep.workspace;
     this.store.setWorkspace(id, prep.workspace.dir);
+    const { thread, threads } = this.#threadsForBrief(m, scope);
     const brief = buildBrief({
-      resolved, task: m.task, cwd: prep.workspace.dir, denyPaths: run.config.deny_paths,
+      thread, threads,
+      resolved, task: m.task, cwd: prep.workspace.dir, denyPaths: scope.config.deny_paths,
       skillText: prep.skillText, dialectText: prep.dialectText,
-      timeoutSec: Math.floor(run.timeoutMs / 1000), depth: m.depth, maxDepth: run.config.defaults.max_depth
+      timeoutSec: Math.floor(run.timeoutMs / 1000), depth: m.depth, maxDepth: scope.config.defaults.max_depth
     });
-    brief.task += TEAM_NOTE;
+    brief.task += liveNotes(brief);
     rt.session = new MemberSession({
       execPath: adapterPath(this.adapterDir, resolved.agent), cwd: prep.workspace.dir,
       env: { ...this.env, AGENT_TEAM_TEAM_SOCKET: this.socketPath, AGENT_TEAM_TEAM_TOKEN: m.token },
@@ -797,6 +922,7 @@ export class Supervisor {
       this.#notifyManager(m, `finished ${outcome}: ${result.summary ?? ''}${stat}`);
     } else {
       this.store.finishRun(m.run_id, state);
+      this.#closeThreadsOf(m, state, result);
       for (const resolve of this.#runWaiters.get(m.run_id) ?? []) resolve(this.store.member(id).result);
       this.#runWaiters.delete(m.run_id);
     }
@@ -824,8 +950,28 @@ export class Supervisor {
 
   // ---- inbox delivery ----
 
-  #openReports(id) {
-    return this.store.children(id).filter((c) => !TERMINAL.has(c.state)).length;
+  // What keeps a member working: reports still running, threads it (or a finished report it
+  // now stands in for) opened that are not closed, and threads it owns where its own post is
+  // the newest: it asked the requester something and is waiting. A thread it owns that the
+  // requester spoke last is not work, or a lead that ignores one would hold its requester forever.
+  #openWork(id) {
+    const reports = this.store.children(id).filter((c) => !TERMINAL.has(c.state)).length;
+    let threads = 0;
+    for (const t of this.store.threadsInState(['open', 'accepted'])) {
+      if (this.#holder(t) === id) threads++;
+      else if (t.owner_member === id && this.#ownerAsked(t)) threads++;
+    }
+    return reports + threads;
+  }
+
+  // The owner's latest post is a plain one, not an accept or a close.
+  #ownerAsked(t) {
+    const last = this.store.threadPosts(t.id).at(-1);
+    return last?.side === 'receiver' && last.state == null;
+  }
+
+  #ownsOpenThread(id) {
+    return this.store.threadsInState(['open', 'accepted']).some((t) => t.owner_member === id);
   }
 
   // Exactly one path delivers each message: a blocked wait_for takes it as its tool result;
@@ -859,7 +1005,7 @@ export class Supervisor {
       rt.session.send({ type: 'message', id: m.id, from: label(m), text: m.text });
     }
     if (msgs.length) { rt.idle = false; return; }
-    if (rt.idle && rt.offered.size === 0 && this.#openReports(id) === 0) {
+    if (rt.idle && rt.offered.size === 0 && this.#openWork(id) === 0) {
       rt.stopping = true;
       rt.session.send({ type: 'stop' });
       // An adapter that hangs on its way out would hold its slot forever.
@@ -921,6 +1067,7 @@ export class Supervisor {
       wait_run: (p) => this.waitRun(p.run_id),
       send: (p) => this.send(p),
       answer: (p) => this.answer(p),
+      thread_reply: (p) => this.humanReply(p),
       questions: (p) => this.questions(p),
       pause: (p) => this.pause(p),
       cancel: (p) => this.cancel(p),
@@ -935,12 +1082,22 @@ export class Supervisor {
       send_to: (id, p) => this.#sendTo(id, p),
       wait_for: (id, p) => this.#waitFor(id, p),
       report_progress: (id, p) => this.#reportProgress(id, p),
-      ask_human: (id, p) => this.#askHuman(id, p)
+      ask_human: (id, p) => this.#askHuman(id, p),
+      team_status: (id, p) => this.#teamStatus(id, p),
+      request: (id, p) => this.#request(id, p),
+      reply: (id, p) => this.#reply(id, p)
     };
     if (!Object.hasOwn(tools, method)) throw new Error(`unknown tool "${method}"`);
     const m = typeof token === 'string' ? this.store.memberByToken(token) : null;
     if (!m || !this.#live.has(m.id)) throw new Error('this member is not running');
     return tools[method](m.id, params);
+  }
+
+  // Reads the store only, so it also works in an in-process supervisor.
+  #teamStatus(id, { team } = {}) {
+    const { projectRoot, config } = this.#scope(this.store.member(id));
+    if (team == null || team === '') return { teams: knownTeams({ store: this.store, projectRoot, config }) };
+    return teamStatus(this.store, resolveTeam({ store: this.store, projectRoot, config, team }));
   }
 
   #reportProgress(id, { text }) {
@@ -957,7 +1114,9 @@ export class Supervisor {
   #delegate(id, { to, task } = {}) {
     const rt = this.#live.get(id);
     const m = rt.member;
-    const { config, budget } = this.#runs.get(m.run_id);
+    const run = this.#runs.get(m.run_id);
+    const scope = this.#scope(m);
+    const { config } = scope;
     if (rt.halt) throw new Error(`delegation refused: ${this.#haltNote(rt)}`);
     if (typeof to !== 'string' || typeof task !== 'string' || !task.trim()) {
       throw new Error('delegate needs "to" (a report\'s name) and "task"');
@@ -966,14 +1125,308 @@ export class Supervisor {
     if (m.depth >= config.defaults.max_depth) {
       throw new Error(`delegation refused: already at max_depth ${config.defaults.max_depth}`);
     }
-    if (budget.runs <= 0) throw new Error('delegation budget exhausted (max_delegations)');
-    budget.runs -= 1;
-    this.store.setBudget(m.run_id, budget.runs);
-    const child = this.store.addMember({ runId: m.run_id, parentId: id, name: to, task, depth: m.depth + 1 });
-    this.store.addEvent(id, 'delegated', { to, report_id: child.id });
+    const runThread = this.store.run(m.run_id).thread_id;
+    if (runThread != null) {
+      const t = this.store.thread(runThread);
+      if (t.kind === 'task' && t.state === 'open') {
+        throw new Error(`delegation refused: accept thread #${t.id} first — reply({ thread: ${t.id}, state: "accepted" })`);
+      }
+    }
+    this.#checkBudget(run, scope);
+    const spec = config.members[to];
+    const entered = spec.team && this.shared && !parseGithubRepo(spec.team)
+      ? this.#enterTeam(m, scope, to, spec) : null;   // throws before anything is spent
+    this.#spendBudget(m.run_id, run, scope);
+    const child = entered
+      ? this.store.addMember({ runId: m.run_id, parentId: id, name: entered.entry, task, depth: 0,
+                               project: entered.root, alias: to, scopeBudget: entered.budget })
+      : this.store.addMember({ runId: m.run_id, parentId: id, name: to, task, depth: m.depth + 1 });
+    this.store.addEvent(id, 'delegated', { to, report_id: child.id, ...(entered ? { team: entered.root } : {}) });
     this.#resolve(this.store.member(child.id));
     this.#schedule(child.id);
-    return { report_id: child.id };
+    return { report_id: child.id, ...(entered ? { team: { root: entered.root, member: entered.entry } } : {}) };
+  }
+
+  // The run's delegation counter and every enclosing team's: what delegate and request spend.
+  #checkBudget(run, scope) {
+    if (run.budget.runs <= 0) throw new Error('delegation budget exhausted (max_delegations)');
+    for (const e of scope.entries) {
+      if (this.store.member(e.id).scope_budget <= 0) {
+        throw new Error(`delegation budget exhausted (max_delegations of the team at ${e.project})`);
+      }
+    }
+  }
+
+  #spendBudget(runId, run, scope) {
+    run.budget.runs -= 1;
+    this.store.setBudget(runId, run.budget.runs);
+    for (const e of scope.entries) this.store.setScopeBudget(e.id, this.store.member(e.id).scope_budget - 1);
+  }
+
+  // Checks a local team can be entered from here and returns where and as whom.
+  #enterTeam(m, scope, to, spec) {
+    const root = teamRoot(scope.projectRoot, spec.team);
+    if (!existsSync(join(root, CONFIG_RELPATH))) {
+      throw new Error(`member "${to}": no agent-team config for team "${spec.team}" at ${join(root, CONFIG_RELPATH)}`);
+    }
+    const real = realpathSync(root);
+    refuseCycle(to, spec.team, teamKeys(real), scope.teams);
+    const teamConfig = this.#teamConfig(this.#runs.get(m.run_id), real);
+    const entry = teamEntry(teamConfig, spec.member, real, to);
+    if (teamConfig.members[entry].team) {
+      throw new Error(`member "${to}": entry member "${entry}" of ${real} is itself a team — set "member" to a member that runs an agent`);
+    }
+    return { root: real, entry, budget: teamConfig.defaults.max_delegations };
+  }
+
+  // ---- threads ----
+
+  #request(id, { team, text, task } = {}) {
+    if (!this.shared) throw new Error('threads need `agent-team serve`');
+    if (typeof text !== 'string' || !text.trim()) throw new Error('request needs "text"');
+    if (task != null && (typeof task !== 'string' || !task.trim())) {
+      throw new Error('"task" must be a non-empty string when given');
+    }
+    const m = this.store.member(id);
+    const run = this.#runs.get(m.run_id);
+    const scope = this.#scope(m);
+    const target = resolveTeam({ store: this.store, projectRoot: scope.projectRoot, config: scope.config, team });
+    const chain = this.#threadChain(m, scope);
+    if (target.keys.some((k) => chain.includes(k))) {
+      // The team asked for closes the loop; it is named once when the chain already ends with it.
+      const path = chain.at(-1) === target.keys[0] ? chain : [...chain, target.keys[0]];
+      const names = path.map((k) => basename(k)).join(' -> ');
+      throw new Error(`request refused: team "${team}" is already in this chain (${names})`);
+    }
+    const entry = teamEntry(target.config, null, target.root, team);
+    if (target.config.members[entry].team) {
+      throw new Error(`team "${team}": its entry member "${entry}" is itself a team — set "member" to a member that runs an agent`);
+    }
+    this.#checkBudget(run, scope);   // checked before anything is written
+    const threadId = this.store.addThread({
+      kind: task ? 'task' : 'question', fromProject: realRoot(scope.projectRoot), fromRun: m.run_id, fromMember: id,
+      toProject: target.root, toMember: entry, parentThread: this.store.run(m.run_id).thread_id ?? null,
+      chain, text, task: task ?? null
+    });
+    this.store.addEvent(id, 'thread_opened', { thread_id: threadId, team: target.root, kind: task ? 'task' : 'question' });
+    const lead = this.#liveLead(target.root, entry);
+    let runId = null;
+    try {
+      if (lead) {
+        this.store.setThreadOwner(threadId, lead.id);
+        this.#deliver(threadId, lead.id, {
+          side: 'requester', author: m.name, fromTeam: scope.projectRoot, record: false,
+          text: task ? `${text}\n\nTask: ${task}` : text
+        });
+      } else {
+        runId = this.#startThreadRun(threadId);
+      }
+    } catch (err) {
+      // No orphan: the thread is declined with the reason and the delegation is not spent.
+      const reason = `could not start: ${err.message}`;
+      if (this.store.moveThread(threadId, 'open', 'declined', { result: { reason } })) {
+        this.store.addThreadPost({ threadId, side: 'receiver', author: 'agent-team', text: reason, state: 'declined' });
+      }
+      throw err;
+    }
+    this.#spendBudget(m.run_id, run, scope);
+    return { thread_id: threadId, state: 'open', team: { name: target.name, root: target.root }, ...(runId ? { run_id: runId } : {}) };
+  }
+
+  // The team keys this request extends: the parent thread's chain when the requester's run
+  // serves a thread, then every team on the requester's path from its run's project.
+  #threadChain(m, scope) {
+    const parentId = this.store.run(m.run_id).thread_id;
+    const parent = parentId == null ? null : this.store.thread(parentId);
+    const chain = [...(parent ? parent.chain : []), ...scope.teams];
+    // A thread delivered to a live lead leaves its run unmarked, so threads owned by this
+    // member or anyone above it in the run extend the chain too.
+    const above = new Set();
+    for (let cur = m; cur; cur = cur.parent_id == null ? null : this.store.member(cur.parent_id)) above.add(cur.id);
+    for (const t of this.store.threadsInState(['open', 'accepted'])) {
+      if (above.has(t.owner_member)) chain.push(...t.chain);
+    }
+    return [...new Set(chain)];
+  }
+
+  // A live member of this supervisor that can own a thread for (project, entry) right now.
+  #liveLead(project, entry) {
+    for (const rt of this.#live.values()) {
+      const m = this.store.member(rt.member.id);
+      // Only the team's own run root: a member another run entered cross-team works under that run's budgets.
+      if (m.name !== entry || m.parent_id != null || m.project != null || TERMINAL.has(m.state) || rt.stopping || rt.halt) continue;
+      // Roots are compared as real paths: a run's project is stored as it was submitted.
+      if (realRoot(this.#scope(m).projectRoot) === project) return m;
+    }
+    return null;
+  }
+
+  // A new run in the receiving project, under its own config and budgets.
+  #startThreadRun(threadId) {
+    const t = this.store.thread(threadId);
+    const from = this.store.member(t.from_member);
+    const { runId, memberId } = this.submit({
+      projectRoot: t.to_project, member: t.to_member, threadId,
+      task: t.task ? `Thread #${t.id}: ${t.task}` : `Thread #${t.id}: answer ${basename(t.from_project)}/${from.name}`
+    });
+    this.store.setThreadRun(threadId, runId);
+    this.store.setThreadOwner(threadId, memberId);
+    return runId;
+  }
+
+  // One post on a thread, delivered to a member's inbox. `record: false` when the caller has
+  // already stored the post (the opening one).
+  // `notice: true` sends a close notice as it is, without the "[thread #n]" tag a post carries.
+  #deliver(threadId, to, { side, author, text, state = null, fromTeam, record = true, notice = false }) {
+    if (record) this.store.addThreadPost({ threadId, side, author, text, state });
+    this.store.enqueue({
+      to, threadId, fromKind: side === 'human' ? 'human' : 'team',
+      fromName: side === 'human' ? author : `${basename(fromTeam)}/${author}`,
+      text: notice ? text : `[thread #${threadId}] ${text}`
+    });
+    this.#pump(to);
+  }
+
+  // The member that stands in for a thread's requester: the requester itself, or once it has
+  // finished its nearest unfinished ancestor in the same run. Null when the run is over.
+  #holder(t) {
+    for (let cur = this.store.member(t.from_member); cur;
+         cur = cur.parent_id == null ? null : this.store.member(cur.parent_id)) {
+      if (!TERMINAL.has(cur.state)) return cur.id;
+    }
+    return null;
+  }
+
+  #sideOf(t, m) {
+    if (m.id === t.owner_member) return 'receiver';
+    return m.id === this.#holder(t) ? 'requester' : null;
+  }
+
+  #reply(id, { thread, text, state } = {}) {
+    const threadId = Number(thread);
+    const t = Number.isInteger(threadId) ? this.store.thread(threadId) : null;
+    if (!t) throw new Error(`no thread #${thread}`);
+    if (typeof text !== 'string') text = '';
+    if (state != null && typeof state !== 'string') throw new Error('"state" must be a string');
+    if (!state && !text.trim()) throw new Error('reply needs "text" (or a "state")');
+    const m = this.store.member(id);
+    const side = this.#sideOf(t, m);
+    if (!side) throw new Error(`reply refused: member "${m.name}" is not on thread #${t.id}`);
+    if (t.state === 'done' || t.state === 'declined') throw new Error(`reply refused: thread #${t.id} is closed`);
+    let started = null;
+    if (state) {
+      if (side !== 'receiver') throw new Error(`reply refused: only the receiving lead on thread #${t.id} can change its state`);
+      if (state === 'declined' && !text.trim()) throw new Error('declining a thread needs a reason in "text"');
+      if (state === 'done' && t.kind === 'question' && !text.trim()) throw new Error('answering a question needs the answer in "text"');
+      started = this.#moveThread(t, state, { text, author: m.name,
+        result: state === 'done' ? { status: 'ok', summary: text } : null });
+    } else {
+      this.store.addThreadPost({ threadId: t.id, side, author: m.name, text });
+      const to = side === 'receiver' ? this.#holder(t) : this.store.thread(t.id).owner_member;
+      if (to != null) {
+        this.#deliver(t.id, to, {
+          side, author: m.name, text, record: false,
+          fromTeam: side === 'receiver' ? t.to_project : t.from_project
+        });
+      }
+    }
+    return { thread_id: t.id, state: this.store.thread(t.id).state, ...(started ? { run_id: started, note: `thread #${t.id}: started run #${started}` } : {}) };
+  }
+
+  // The only place a thread's state changes. `author` 'agent-team' is the supervisor acting
+  // for the receiving side when its run finishes. Returns the id of the run it started, if any.
+  #moveThread(t, to, { text = '', author, result = null }) {
+    const cur = this.store.thread(t.id);
+    const refuse = () => new Error(`cannot move thread #${t.id} from ${cur.state} to ${to}`);
+    if (!THREAD_MOVES[cur.kind]?.[cur.state]?.includes(to)) throw refuse();
+    // False: a concurrent move won.
+    if (!this.store.moveThread(t.id, cur.state, to, { result: result ?? (to === 'declined' ? { reason: text } : null) })) throw refuse();
+    this.store.addThreadPost({ threadId: t.id, side: 'receiver', author, text, state: to });
+    const holder = this.#holder(cur);
+    if (to === 'accepted') {
+      if (holder != null) {
+        this.#deliver(t.id, holder, { side: 'receiver', author, text: text.trim() || 'accepted', record: false, fromTeam: cur.to_project });
+      }
+      if (cur.run_id != null) return null;
+      // A live lead in another run accepted: the work is its own run, under this team's budgets.
+      try {
+        return this.#startThreadRun(t.id);
+      } catch (err) {
+        this.#moveThread(this.store.thread(t.id), 'done', { text: `could not start: ${err.message}`, author: 'agent-team',
+          result: { status: 'failed', summary: `could not start: ${err.message}` } });
+        throw err;
+      }
+    }
+    const notice = to === 'declined'
+      ? `thread #${t.id} declined: ${text}`
+      : `thread #${t.id} done ${result?.status ?? 'ok'}: ${result?.summary ?? text}`;
+    if (holder != null) {
+      this.#deliver(t.id, holder, { side: 'receiver', author, text: notice, record: false, notice: true, fromTeam: cur.to_project });
+    }
+    return null;
+  }
+
+  // A root finished: the thread its run serves, and any thread delivered to it as a live lead
+  // that never got a run of its own, close with the run's outcome.
+  #closeThreadsOf(m, state, result) {
+    const ids = new Set();
+    const served = this.store.run(m.run_id).thread_id;
+    if (served != null) ids.add(served);
+    for (const t of this.store.threadsInState(['open', 'accepted'])) {
+      if (t.owner_member === m.id && t.run_id == null) ids.add(t.id);
+    }
+    for (const id of ids) {
+      try {
+        this.#closeThread(this.store.thread(id), state, result, id === served);
+      } catch (err) {
+        // Only a lost race is expected: a concurrent move already closed the thread.
+        if (!/^cannot move thread #/.test(err.message)) {
+          process.stderr.write(`agent-team: could not close thread #${id}: ${err.message}\n`);
+        }
+      }
+    }
+  }
+
+  // `served`: the finished run was started for this thread, so its summary answers it. A live
+  // lead's run is about other work, so a question it never answered is declined.
+  #closeThread(t, state, result, served = true) {
+    if (t.state === 'done' || t.state === 'declined') return;
+    const status = state === 'done' ? result.status : 'failed';
+    const summary = result.summary ?? '';
+    if (t.kind === 'task' && t.state === 'open') {
+      return this.#moveThread(t, 'declined', { text: 'the lead finished without accepting', author: 'agent-team' });
+    }
+    if (t.kind === 'question' && !served) {
+      return this.#moveThread(t, 'declined', { text: 'the lead finished without answering', author: 'agent-team' });
+    }
+    if (t.kind === 'question' && state !== 'done') {
+      return this.#moveThread(t, 'declined', { text: `the lead's run ${state}`, author: 'agent-team' });
+    }
+    // Accepted but no run ever started for it (a crash between the two): the finished run's
+    // summary is about other work.
+    if (!served && t.state === 'accepted' && t.run_id == null) {
+      const reason = 'the lead finished without starting the work';
+      return this.#moveThread(t, 'done', { text: reason, author: 'agent-team', result: { status: 'failed', summary: reason } });
+    }
+    this.#moveThread(t, 'done', { text: summary, author: 'agent-team', result: { status, summary } });
+  }
+
+  // What a launching member's brief says about threads: the one its run serves (root only),
+  // and open ones for its team that nobody owns yet, which it now owns.
+  #threadsForBrief(m, scope) {
+    const none = { thread: null, threads: [] };
+    if (m.parent_id != null) return none;
+    const run = this.store.run(m.run_id);
+    const view = (t) => {
+      const first = this.store.threadPosts(t.id)[0];
+      const from = `${basename(t.from_project)}/${this.store.member(t.from_member).name}`;
+      return { id: t.id, kind: t.kind, from, text: first?.text ?? '', task: t.task };
+    };
+    const own = run.thread_id != null ? view(this.store.thread(run.thread_id)) : null;
+    // Threads store their target as a real path; a run's project is stored as it was submitted.
+    const waiting = this.store.unownedThreadsTo(realRoot(scope.projectRoot), m.name).filter((t) => t.id !== run.thread_id);
+    for (const t of waiting) this.store.setThreadOwner(t.id, m.id);
+    return { thread: own, threads: waiting.map(view) };
   }
 
   // Along the reporting line only: the caller's manager, or one of its own reports.
@@ -987,8 +1440,12 @@ export class Supervisor {
       target = parent;
       fromKind = 'report';
     } else {
-      const matches = this.store.children(id).filter((c) => c.id === to || c.name === to);
-      target = matches.find((c) => !TERMINAL.has(c.state)) ?? matches.at(-1);
+      const matches = this.store.children(id).filter((c) => c.id === to || c.name === to || c.alias === to);
+      const live = matches.filter((c) => !TERMINAL.has(c.state));
+      if (new Set(live.map((c) => c.alias ?? c.name)).size > 1) {
+        throw new Error(`"${to}" is ambiguous: ${live.map((c) => `id ${c.id} (${c.alias ?? c.name})`).join(', ')} — use the id`);
+      }
+      target = live[0] ?? matches.at(-1);
       fromKind = 'manager';
     }
     if (!target) throw new Error(`"${to}" is not your manager or one of your reports`);
@@ -1032,7 +1489,8 @@ export class Supervisor {
     }
     // Only a member that has delegated can have nothing left to wait for; a leaf calling
     // wait_for is waiting on its manager and blocks.
-    if (reportIds == null && this.store.children(id).length > 0 && this.#openReports(id) === 0) {
+    if (reportIds == null && (this.store.children(id).length > 0 || this.store.threadsFrom(id).length > 0) &&
+        this.#openWork(id) === 0 && !this.#ownsOpenThread(id)) {
       return { messages: [], timed_out: false, note: 'no open reports' };
     }
     const seconds = clampSeconds(timeout_s, WAIT_DEFAULT_S, WAIT_MAX_S);

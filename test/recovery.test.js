@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, copyFileSync, chmodSync } from 'node:fs';
+import { rmSync, copyFileSync, chmodSync, writeFileSync, renameSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { project, supervise, adapterDir, LIVE } from './helpers/live.js';
 
@@ -278,5 +278,243 @@ test('a cancel in flight when the supervisor closes is kept: the member and its 
   try {
     assert.deepEqual(await sup.recover(), { recovered: [], failed: [] });
     assert.equal(store.member(memberId).state, 'cancelled');
+  } finally { await sup.close(); }
+});
+
+// ---- threads across a restart ----
+
+// A (a manager) and B (a lead with a report). `write(name, fn)` writes a script file built
+// from the real paths of both repos.
+function twoTeams() {
+  const b = project({ 'b-lead': LIVE(), 'b-dev': LIVE({ reports_to: 'b-lead' }) }, {});
+  const a = project({ manager: LIVE() }, {});
+  const reals = { a: realpathSync(a.root), b: realpathSync(b.root) };
+  let n = 0;
+  const write = (fn) => {
+    const file = join(a.root, `script-${n++}.json`);
+    writeFileSync(file, JSON.stringify(fn(reals)));
+    return file;
+  };
+  return { a, b, reals, write };
+}
+
+const results = (store, memberId, tool) =>
+  store.events(memberId).filter((e) => e.kind === 'tool_result' && e.body.name === tool).map((e) => e.body.result);
+const messagesOf = (store, memberId) => results(store, memberId, 'wait_for').flatMap((r) => r.messages ?? []);
+const accept = { tool: 'reply', args: { thread: '$brief.thread.id', text: 'on it', state: 'accepted' } };
+
+test('a thread-run is recovered like any run and closes the thread once; the requester hears of it', async () => {
+  const t = twoTeams();
+  const script = t.write(({ b }) => ({ by_member: {
+    manager: {
+      steps: [{ tool: 'request', args: { team: b, text: 'crash', task: 'fix it' } }, { tool: 'wait_for', args: {} }],
+      on_resume: { steps: [{ tool: 'wait_for', args: {} }] }
+    },
+    'b-lead': {
+      steps: [accept, { tool: 'delegate', args: { to: 'b-dev', task: 'patch' } }, { tool: 'wait_for', args: {} }],
+      on_resume: { steps: [{ tool: 'wait_for', args: {} }] },
+      result: { status: 'ok', summary: 'fixed' }
+    },
+    'b-dev': { steps: [{ sleep_ms: 30_000 }], on_resume: { steps: [] } }
+  } }));
+  const first = await supervise(script, { shared: true });
+  const { store } = first;
+  const mgr = first.sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+  await until(() => store.thread(1)?.state === 'accepted' &&
+    store.members(store.thread(1).run_id).some((m) => m.name === 'b-dev' && m.resume));
+  const bRunId = store.thread(1).run_id;
+  await first.sup.close();
+
+  const { sup } = await supervise(script, { store, shared: true });
+  try {
+    const out = await sup.recover();
+    assert.deepEqual([...out.recovered].sort(), [mgr.runId, bRunId].sort());
+    await sup.waitRun(bRunId);
+    await sup.waitRun(mgr.runId);
+    const th = store.thread(1);
+    assert.equal(th.state, 'done');
+    assert.deepEqual(th.result, { status: 'ok', summary: 'fixed' });
+    assert.equal(store.threadPosts(1).filter((p) => p.state === 'done').length, 1, 'closed once');
+    const done = await sup.waitRun(mgr.runId);
+    const seen = [...done.received, ...messagesOf(store, mgr.memberId).map((m) => m.text)];
+    assert.equal(seen.filter((x) => x.endsWith('thread #1 done ok: fixed')).length, 1);
+    assert.equal(store.runsWithStatus('running').length, 0);
+  } finally { await sup.close(); }
+});
+
+// A's manager requests B's live root, which has not answered when the supervisor stops.
+async function pendingWithLiveLead(t, script) {
+  const first = await supervise(script, { shared: true });
+  const { store } = first;
+  const lead = first.sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own it' });
+  await until(() => store.member(lead.memberId).resume);
+  const mgr = first.sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+  await until(() => store.thread(1) && store.member(mgr.memberId).state === 'waiting');
+  assert.equal(store.thread(1).owner_member, lead.memberId);
+  assert.equal(store.thread(1).run_id, null);
+  await first.sup.close();
+  return { store, lead, mgr };
+}
+
+const pendingScript = (t) => t.write(({ b }) => ({ by_member: {
+  manager: {
+    steps: [{ tool: 'request', args: { team: b, text: 'crash', task: 'fix it' } }, { tool: 'wait_for', args: {} }],
+    on_resume: { steps: [{ tool: 'wait_for', args: {} }] }
+  },
+  // Sleeping, not waiting: the lead must not read the thread (and finish) before the restart.
+  'b-lead': { steps: [{ sleep_ms: 30_000 }], on_resume: { steps: [{ sleep_ms: 30_000 }] } }
+} }));
+
+test('a thread whose owner is a resumed member is left alone: no triage run, not closed', async () => {
+  const t = twoTeams();
+  const script = pendingScript(t);
+  const { store, lead, mgr } = await pendingWithLiveLead(t, script);
+  const { sup } = await supervise(script, { store, shared: true });
+  try {
+    const out = await sup.recover();
+    assert.deepEqual([...out.recovered].sort(), [lead.runId, mgr.runId].sort());
+    assert.equal(store.run(3), undefined, 'no triage run');
+    const th = store.thread(1);
+    assert.equal(th.state, 'open');
+    assert.equal(th.owner_member, lead.memberId);
+    assert.equal(th.run_id, null);
+    assert.notEqual(store.member(lead.memberId).state, 'failed');
+  } finally { await sup.close(); }
+});
+
+test('a thread whose receiving team cannot be recovered is declined, and no triage run starts', async () => {
+  const t = twoTeams();
+  const script = pendingScript(t);
+  const { store, lead, mgr } = await pendingWithLiveLead(t, script);
+  renameSync(join(t.b.root, '.claude', 'agent-team.json'), join(t.b.root, '.claude', 'agent-team.json.off'));
+  const { sup } = await supervise(script, { store, shared: true });
+  try {
+    const out = await sup.recover();
+    assert.deepEqual(out, { recovered: [mgr.runId], failed: [lead.runId] });
+    assert.equal(store.member(lead.memberId).state, 'failed');
+    assert.equal(store.run(3), undefined, 'no triage run');
+    const th = store.thread(1);
+    assert.equal(th.state, 'declined');
+    assert.match(th.result.reason, /^the receiving team could not be recovered: /);
+    const last = store.threadPosts(1).at(-1);
+    assert.deepEqual([last.side, last.author, last.state], ['receiver', 'agent-team', 'declined']);
+    // The notice reaches the resumed manager on stdin or as its wait_for result, whichever it beat.
+    const done = await sup.waitRun(mgr.runId);
+    const seen = [...done.received, ...messagesOf(store, mgr.memberId).map((m) => m.text)];
+    assert.equal(seen.filter((x) => /thread #1 declined: the receiving team could not be recovered: /.test(x)).length, 1);
+  } finally { await sup.close(); }
+});
+
+test('an open thread whose owner is in a finished run gets a triage run after a restart', async () => {
+  const t = twoTeams();
+  const quiet = t.write(() => ({ by_member: {
+    manager: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [{ tool: 'wait_for', args: {} }] } },
+    'b-lead': { steps: [{ say: 'done' }] }
+  } }));
+  const first = await supervise(quiet, { shared: true });
+  const { store } = first;
+  const lead = first.sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own it' });
+  await first.sup.waitRun(lead.runId);
+  const mgr = first.sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+  await until(() => store.member(mgr.memberId).state === 'waiting');
+  // The shape a crash leaves: delivered to a lead whose run is over, with no run of its own.
+  const id = store.addThread({
+    kind: 'question', fromProject: t.reals.a, fromRun: mgr.runId, fromMember: mgr.memberId,
+    toProject: t.reals.b, toMember: 'b-lead', chain: [t.reals.a], text: 'which api?'
+  });
+  store.setThreadOwner(id, lead.memberId);
+  await first.sup.close();
+
+  const answer = t.write(() => ({ by_member: {
+    manager: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [{ tool: 'wait_for', args: {} }] } },
+    'b-lead': { steps: [{ tool: 'reply', args: { thread: '$brief.thread.id', text: '42', state: 'done' } }] }
+  } }));
+  const { sup } = await supervise(answer, { store, shared: true });
+  try {
+    await sup.recover();
+    const th = store.thread(id);
+    assert.notEqual(th.run_id, null, 'triage run started');
+    assert.equal(store.run(th.run_id).thread_id, id);
+    assert.equal(store.run(th.run_id).project, t.reals.b);
+    await sup.waitRun(th.run_id);
+    assert.equal(store.thread(id).state, 'done');
+    const seen = [...(await sup.waitRun(mgr.runId)).received, ...messagesOf(store, mgr.memberId).map((m) => m.text)];
+    assert.equal(seen.filter((x) => x.endsWith(`thread #${id} done ok: 42`)).length, 1);
+  } finally { await sup.close(); }
+});
+
+test('a run that starts in the receiving project picks up an open thread nobody owns', async () => {
+  const t = twoTeams();
+  const script = t.write(() => ({ by_member: {
+    manager: { steps: [] },
+    'b-lead': { steps: [{ tool: 'reply', args: { thread: 1, text: 'seen', state: 'done' } }] }
+  } }));
+  const { sup, store } = await supervise(script, { shared: true });
+  try {
+    const mgr = sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+    await sup.waitRun(mgr.runId);
+    const id = store.addThread({
+      kind: 'question', fromProject: t.reals.a, fromRun: mgr.runId, fromMember: mgr.memberId,
+      toProject: t.reals.b, toMember: 'b-lead', chain: [t.reals.a], text: 'which api?'
+    });
+    const lead = sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'start of day' });
+    await sup.waitRun(lead.runId);
+    assert.equal(store.thread(id).owner_member, lead.memberId);
+    assert.equal(store.thread(id).state, 'done', 'the lead saw it in its brief and answered it');
+  } finally { await sup.close(); }
+});
+
+test('an accepted thread with no run whose team cannot be recovered closes done-failed, once', async () => {
+  const t = twoTeams();
+  const script = pendingScript(t);
+  const { store, lead, mgr } = await pendingWithLiveLead(t, script);
+  // The crash window between accepting and starting the run.
+  store.moveThread(1, 'open', 'accepted');
+  renameSync(join(t.b.root, '.claude', 'agent-team.json'), join(t.b.root, '.claude', 'agent-team.json.off'));
+  const { sup } = await supervise(script, { store, shared: true });
+  try {
+    await sup.recover();
+    assert.equal(store.run(3), undefined, 'no triage run');
+    const th = store.thread(1);
+    assert.equal(th.state, 'done');
+    assert.equal(th.result.status, 'failed');
+    assert.match(th.result.summary, /^the receiving team could not be recovered: /);
+    const done = await sup.waitRun(mgr.runId);
+    const seen = [...done.received, ...messagesOf(store, mgr.memberId).map((m) => m.text)];
+    assert.equal(seen.filter((x) => /thread #1 done failed: the receiving team could not be recovered/.test(x)).length, 1);
+    assert.equal(store.member(lead.memberId).state, 'failed');
+  } finally { await sup.close(); }
+});
+
+test('a second recover() starts no second triage run for the same thread', async () => {
+  const t = twoTeams();
+  const quiet = t.write(() => ({ by_member: {
+    manager: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [{ tool: 'wait_for', args: {} }] } },
+    'b-lead': { steps: [{ say: 'done' }], on_resume: { steps: [{ sleep_ms: 30_000 }] } }
+  } }));
+  const first = await supervise(quiet, { shared: true });
+  const { store } = first;
+  const lead = first.sup.submit({ projectRoot: t.b.root, member: 'b-lead', task: 'own it' });
+  await first.sup.waitRun(lead.runId);
+  const mgr = first.sup.submit({ projectRoot: t.a.root, member: 'manager', task: 'ship' });
+  await until(() => store.member(mgr.memberId).state === 'waiting');
+  const id = store.addThread({
+    kind: 'question', fromProject: t.reals.a, fromRun: mgr.runId, fromMember: mgr.memberId,
+    toProject: t.reals.b, toMember: 'b-lead', chain: [t.reals.a], text: 'which api?'
+  });
+  store.setThreadOwner(id, lead.memberId);
+  await first.sup.close();
+  const slow = t.write(() => ({ by_member: {
+    manager: { steps: [{ tool: 'wait_for', args: {} }], on_resume: { steps: [{ tool: 'wait_for', args: {} }] } },
+    'b-lead': { steps: [{ sleep_ms: 30_000 }] }
+  } }));
+  const { sup } = await supervise(slow, { store, shared: true });
+  try {
+    await sup.recover();
+    const runId = store.thread(id).run_id;
+    assert.notEqual(runId, null);
+    await sup.recover();
+    assert.equal(store.thread(id).run_id, runId);
+    assert.equal(store.run(runId + 1), undefined, 'no extra run');
   } finally { await sup.close(); }
 });

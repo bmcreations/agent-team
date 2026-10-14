@@ -1,10 +1,10 @@
-import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, TERMINAL } from './feed.js';
+import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, TERMINAL } from './feed.js';
 
 // Member output is untrusted. Every node is built here with createElement and text nodes;
 // nothing from the API is parsed as HTML.
 const $ = (id) => document.getElementById(id);
-const S = { gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null,
-            query: '', panel: null, open: new Set() };
+const S = { expanded: new Set(), gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null,
+            query: '', panel: null, open: new Set(), threads: null, thread: null };
 
 const safeHref = (v) => { const s = String(v); return s.startsWith('#') || (s.startsWith('/') && !s.startsWith('//')) ? s : '#'; };
 // replaceChildren stringifies null, so anything that may be absent goes through here first.
@@ -107,8 +107,41 @@ const memberHref = (runId, memberId) => `#/run/${runId}/member/${memberId}`;
 const mateLink = (runId, memberId, name) => h('a', { href: memberHref(runId, memberId) }, name);
 
 function parseRoute() {
+  const t = /^#\/threads(?:\/(\d+))?$/.exec(location.hash);
+  if (t) return { run: null, member: null, threads: true, thread: t[1] ? Number(t[1]) : null };
   const m = /^#\/run\/(\d+)(?:\/member\/(\d+))?$/.exec(location.hash);
   return m ? { run: Number(m[1]), member: m[2] ? Number(m[2]) : null } : { run: null, member: null };
+}
+
+// The thread list feeds the sidebar count on every page; the thread view also reloads its own
+// thread. Calls that arrive while one is in flight collapse into one more fetch, and a fetch
+// that finishes after the view changed is dropped and redone for the new view.
+let threadsBusy = false, threadsAgain = false;
+async function refreshThreads() {
+  if (threadsBusy) { threadsAgain = true; return; }
+  threadsBusy = true;
+  try {
+    do {
+      threadsAgain = false;
+      const gen = S.gen;
+      const id = S.route?.thread ?? null;
+      try {
+        const [list, detail] = await Promise.all([api('/api/threads'),
+          id == null ? null : api(`/api/threads/${id}`).then((d) => d, (err) => ({ error: err.message }))]);
+        if (gen !== S.gen) { threadsAgain = true; continue; }
+        S.threads = list.pairs;
+        if (id != null) {
+          if (detail.error && S.thread?.thread?.id === id) flash(detail.error);   // keep what is on screen
+          else S.thread = detail;
+        }
+        if (S.route?.threads) S.failed = null;
+      } catch (err) {
+        if (gen !== S.gen) { threadsAgain = true; continue; }
+        if (S.route?.threads) S.failed = `Could not load threads: ${err.message}`;
+      }
+      schedule();
+    } while (threadsAgain);
+  } finally { threadsBusy = false; }
 }
 
 function setConn(text, cls) {
@@ -121,6 +154,7 @@ function setConn(text, cls) {
 async function open() {
   setDrawer(false);
   const route = parseRoute();
+  if (route.threads && S.route?.threads && route.thread === S.route.thread) return;
   if (S.route && route.run === S.route.run && route.run != null) {   // another member, same run
     S.route = route;
     scrollTo({ top: 0 });
@@ -128,11 +162,11 @@ async function open() {
   }
   S.source?.close();
   const gen = ++S.gen;
-  Object.assign(S, { route, failed: null, panel: null, detail: null, model: { events: [], messages: [] } });
+  Object.assign(S, { route, failed: null, panel: null, detail: null, thread: null, model: { events: [], messages: [] } });
   $('view').replaceChildren(h('p', { class: 'loading' }, 'Loading…'));
   scrollTo({ top: 0 });
   try {
-    const tl = await api(route.run ? `/api/runs/${route.run}/timeline?limit=500` : '/api/timeline?limit=500');
+    const tl = await api(route.run ? `/api/runs/${route.run}/timeline?limit=500` : `/api/timeline?limit=${route.threads ? 20 : 500}`);
     if (gen !== S.gen) return;
     const detail = route.run ? await api(`/api/runs/${route.run}`) : null;
     if (gen !== S.gen) return;
@@ -149,10 +183,14 @@ async function open() {
       schedule();
     });
     on('state', (data) => { S.state = data; });
-    on('timeline', (data) => { S.model = mergeTimeline(S.model, data); });
+    on('timeline', (data) => {
+      S.model = mergeTimeline(S.model, data);
+      if (threadTouched(data, route.thread)) refreshThreads();
+    });
     src.onopen = () => { setConn('Live', 'live'); };
     src.onerror = () => { setConn('Reconnecting', 'down'); };
     S.source = src;
+    refreshThreads();
   } catch (err) {
     if (gen !== S.gen) return;
     S.failed = `Could not load this view: ${err.message}`;
@@ -175,7 +213,7 @@ function draw() {
   if (S.failed) {
     $('view').replaceChildren(h('div', { class: 'card empty' }, h('p', { class: 'big' }, 'That view would not load'), h('p', {}, S.failed),
       h('a', { class: 'btn', href: '#/' }, 'Back to activity')));
-  } else if (S.route.run) drawRun(); else drawActivity();
+  } else if (S.route.threads) drawThreads(); else if (S.route.run) drawRun(); else drawActivity();
 }
 
 function drawSidebar() {
@@ -186,12 +224,16 @@ function drawSidebar() {
     if (S.query && !matches(S.query, run.project, run.task, run.root, ...members.map((m) => m.name))) continue;
     byProject.set(run.project, [...(byProject.get(run.project) ?? []), { run, members }]);
   }
-  $('home').classList.toggle('current', !S.route?.run);
+  $('home').classList.toggle('current', !S.route?.run && !S.route?.threads);
+  const n = openThreadCount(S.threads ?? []);
+  $('threads-link').classList.toggle('current', S.route?.threads === true);
+  $('threads-count').textContent = n ? String(n) : '';
+  $('threads-count').hidden = !n;
   const groups = [...byProject].map(([project, items]) => h('div', { class: 'project' },
     h('h2', { title: project }, shortPath(project)),
     h('ul', {}, items.map(({ run, members }) => h('li', {},
       h('a', { href: `#/run/${run.id}`, class: `run-link${run.id === S.route?.run ? ' current' : ''}`, title: run.task },
-        dot(run.status), h('span', { class: 'label' }, run.task || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
+        dot(run.status), h('span', { class: 'label' }, taskTitle(run.task) || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
       members.length ? h('ul', { class: 'members' }, members.map((m) => h('li', {},
         h('a', { href: memberHref(m.run_id, m.id), class: `member-link${m.id === S.route?.member ? ' current' : ''}` },
           avatar(m.name, { agent: m.agent, size: 'sm' }), h('span', { class: 'label' }, m.name), dot(m.state))))) : null)))));
@@ -273,12 +315,134 @@ function chartCard() {
     h('div', { class: 'axis' }, ['12 AM', '6 AM', '12 PM', '6 PM'].map((t) => h('span', {}, t))));
 }
 
+// Threads between teams, grouped by the pair of teams. Humans read and post; accepting and
+// declining stay with the teams.
+const THREAD_PILL = { open: ['waiting', 'Open'], accepted: ['running', 'Accepted'], declined: ['bad', 'Declined'], done: ['ok', 'Done'] };
+function threadPill(t) {
+  const [cls, label] = THREAD_PILL[t.state] ?? ['', stateLabel(t.state)];
+  return pill(t.state === 'done' && t.result?.status && t.result.status !== 'ok' ? 'bad' : cls, label);
+}
+// A long task's full text, folded under its headline. The element is kept per `key` on `holder`
+// so a live re-render does not close it while someone reads.
+function fullText(holder, key, text, label) {
+  if (!hasMoreThanTitle(text)) return null;
+  if (holder.full?.key !== key) {
+    const body = h('div', { class: 'full-text' });
+    holder.full = { key, body, el: h('details', { class: 'more-facts full' }, h('summary', {}, icon('chevron'), label), body) };
+  }
+  if (holder.full.body.textContent !== text) holder.full.body.textContent = text;
+  return holder.full.el;
+}
+
+const threadTitle = (t) => taskTitle(t.task || (t.kind === 'question' ? 'A question' : 'A request'), 120);
+const runLink = (id, label) => (id == null ? null : h('a', { href: `#/run/${id}` }, label));
+const sides = (t) => `${t.from_member?.name ?? 'someone'} → ${t.owner?.name ?? 'waiting for a lead'}`;
+function threadLinks(t) {
+  const lead = t.owner?.run_id;
+  const links = present(runLink(t.from_run, `Requester run #${t.from_run}`), runLink(t.run_id, `Thread run #${t.run_id}`),
+    lead != null && lead !== t.run_id ? runLink(lead, `Lead run #${lead}`) : null);
+  return links.length ? h('div', { class: 'thread-links' }, links.flatMap((l, i) => (i ? [' · ', l] : [l]))) : null;
+}
+
+function drawThreads() {
+  if (S.route.thread != null) return drawThread();
+  S.panel = null;
+  const pairs = (S.threads ?? []).map((g) => ({ ...g, threads: g.threads.filter((t) => !S.query || matches(S.query, g.pair, t.task, t.from_member?.name, t.owner?.name)) }))
+    .filter((g) => g.threads.length);
+  $('view').replaceChildren(h('header', { class: 'run-head' }, h('h1', {}, 'Threads'),
+    h('p', { class: 'muted' }, 'What teams are asking each other. Post to a thread to step in; the teams accept and decline for themselves.')),
+    ...(S.threads == null ? [h('p', { class: 'loading' }, 'Loading…')]
+      : pairs.length ? pairs.map((g) => h('section', { class: 'card' },
+        h('div', { class: 'card-head' }, h('h2', {}, g.pair)),
+        h('ul', { class: 'runs-list' }, g.threads.map((t) => h('li', { class: 'thread-item' },
+          h('a', { class: 'run-card', href: `#/threads/${t.id}` },
+            avatar(t.from_member?.name ?? g.pair, { size: 'sm' }),
+            h('span', { class: 'body' }, h('div', { class: 'title' }, threadTitle(t)),
+              h('div', { class: 'meta' }, present(`#${t.id} · ${sides(t)} · `, when(t.updated_at)))),
+            h('span', { class: 'pill quiet' }, t.kind), threadPill(t)),
+          threadLinks(t))))))
+        : [h('div', { class: 'card empty' }, h('p', { class: 'big' }, S.query ? 'Nothing matches that search' : 'No threads yet'),
+          h('p', {}, 'When one team asks another for something, the conversation shows up here.'))]));
+}
+
+function threadComposer(id) {
+  const text = h('textarea', { rows: '1', placeholder: 'Post to this thread', 'aria-label': 'Post to this thread' });
+  const send = h('button', { type: 'submit', class: 'send', 'aria-label': 'Post' }, icon('send'));
+  const grow = () => { text.style.height = 'auto'; text.style.height = `${Math.min(text.scrollHeight, 160)}px`; };
+  const submit = () => {
+    if (!text.value.trim() || text.disabled) return;
+    act(`/api/threads/${id}/reply`, { text: text.value }, 'Posted').then((r) => { if (r) { text.value = ''; grow(); refreshThreads(); } });
+  };
+  text.addEventListener('input', grow);
+  text.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); } });
+  const el = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); submit(); } }, text, send);
+  return { el, text, send };
+}
+
+// A message bubble, clipped to its first lines when long. Which ones are open is kept in
+// S.expanded by row key, so a live re-render does not close one someone is reading.
+function bubble(key, text) {
+  const el = h('div', { class: 'bubble' }, text);
+  if (!isLongText(text)) return el;
+  const label = () => (S.expanded.has(key) ? 'Show less' : 'Show more');
+  el.classList.toggle('clamped', !S.expanded.has(key));
+  const more = h('button', { type: 'button', class: 'show-more', onclick: () => {
+    if (S.expanded.has(key)) S.expanded.delete(key); else S.expanded.add(key);
+    el.classList.toggle('clamped', !S.expanded.has(key));
+    more.textContent = label();
+  } }, label());
+  return [el, more];
+}
+
+function postRow(p) {
+  const mine = p.side === 'human';
+  return h('li', { class: `message${mine ? ' mine' : ''}` }, avatar(p.author, { human: mine }),
+    h('div', { class: 'msg' },
+      h('div', { class: 'who-line' }, present(h('b', {}, p.author), ` · ${p.side} · `, when(p.at),
+        p.state ? [' ', pill(p.state === 'declined' ? 'bad' : p.state === 'accepted' ? 'running' : 'ok', stateLabel(p.state))] : null)),
+      bubble(`p${p.id}`, p.text)));
+}
+
+function drawThread() {
+  const id = S.route.thread;
+  const crumbs = h('div', { class: 'crumbs' }, h('a', { href: '#/threads' }, 'Threads'), icon('chevron'), h('span', {}, `Thread #${id}`));
+  if (S.thread?.error) {
+    S.panel = null;
+    return $('view').replaceChildren(h('div', { class: 'card empty' }, h('p', { class: 'big' }, `Thread #${id} is not available`), h('p', {}, S.thread.error),
+      h('a', { class: 'btn', href: '#/threads' }, 'Back to threads')));
+  }
+  if (!S.thread) return $('view').replaceChildren(h('p', { class: 'loading' }, 'Loading…'));
+  const { thread: t, posts } = S.thread;
+  if (S.panel?.thread !== id) {
+    S.panel = { thread: id, head: h('header', { class: 'run-head' }), talk: h('ol', { class: 'talk posts' }), composer: threadComposer(id),
+                note: h('p', { class: 'muted thread-note' }) };
+    $('view').replaceChildren(S.panel.head, h('section', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h2', {}, 'Conversation')), S.panel.talk, S.panel.note, S.panel.composer.el));
+  }
+  S.panel.head.replaceChildren(...present(crumbs, h('h1', {}, threadTitle(t)),
+    h('div', { class: 'facts-row' }, present(threadPill(t), h('span', { class: 'pill quiet' }, t.kind), h('span', { class: 'pill quiet' }, t.pair),
+      h('span', { class: 'pill quiet' }, sides(t)))),
+    threadLinks(t),
+    t.result?.summary ? h('div', { class: `banner ${t.result.status === 'ok' ? 'info' : ''}`.trim() }, icon(t.result.status === 'ok' ? 'spark' : 'x'),
+      h('span', {}, `Finished${t.result.status === 'ok' ? '' : ` (${t.result.status})`}: ${t.result.summary}`)) : null));
+  const atEnd = S.panel.talk.scrollHeight - S.panel.talk.scrollTop - S.panel.talk.clientHeight < 40;
+  if (posts.length) keyed(S.panel.talk, posts, (p) => `p${p.id}`, postRow);
+  else S.panel.talk.replaceChildren(h('li', { class: 'empty' }, 'Nothing has been posted yet.'));
+  if (atEnd) S.panel.talk.scrollTop = S.panel.talk.scrollHeight;
+  // Posting needs the serve process that owns a live run on one side of the thread.
+  const closed = t.state === 'declined' || t.state === 'done';
+  const canPost = canPostToThread(t, S.state?.runs ?? []);
+  S.panel.composer.el.hidden = !canPost;
+  S.panel.note.hidden = canPost;
+  S.panel.note.textContent = closed ? `This thread is ${t.state}, so it takes no more posts.` : 'No run on either side is live under `agent-team serve`, so this page can read the thread but not post to it.';
+}
+
 function runRow(run) {
   const mates = (S.state?.live ?? []).filter((m) => m.run_id === run.id);
   return h('li', {}, h('a', { class: 'run-card', href: `#/run/${run.id}` },
     mates.length ? h('span', { class: 'stack' }, mates.slice(0, 4).map((m) => avatar(m.name, { agent: m.agent, size: 'sm' })))
       : avatar(run.root ?? run.task, { size: 'sm' }),
-    h('span', { class: 'body' }, h('div', { class: 'title' }, run.task || `Run ${run.id}`),
+    h('span', { class: 'body' }, h('div', { class: 'title' }, taskTitle(run.task) || `Run ${run.id}`),
       h('div', { class: 'meta' }, present(shortPath(run.project), ` · #${run.id}`, money(run.cost_usd) ? ` · ${money(run.cost_usd)}` : null, ' · ', when(run.created_at)))),
     pill(run.status)));
 }
@@ -347,7 +511,7 @@ function convoRow(r, run) {
       avatar(r.from, { human: mine }),
       h('div', { class: 'msg' },
         h('div', { class: 'who-line' }, h('b', {}, r.from), ` to ${r.to} · `, when(r.at)),
-        h('div', { class: 'bubble' }, r.text)));
+        bubble(r.key, r.text)));
   }
   const member = (S.detail?.members ?? []).find((m) => m.name === r.who);
   const say = (PHRASE[r.kind] ?? ((s) => s || r.kind.replace(/_/g, ' ')))(r.said ?? '');
@@ -396,19 +560,31 @@ function drawRun() {
   S.panel.head.replaceChildren(...present(
     h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Activity'), icon('chevron'), h('span', { title: run.project }, shortPath(run.project)),
       icon('chevron'), h('span', {}, `Run #${run.id}`)),
-    h('h1', {}, run.task),
+    h('h1', {}, taskTitle(run.task) || `Run ${run.id}`),
+    fullText(S.panel, `run${run.id}`, run.task, 'Full brief'),
     h('div', { class: 'facts-row' }, present(pill(run.status), h('span', { class: 'pill quiet' }, `${members.length} ${members.length === 1 ? 'teammate' : 'teammates'}`),
       money(run.cost_usd) ? h('span', { class: 'pill quiet' }, money(run.cost_usd)) : null,
       tokens(run.tokens) ? h('span', { class: 'pill quiet' }, tokens(run.tokens)) : null,
       run.created_at ? h('span', { class: 'pill quiet' }, 'started ', when(run.created_at), run.status === 'running' ? null : '') : null)),
     run.read_only_note ? h('div', { class: 'banner' }, icon('lock'), h('span', {}, 'Read-only here. ', run.read_only_note)) : null));
-  const node = (m) => h('li', {},
-    h('a', { href: memberHref(run.id, m.id), class: `mate${m.id === S.route.member ? ' current' : ''}` },
-      avatar(m.name, { agent: m.agent }),
-      h('span', { class: 'body' }, h('div', { class: 'name' }, m.name), h('div', { class: 'task' }, m.task ?? '')),
-      pill(m.state)),
-    m.children.length ? h('ul', {}, m.children.map(node)) : null);
-  S.panel.tree.replaceChildren(...memberTree(members).map(node));
+  // A member below an entered one works in that member's project, so the project flows down the tree.
+  const scope = new Map();
+  const node = (m, inherited = null) => {
+    const project = m.project ?? inherited;
+    scope.set(m.id, project);
+    return h('li', {},
+      h('a', { href: memberHref(run.id, m.id), class: `mate${m.id === S.route.member ? ' current' : ''}` },
+        avatar(m.name, { agent: m.agent }),
+        h('span', { class: 'body' },
+          h('div', { class: 'name' }, m.name,
+            m.project ? [' ', h('span', { class: 'pill quiet', title: m.project }, `team ${shortPath(m.project)}`)] : null,
+            m.alias ? [' ', h('span', { class: 'muted' }, `as ${m.alias}`)] : null),
+          h('div', { class: 'task' }, taskTitle(m.task))),
+        pill(m.state)),
+      m.children.length ? h('ul', {}, m.children.map((c) => node(c, project))) : null);
+  };
+  S.panel.tree.replaceChildren(...memberTree(members).map((m) => node(m)));
+  S.scope = scope;
   const states = new Map(members.map((x) => [x.id, x.state]));
   const running = tasks(S.model.events).filter((t) => states.has(t.member_id))
     .sort((a, b) => Number(TERMINAL.has(states.get(a.member_id))) - Number(TERMINAL.has(states.get(b.member_id))) || b.latest.at - a.latest.at);
@@ -438,13 +614,14 @@ function drawMember(run, m) {
     p.controls = memberControls(m);
     p.mhead = h('div', { class: 'mhead' });
     p.mtask = h('p', { class: 'mtask' });
+    p.mfull = h('div');
     p.result = h('div', { class: 'result' });
     p.facts = h('dl', { class: 'facts' });
     p.transcript = h('ol', { class: 'transcript' });
     p.task = h('div', { class: 'progress now' });
     p.member.replaceChildren(
       h('a', { class: 'back', href: `#/run/${run.id}` }, icon('back'), 'Team'),
-      p.mhead, p.mtask, p.result, p.controls.el,
+      p.mhead, p.mtask, p.mfull, p.result, p.controls.el,
       h('details', { class: 'more-facts' }, h('summary', {}, icon('chevron'), 'Details'), p.facts),
       ...extras(m), h('h3', { class: 'subhead' }, 'Transcript'), p.task, p.transcript);
   }
@@ -453,15 +630,18 @@ function drawMember(run, m) {
     h('div', { class: 'body' }, h('h2', {}, m.name),
       h('div', { class: 'tags' }, present(pill(m.state), hn ? h('span', { class: `pill ${hn.cls}` }, hn.label) : null,
         m.model ? h('span', { class: 'pill quiet' }, m.model) : null, m.read_only ? h('span', { class: 'pill quiet' }, 'read-only') : null))));
-  p.mtask.textContent = m.task ?? '';
+  p.mtask.textContent = taskTitle(m.task);
+  p.mfull.replaceChildren(...present(fullText(p, `m${m.id}`, m.task, 'Full task')));
   p.result.replaceChildren(...present(m.result
     ? h('div', { class: `banner ${m.result.status === 'ok' ? 'info' : ''}`.trim() }, icon(m.result.status === 'ok' ? 'spark' : 'x'),
       h('span', {}, `Finished${m.result.status === 'ok' ? '' : ` (${m.result.status})`}`, m.result.summary ? `: ${m.result.summary}` : ''))
     : null));
-  const deny = S.detail?.deny_paths;
+  const scopeProject = S.scope?.get(m.id) ?? null;
+  const deny = scopeProject != null ? S.detail?.deny_paths_by_project?.[scopeProject] : S.detail?.deny_paths;
+  const denyLabel = scopeProject != null ? `deny_paths (${shortPath(scopeProject)})` : 'deny_paths';
   p.facts.replaceChildren(...[
     ['harness', m.agent ?? '—'], ['model', m.model ?? '—'], ['workspace', m.workspace ?? 'project folder'],
-    ['read-only', m.read_only == null ? '—' : m.read_only ? 'yes' : 'no'], ['deny_paths', deny ? deny.join(', ') || 'none' : '—'],
+    ['read-only', m.read_only == null ? '—' : m.read_only ? 'yes' : 'no'], [denyLabel, deny ? deny.join(', ') || 'none' : '—'],
     ['cost', money(m.cost_usd) ?? '—'], ['tokens', m.tokens ? String(m.tokens) : '—']
   ].flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
   p.controls.update(run, m);
@@ -506,7 +686,7 @@ function eventRow(e) {
 
 const messageRow = (x) => h('li', { class: 'inbox' }, avatar(x.from_name, { human: x.from_kind === 'human', size: 'sm' }),
   h('div', { class: 'msg' }, h('div', { class: 'who-line' }, h('b', {}, x.from_name), ` · ${x.from_kind} · `, when(x.at)),
-    h('div', { class: 'bubble' }, x.text)));
+    bubble(`m${x.id}`, x.text)));
 
 function memberControls(m) {
   const base = `/api/members/${m.id}`;

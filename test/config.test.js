@@ -752,3 +752,26 @@ test('defaults.figma_file_key is a file key or null', () => {
   assert.equal(parseConfig({ ...base, defaults: { figma_file_key: 'AbCdEf123456' } }, 'c.json').defaults.figma_file_key, 'AbCdEf123456');
   assert.throws(() => parseConfig({ ...base, defaults: { figma_file_key: 'a/b' } }, 'c.json'), /figma_file_key/);
 });
+
+const minimalPeers = () => ({ members: { a: { agent: 'claude' } }, deny_paths: ['**/.env*'] });
+
+test('peers defaults to an empty list', () => {
+  assert.deepEqual(parseConfig(minimalPeers(), 'x').peers, []);
+});
+
+test('peers takes non-empty strings, at most 50', () => {
+  assert.deepEqual(parseConfig({ ...minimalPeers(), peers: ['../loupe', '~/dev/app', '/abs'] }, 'x').peers,
+                   ['../loupe', '~/dev/app', '/abs']);
+  assert.throws(() => parseConfig({ ...minimalPeers(), peers: 'loupe' }, 'x'), /"peers" must be an array/);
+  assert.throws(() => parseConfig({ ...minimalPeers(), peers: [''] }, 'x'), /"peers" entries must be non-empty strings/);
+  assert.throws(() => parseConfig({ ...minimalPeers(), peers: Array(51).fill('a') }, 'x'), /at most 50/);
+  assert.throws(() => parseConfig({ ...minimalPeers(), peers: ['github:me/loupe'] }, 'x'), /local directory/);
+  assert.throws(() => parseConfig({ ...minimalPeers(), peers: ['https://github.com/me/loupe'] }, 'x'), /local directory/);
+  for (const url of ['ssh://host/me/loupe', 'git://host/me/loupe', 'HTTP://host/x']) {
+    assert.throws(() => parseConfig({ ...minimalPeers(), peers: [url] }, 'x'), /local directory/, url);
+  }
+});
+
+test('a peer that does not exist does not stop the config loading', () => {
+  assert.deepEqual(parseConfig({ ...minimalPeers(), peers: ['../nowhere'] }, 'x').peers, ['../nowhere']);
+});

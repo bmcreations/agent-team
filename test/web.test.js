@@ -4,7 +4,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
 import { get } from './helpers/http.js';
-import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary } from '../src/web/feed.js';
+import { describe, memberTree, activity, tasks, countLabel, mergeTimeline, conversation, matches, hourly, ago, summary, snippet, taskTitle, hasMoreThanTitle, isLongText, openThreadCount, threadTouched, canPostToThread, threadRunIds } from '../src/web/feed.js';
+import { publicMessage } from '../src/view.js';
 
 const WEB = new URL('../src/web/', import.meta.url);
 const XSS = '<img src=x onerror="alert(1)"></script><script>alert(2)</script>';
@@ -111,6 +112,7 @@ test('app.js guards what the DOM cannot test here: stale loads, null children, b
   assert.ok((src.match(/gen !== S\.gen/g) ?? []).length >= 4, 'open() re-checks it after each await and in listeners');
   assert.match(src, /replaceChildren\(\.\.\.present\(/, 'the run header filters absent children');
   assert.match(src, /try \{ data = JSON\.parse\(ev\.data\); \} catch/, 'stream frames are parsed defensively');
+  assert.match(src, /deny_paths_by_project/, 'the member panel reads the entered project\'s deny_paths');
   assert.match(src, /S\.failed = /, 'a failed load is shown in the view');
 });
 
@@ -163,4 +165,101 @@ test('progress folds into one running task per member, not a line per update', (
   assert.equal(countLabel(3, 'progress'), '3 updates');
   assert.equal(countLabel(3, 'tool_call'), '3 times');
   assert.ok(!conversation({ events, messages: [] }).some((r) => r.kind === 'progress'));
+});
+
+test('the threads page is routed, fetches the thread API, and posts through the page\'s api helper', () => {
+  const src = readFileSync(new URL('app.js', WEB), 'utf8');
+  assert.match(src, /#\\\/threads/, 'parseRoute matches #/threads');
+  assert.match(src, /'\/api\/threads'/);
+  assert.match(src, /`\/api\/threads\/\$\{id\}\/reply`/);
+  assert.match(readFileSync(new URL('feed.js', WEB), 'utf8'), /thread_opened/);
+  assert.match(readFileSync(new URL('index.html', WEB), 'utf8'), /href="#\/threads"/);
+  assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+});
+
+test('thread helpers: snippets are one clipped line and the badge counts open and accepted threads', () => {
+  assert.equal(snippet('a\n  b\tc'), 'a b c');
+  assert.equal(snippet('x'.repeat(200), 120), `${'x'.repeat(120)}…`);
+  assert.equal(snippet(null), '');
+  const pairs = [{ pair: 'a → b', threads: [{ state: 'open' }, { state: 'done' }] }, { pair: 'c → d', threads: [{ state: 'accepted' }, { state: 'declined' }] }];
+  assert.equal(openThreadCount(pairs), 2);
+  assert.equal(openThreadCount([]), 0);
+});
+
+test('stream messages carry only the thread id of a thread, so the page can refetch', () => {
+  const row = { id: 1, run_id: 1, to_member: 2, to_name: 'b', from_kind: 'team', from_name: 'x/y', report_id: null, thread_id: 7,
+                text: 't', state: 'delivered', at: 1, token: 'secret' };
+  assert.equal(publicMessage(row).thread_id, 7);
+  assert.equal('token' in publicMessage(row), false);
+  assert.equal(publicMessage({ ...row, thread_id: undefined }).thread_id, null);
+});
+
+test('thread message text is clipped like the thread pages clip it', () => {
+  const row = { id: 1, run_id: 1, to_member: 2, to_name: 'b', from_kind: 'team', from_name: 'x/y', report_id: null, thread_id: 7,
+                text: 'y'.repeat(10000), state: 'delivered', at: 1 };
+  assert.equal(publicMessage(row).text, `${'y'.repeat(4000)}…`);
+  assert.equal(publicMessage({ ...row, text: 'short' }).text, 'short');
+  assert.equal(publicMessage({ ...row, thread_id: null }).text.length, 10000);
+});
+
+test('threadTouched: a thread message for this thread, any thread on the list, or a new thread', () => {
+  const msg = (thread_id) => ({ messages: [{ id: 1, thread_id }], events: [] });
+  assert.equal(threadTouched(msg(3), 3), true);
+  assert.equal(threadTouched(msg(3), 4), false);
+  assert.equal(threadTouched(msg(3), null), true);
+  assert.equal(threadTouched(msg(null), null), false);
+  assert.equal(threadTouched({ events: [{ kind: 'thread_opened' }] }, 4), true);
+  assert.equal(threadTouched({ events: [{ kind: 'text' }] }, null), false);
+  assert.equal(threadTouched({}, null), false);
+});
+
+test('canPostToThread: only an open thread with a steerable run on a side', () => {
+  const live = { id: 1, status: 'running', steerable: true };
+  const done = { id: 2, status: 'done', steerable: false };
+  const mine = { id: 3, status: 'running', steerable: false };
+  assert.equal(canPostToThread({ state: 'open', from_run: 1 }, [live]), true);
+  assert.equal(canPostToThread({ state: 'accepted', from_run: 2, run_id: 1 }, [done, live]), true);
+  assert.equal(canPostToThread({ state: 'open', from_run: 2 }, [done, live]), false, 'a live run on neither side');
+  assert.equal(canPostToThread({ state: 'open', from_run: 2, owner: { run_id: 1 } }, [done, live]), true, 'a live lead owns it');
+  assert.equal(canPostToThread({ state: 'open', from_run: 2 }, [done]), false, 'finished');
+  assert.equal(canPostToThread({ state: 'open', from_run: 3 }, [mine]), false, 'not serve\'s');
+  assert.equal(canPostToThread({ state: 'open', from_run: 1 }, []), false, 'runs missing');
+  assert.equal(canPostToThread({ state: 'done', from_run: 1 }, [live]), false, 'closed');
+  assert.equal(canPostToThread({ state: 'declined', from_run: 1 }, [live]), false, 'closed');
+  assert.deepEqual(threadRunIds({ from_run: 1, run_id: 1, owner: { run_id: 4 } }), [1, 4]);
+  assert.deepEqual(threadRunIds({ from_run: 1, run_id: null, owner: null }), [1]);
+});
+
+test('a thread result status is cut to 100 characters', async () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/p', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'a', task: 't', depth: 0 });
+  const id = store.addThread({ kind: 'task', fromProject: '/p', fromRun: run, fromMember: m.id ?? m.memberId ?? m, toProject: '/q', toMember: m.id ?? m.memberId ?? m, chain: [], text: 'x', task: 'x' });
+  store.moveThread(id, 'open', 'accepted');
+  store.moveThread(id, 'accepted', 'done', { result: { status: 's'.repeat(300), summary: 'ok' } });
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const r = await get(web.url, `/api/threads/${id}`);
+    assert.equal(r.json.thread.result.status.length, 101);
+    assert.equal(r.json.thread.result.summary, 'ok');
+  } finally { await web.close(); store.close(); }
+});
+
+test('task titles: the first line of a brief, without heading marks, and whether there is more', () => {
+  const brief = '\n# Brief: flexible New device create\n\nApproved by Brandon.\n## Goal\nMake it create either.';
+  assert.equal(taskTitle(brief), 'Brief: flexible New device create');
+  assert.equal(hasMoreThanTitle(brief), true);
+  assert.equal(taskTitle('fix the rotate crash'), 'fix the rotate crash');
+  assert.equal(hasMoreThanTitle('fix the rotate crash'), false);
+  assert.equal(taskTitle('x'.repeat(200)).length, 121);
+  assert.equal(hasMoreThanTitle('x'.repeat(200)), false);
+  assert.equal(taskTitle(null), '');
+});
+
+test('a conversation message is clipped past 480 characters or 6 lines', () => {
+  assert.equal(isLongText('finished ok: done'), false);
+  assert.equal(isLongText('a\nb\nc\nd\ne\nf'), false);
+  assert.equal(isLongText('a\nb\nc\nd\ne\nf\ng'), true);
+  assert.equal(isLongText('x'.repeat(481)), true);
+  assert.equal(isLongText(null), false);
 });

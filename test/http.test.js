@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../src/store.js';
 import { startHttp } from '../src/http.js';
+import { teamStatus } from '../src/view.js';
 import { project, LIVE } from './helpers/live.js';
 import { get, view } from './helpers/http.js';
 
@@ -48,6 +49,24 @@ test('runs and a run\'s members come back without member tokens', async () => {
     assert.ok(!('token' in m) && !('resume' in m));
     assert.ok(!detail.text.includes(v.store.member(memberId).token));
   } finally { await v.close(); }
+});
+
+test('a member entered into another project carries project and alias, and that project\'s deny_paths', async () => {
+  const { store, runId, lead } = seeded();
+  const { root } = project({ solo: LIVE() }, { by_member: {} });
+  const cfg = join(root, '.claude', 'agent-team.json');
+  writeFileSync(cfg, JSON.stringify({ ...JSON.parse(readFileSync(cfg, 'utf8')), deny_paths: ['secret/**'] }));
+  const m = store.addMember({ runId, parentId: lead.id, name: 'b-lead', task: 'x', depth: 1, project: root, alias: 'loupe', scopeBudget: 3 });
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const detail = await get(web.url, `/api/runs/${runId}`);
+    const got = detail.json.members.find((x) => x.id === m.id);
+    assert.equal(got.project, root);
+    assert.equal(got.alias, 'loupe');
+    assert.ok(!('scope_budget' in got));
+    assert.equal(detail.json.members.find((x) => x.id === lead.id).project, null);
+    assert.deepEqual(detail.json.deny_paths_by_project, { [root]: ['secret/**'] });
+  } finally { await web.close(); }
 });
 
 test('the timeline returns a tail with a cursor, pages after it, and clips huge bodies', async () => {
@@ -146,4 +165,98 @@ test('a port already in use is reported with what to do about it', async () => {
     assert.equal(r.code, 1);
     assert.match(r.stderr, /already in use; pass --port/);
   } finally { busy.close(); store.close(); }
+});
+
+test('/api/teams lists the known teams; /api/teams/status serves only known ones', async () => {
+  const bProj = project({ lead: LIVE() }, { by_member: {} });
+  const aProj = project({ solo: LIVE() }, { by_member: {} });
+  const cfgFile = join(aProj.root, '.claude', 'agent-team.json');
+  writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, 'utf8')), peers: [bProj.root] }));
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project: aProj.root, task: 'a work' });
+  store.addMember({ runId, parentId: null, name: 'solo', task: 't', depth: 0 });
+  const bRun = store.createRun({ project: bProj.root, task: 'b work' });
+  const bLead = store.addMember({ runId: bRun, parentId: null, name: 'lead', task: 't', depth: 0 });
+  store.addEvent(bLead.id, 'progress', { text: 'checkpoint' });
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const teams = await get(web.url, `/api/teams?project=${encodeURIComponent(aProj.root)}`);
+    assert.equal(teams.status, 200);
+    assert.ok(teams.json.teams.some((t) => t.root === realpathSync(bProj.root) && t.source === 'peer'));
+    assert.equal((await get(web.url, '/api/teams?project=/not/known')).status, 404);
+
+    const st = await get(web.url, `/api/teams/status?root=${encodeURIComponent(realpathSync(bProj.root))}`);
+    assert.equal(st.status, 200);
+    assert.deepEqual(st.json, teamStatus(store, st.json.team));
+    assert.equal(st.json.team.source, 'peer');
+    assert.equal(st.json.runs[0].members[0].checkpoint.text, 'checkpoint');
+    assert.equal((await get(web.url, '/api/teams/status?root=/not/known')).status, 404);
+  } finally { await web.close(); }
+});
+
+function seededThreads() {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't', owner: '/elsewhere.sock' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'mgr', task: 't', depth: 0 });
+  const open = (toProject, text, task = null, chain = ['/secret/path']) => store.addThread({
+    kind: task ? 'task' : 'question', fromProject: '/a', fromRun: run, fromMember: m.id,
+    toProject, toMember: 'lead', chain, text, task
+  });
+  const t1 = open('/b', 'first', 'fix the bug');
+  const t2 = open('/b', 'second');
+  const t3 = open('/c', 'third', 'other');
+  store.addThreadPost({ threadId: t1, side: 'receiver', author: 'lead', text: 'on it' });
+  store.moveThread(t1, 'open', 'accepted');
+  store.moveThread(t1, 'accepted', 'done', { result: { status: 'ok', summary: 'fixed', secret: '/secret/path' } });
+  return { store, t1, t2, t3 };
+}
+
+test('threads group by team pair, newest pair first, with no chain and only allowlisted post fields', async () => {
+  const { store } = seededThreads();
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const all = await get(web.url, '/api/threads');
+    assert.equal(all.status, 200);
+    assert.deepEqual(all.json.pairs.map((p) => p.pair), ['a → c', 'a → b']);
+    assert.deepEqual(all.json.pairs[1].threads.map((t) => t.id), [2, 1]);
+    for (const p of all.json.pairs) for (const t of p.threads) assert.equal('chain' in t, false);
+    assert.equal(all.text.includes('/secret/path'), false);
+    assert.deepEqual(all.json.pairs[1].threads[1].result, { status: 'ok', summary: 'fixed' });
+    assert.deepEqual(all.json.pairs[1].threads[1].from_member.name, 'mgr');
+
+    const one = await get(web.url, '/api/threads?project=/c');
+    assert.deepEqual(one.json.pairs.map((p) => p.pair), ['a → c']);
+
+    const detail = await get(web.url, '/api/threads/1');
+    assert.equal(detail.status, 200);
+    assert.equal(detail.text.includes('/secret/path'), false);
+    assert.deepEqual(detail.json.posts.map((p) => p.author), ['mgr', 'lead']);
+    for (const p of detail.json.posts) assert.deepEqual(Object.keys(p), ['id', 'side', 'author', 'text', 'state', 'at']);
+    assert.equal((await get(web.url, '/api/threads/99')).status, 404);
+  } finally { await web.close(); store.close(); }
+});
+
+test('a thread exposes the run of the lead that owns it', async () => {
+  const { store, t2 } = seededThreads();
+  const run = store.createRun({ project: '/b', task: 'own work' });
+  const lead = store.addMember({ runId: run, parentId: null, name: 'lead', task: 't', depth: 0 });
+  store.setThreadOwner(t2, lead.id ?? lead.memberId ?? lead);
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const d = (await get(web.url, `/api/threads/${t2}`)).json.thread;
+    assert.deepEqual(d.owner, { id: lead.id ?? lead.memberId ?? lead, name: 'lead', run_id: run });
+    assert.equal((await get(web.url, '/api/threads/3')).json.thread.owner, null);
+  } finally { await web.close(); store.close(); }
+});
+
+test('thread text is clipped in the view and kept whole in the store', async () => {
+  const { store, t1 } = seededThreads();
+  const long = 'x'.repeat(10_000);
+  store.addThreadPost({ threadId: t1, side: 'receiver', author: 'lead', text: long });
+  const web = await startHttp({ store, port: 0 });
+  try {
+    const posts = (await get(web.url, '/api/threads/1')).json.posts;
+    assert.ok(posts.at(-1).text.length < 5000);
+    assert.equal(store.threadPosts(t1).at(-1).text.length, 10_000);
+  } finally { await web.close(); store.close(); }
 });

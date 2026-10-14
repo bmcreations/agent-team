@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { project, supervise, LIVE } from './helpers/live.js';
+import { liveNotes, TEAM_NOTE } from '../src/team-tools.js';
 
 const TEAM = {
   lead: LIVE(),
@@ -296,4 +297,13 @@ test('send_to a v1 report is refused: it has no session to deliver to', async ()
     assert.match(sent.error ?? '', /"old" runs one-shot and cannot receive messages/);
     assert.equal(store.members(runId).find((m) => m.name === 'old').state, 'failed', 'the hung v1 report timed out');
   } finally { await sup.close(); }
+});
+
+test('a read-only lead is told nobody approves its plan; a worker and a leaf are not', () => {
+  const lead = liveNotes({ read_only: true, can_delegate: true });
+  assert.match(lead, /Nobody reviews or approves a plan/);
+  assert.match(lead, /do not call it/);
+  assert.match(lead, /ask_human/);
+  assert.equal(liveNotes({ read_only: false, can_delegate: true }), TEAM_NOTE);
+  assert.equal(liveNotes({ read_only: true, can_delegate: false }), TEAM_NOTE);
 });

@@ -193,7 +193,11 @@ test('a version 3 database gains token columns at 0, and reopening changes nothi
   const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   first.close();
   const raw = new DatabaseSync(path);   // rewind to version 3: no token columns
-  raw.exec('ALTER TABLE members DROP COLUMN tokens; ALTER TABLE runs DROP COLUMN tokens; ' +
+  raw.exec('DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
+           'ALTER TABLE messages DROP COLUMN thread_id; ' +
+           'ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
+           'ALTER TABLE members DROP COLUMN scope_budget; ' +
+           'ALTER TABLE members DROP COLUMN tokens; ALTER TABLE runs DROP COLUMN tokens; ' +
            'ALTER TABLE members DROP COLUMN agent; ALTER TABLE members DROP COLUMN model; ' +
            'ALTER TABLE members DROP COLUMN read_only; PRAGMA user_version = 3');
   raw.close();
@@ -217,7 +221,11 @@ test('a version 4 database gains agent, model and read_only, unset', () => {
   const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
   first.close();
   const raw = new DatabaseSync(path);
-  raw.exec('ALTER TABLE members DROP COLUMN agent; ALTER TABLE members DROP COLUMN model; ' +
+  raw.exec('DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
+           'ALTER TABLE messages DROP COLUMN thread_id; ' +
+           'ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
+           'ALTER TABLE members DROP COLUMN scope_budget; ' +
+           'ALTER TABLE members DROP COLUMN agent; ALTER TABLE members DROP COLUMN model; ' +
            'ALTER TABLE members DROP COLUMN read_only; PRAGMA user_version = 4');
   raw.close();
   const store = openStore(path);
@@ -278,4 +286,166 @@ test('runs list newest first, by project; a member span runs from its first even
   assert.ok(span.started <= span.finished);
   assert.equal(store.lastEvent(lead.id).kind, 'finished');
   assert.equal(store.event(store.lastEvent(lead.id).id).body.state, 'done');
+});
+
+test('a version 5 database gains project, alias and scope_budget, unset', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig6-')), 's.db');
+  const first = openStore(path);
+  const runId = first.createRun({ project: '/a', task: 't' });
+  const lead = first.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+  first.close();
+  const raw = new DatabaseSync(path);
+  raw.exec('DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
+           'ALTER TABLE messages DROP COLUMN thread_id; ' +
+           'ALTER TABLE members DROP COLUMN project; ALTER TABLE members DROP COLUMN alias; ' +
+           'ALTER TABLE members DROP COLUMN scope_budget; PRAGMA user_version = 5');
+  raw.close();
+  const store = openStore(path);
+  const m = store.member(lead.id);
+  assert.deepEqual([m.project, m.alias, m.scope_budget], [null, null, null]);
+  store.close();
+});
+
+test('an entry member records its project, alias and budget; projects sees it', () => {
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project: '/a', task: 't' });
+  const lead = store.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+  const entry = store.addMember({ runId, parentId: lead.id, name: 'lead', task: 'fix', depth: 0,
+                                  project: '/b', alias: 'loupe', scopeBudget: 3 });
+  store.addMember({ runId, parentId: entry.id, name: 'dev', task: 'x', depth: 1 });
+  store.setScopeBudget(entry.id, 2);
+  const e = store.member(entry.id);
+  assert.deepEqual([e.project, e.alias, e.scope_budget], ['/b', 'loupe', 2]);
+  assert.deepEqual(store.projects(), ['/a', '/b']);
+  store.close();
+});
+
+test('a version 6 database gains threads, posts, and the thread columns', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig7-')), 's.db');
+  openStore(path).close();
+  const raw = new DatabaseSync(path);
+  raw.exec('DROP TABLE thread_posts; DROP TABLE threads; ALTER TABLE runs DROP COLUMN thread_id; ' +
+           'ALTER TABLE messages DROP COLUMN thread_id; PRAGMA user_version = 6');
+  raw.close();
+  const store = openStore(path);
+  assert.deepEqual(store.threads({}), []);
+  const runId = store.createRun({ project: '/b', task: 't', threadId: 7 });
+  assert.equal(store.run(runId).thread_id, 7);
+  const mem = store.addMember({ runId, parentId: null, name: 'l', task: 't', depth: 0 });
+  const msg = store.enqueue({ to: mem.id, fromKind: 'team', fromName: 'x', text: 't', threadId: 3 });
+  assert.equal(store.message(msg).thread_id, 3);
+  store.close();
+  const check = new DatabaseSync(path);
+  const names = check.prepare("SELECT name FROM sqlite_master").all().map((r) => r.name);
+  for (const n of ['threads', 'thread_posts', 'threads_to', 'threads_from', 'thread_posts_thread', 'threads_parent'])
+    assert.ok(names.includes(n), n);
+  check.close();
+});
+
+test('a version 7 database gains the open-thread index', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'at-mig8-')), 's.db');
+  openStore(path).close();
+  const raw = new DatabaseSync(path);
+  raw.exec('DROP INDEX threads_state; PRAGMA user_version = 7');
+  raw.close();
+  openStore(path).close();
+  const check = new DatabaseSync(path);
+  assert.equal(check.prepare('PRAGMA user_version').get().user_version, 8);
+  const plan = check.prepare("EXPLAIN QUERY PLAN SELECT * FROM threads WHERE state IN ('open','accepted') ORDER BY id").all();
+  assert.ok(plan.some((r) => /threads_state/.test(r.detail)), JSON.stringify(plan));
+  check.close();
+});
+
+const mkThread = (store, run, m, over = {}) => store.addThread({
+  kind: 'task', fromProject: '/a', fromRun: run, fromMember: m.id, toProject: '/b', toMember: 'lead',
+  parentThread: null, chain: ['/a'], text: 'hello', task: 'do it', ...over });
+
+test('a thread opens with its first post and moves only from the state it is in', () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'android', task: 't', depth: 0 });
+  const id = mkThread(store, run, m, { text: 'loupe crashes on rotate', task: 'fix the rotate crash' });
+  const t = store.thread(id);
+  assert.equal(t.state, 'open');
+  assert.deepEqual(t.chain, ['/a']);
+  assert.equal(t.task, 'fix the rotate crash');
+  assert.deepEqual(store.threadPosts(id).map((p) => [p.side, p.author, p.text]),
+                   [['requester', 'android', 'loupe crashes on rotate']]);
+  assert.equal(store.moveThread(id, 'accepted', 'done'), false);
+  assert.equal(store.moveThread(id, 'open', 'accepted'), true);
+  assert.equal(store.moveThread(id, 'open', 'declined'), false);
+  assert.equal(store.moveThread(id, 'accepted', 'done', { result: { status: 'ok', summary: 'fixed' } }), true);
+  assert.deepEqual(store.thread(id).result, { status: 'ok', summary: 'fixed' });
+  store.close();
+});
+
+test('threads are listed newest first, by project on either side; unowned threads by target', () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'a', task: 't', depth: 0 });
+  const t1 = mkThread(store, run, m);
+  const t2 = mkThread(store, run, m, { toProject: '/c' });
+  const t3 = mkThread(store, run, m, { fromProject: '/c', toProject: '/b' });
+  assert.deepEqual(store.threads({}).map((t) => t.id), [t3, t2, t1]);
+  assert.deepEqual(store.threads({ project: '/b' }).map((t) => t.id), [t3, t1]);
+  assert.deepEqual(store.threads({ project: '/c' }).map((t) => t.id), [t3, t2]);
+  store.moveThread(t2, 'open', 'declined');
+  assert.deepEqual(store.threads({ state: 'open' }).map((t) => t.id), [t3, t1]);
+  assert.deepEqual(store.threads({ limit: 1 }).map((t) => t.id), [t3]);
+  assert.deepEqual(store.threadsInState(['declined']).map((t) => t.id), [t2]);
+  assert.deepEqual(store.unownedThreadsTo('/b', 'lead').map((t) => t.id), [t1, t3]);
+  store.setThreadOwner(t1, m.id);
+  assert.deepEqual(store.unownedThreadsTo('/b', 'lead').map((t) => t.id), [t3]);
+  store.setThreadRun(t3, run);
+  assert.equal(store.thread(t3).run_id, run);
+  const p = store.addThreadPost({ threadId: t1, side: 'human', author: 'bmc', text: 'hi' });
+  assert.deepEqual(store.threadPosts(t1).map((x) => x.id).at(-1), p);
+  store.close();
+});
+
+test('a message can carry its thread', () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'a', task: 't', depth: 0 });
+  store.enqueue({ to: m.id, fromKind: 'team', fromName: 'b/lead', text: 'x', threadId: 5 });
+  store.enqueue({ to: m.id, fromKind: 'human', fromName: 'h', text: 'y' });
+  assert.deepEqual(store.takeQueued(m.id).map((x) => x.thread_id), [5, null]);
+  store.close();
+});
+
+test('moveThread allows only the legal moves and rejects the rest', () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'a', task: 't', depth: 0 });
+  const id = mkThread(store, run, m);
+  assert.equal(store.moveThread(id, 'open', 'done'), true);     // a question answered straight away
+  assert.equal(store.moveThread(id, 'done', 'open'), false);
+  const d = mkThread(store, run, m);
+  assert.equal(store.moveThread(d, 'open', 'declined'), true);
+  assert.equal(store.moveThread(d, 'declined', 'accepted'), false);
+  assert.equal(store.moveThread(d, 'declined', 'done'), false);
+  const x = mkThread(store, run, m);
+  assert.equal(store.moveThread(x, 'open', 'acepted'), false);
+  assert.equal(store.moveThread(x, 'open', 'open'), false);
+  assert.equal(store.thread(x).state, 'open');
+  store.close();
+});
+
+test('thread posts take a known side, and a human post carries no state', () => {
+  const store = openStore(':memory:');
+  const run = store.createRun({ project: '/a', task: 't' });
+  const m = store.addMember({ runId: run, parentId: null, name: 'a', task: 't', depth: 0 });
+  const id = mkThread(store, run, m);
+  assert.throws(() => store.addThreadPost({ threadId: id, side: 'robot', author: 'x', text: 'y' }), /side/);
+  assert.throws(() => store.addThreadPost({ threadId: id, side: 'human', author: 'x', text: 'y', state: 'accepted' }), /human/);
+  assert.ok(store.addThreadPost({ threadId: id, side: 'receiver', author: 'x', text: 'y', state: 'accepted' }));
+  assert.equal(store.threadPosts(id).length, 2);
+  store.close();
+});
+
+test('threads() caps its limit and threadsInState([]) is empty', () => {
+  const store = openStore(':memory:');
+  assert.deepEqual(store.threadsInState([]), []);
+  assert.deepEqual(store.threads({ limit: 1e12 }), []);
+  store.close();
 });

@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildOrg } from './org.js';
-import { parseGithubRepo } from './cloud.js';
+import { parseGithubRepo, isRemoteTeam } from './cloud.js';
 
 export const CONFIG_RELPATH = join('.claude', 'agent-team.json');
 
@@ -484,10 +484,21 @@ export function parseConfig(raw, path) {
     );
   }
 
+  const peers = raw.peers ?? [];
+  if (!Array.isArray(peers)) throw new Error(`${path}: "peers" must be an array of project directories — got ${JSON.stringify(raw.peers)}`);
+  if (peers.length > 50) throw new Error(`${path}: "peers" lists ${peers.length} teams; at most 50`);
+  for (const p of peers) {
+    if (typeof p !== 'string' || p === '') throw new Error(`${path}: "peers" entries must be non-empty strings — got ${JSON.stringify(p)}`);
+    if (isRemoteTeam(p)) {
+      throw new Error(`${path}: "peers" entry ${JSON.stringify(p)} must be a local directory — a GitHub team runs only as a "team" member`);
+    }
+  }
+
   return {
     members,
     org,
     deny_paths: raw.deny_paths,
+    peers,
     defaults
   };
 }

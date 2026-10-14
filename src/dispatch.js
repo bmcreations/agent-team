@@ -109,7 +109,7 @@ function addUsage(total, u) {
 // A team path is absolute, under ~/, or relative to the project. A relative path that does
 // not lead to a config from a linked worktree is retried from the main checkout, since
 // sibling repositories sit next to the main checkout, not next to its worktrees.
-function teamRoot(projectRoot, team) {
+export function teamRoot(projectRoot, team) {
   const expanded = team === '~' || team.startsWith('~/') ? join(homedir(), team.slice(1)) : team;
   if (isAbsolute(expanded)) return expanded;
   const local = resolve(projectRoot, expanded);
@@ -125,15 +125,18 @@ export function teamKeys(root) {
   return [realpathSync(root), localRepoKey(root)].filter(Boolean);
 }
 
-function refuseCycle(member, team, keys, teams) {
+export function refuseCycle(member, team, keys, teams) {
   if (keys.some((k) => teams.includes(k))) {
     throw new Error(`member "${member}": team "${team}" is already in this delegation (${[...teams, keys[0]].join(' -> ')})`);
   }
 }
 
 // The member another team is entered through: the one named, else that team's only root.
-function teamEntry(teamConfig, entry, root, member) {
-  if (entry) return entry;
+export function teamEntry(teamConfig, entry, root, member) {
+  if (entry) {
+    if (!teamConfig.members[entry]) throw new Error(`member "${member}": team ${root} has no member "${entry}"`);
+    return entry;
+  }
   if (teamConfig.org.roots.length !== 1) {
     throw new Error(
       `member "${member}": team at ${root} has ${teamConfig.org.roots.length} top-level members ` +
