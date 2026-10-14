@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, readFileSync,
-  readdirSync, rmdirSync
+  readdirSync, rmdirSync, renameSync, statSync, utimesSync, cpSync, existsSync
 } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { tmpdir, homedir } from 'node:os';
@@ -595,6 +595,233 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
   const branch = `agent-team/${member}-${id}`;
   mkdirSync(dirname(dir), { recursive: true });
 
+  const template = ensureTemplate(repoRoot, member, denyPaths ?? []);
+  try {
+    copyTree(template.dir, dir);
+    // The snapshot commit is shared, so its subject names no member. Rewriting it per member
+    // would leave the template's commit dangling in every copy, and a gc to drop it would
+    // rewrite the pack and unshare its blocks.
+    git(dir, 'branch', '-m', TEMPLATE_BRANCH, branch);
+  } catch (err) {
+    removeAfterFailure(dir);
+    throw err;
+  }
+
+  return {
+    dir, branch, id, kind: isolation,
+    unmatchedDenyPaths: template.unmatchedDenyPaths, droppedSymlinks: template.droppedSymlinks
+  };
+}
+
+// ---- templates ----
+//
+// Every workspace of one commit under one deny_paths list is the same filtered clone, so it is
+// built once, as a template, and each workspace is a copy-on-write copy of it (clonefile on
+// APFS, reflink on btrfs/XFS): a copy costs metadata until the member writes, instead of a
+// full checkout per member. The template holds only what a workspace would, filtered and
+// gc'd with no remote, so sharing its blocks shares nothing a member could not already read.
+//
+// Bump TEMPLATE_FORMAT whenever buildTemplate changes what it removes or how, so templates
+// built by the old code are never reused.
+const TEMPLATE_FORMAT = 1;
+// Where a sandboxed member's Gradle keeps its home (see sandboxBuildEnv in buildcache.js):
+// inside the workspace, because the sandbox lets it write nowhere else.
+export const MEMBER_GRADLE_HOME = '.gradle-home';
+const TEMPLATE_BRANCH = 'agent-team/template';
+// A template another dispatch might be copying right now is not evicted for this long.
+const TEMPLATE_GRACE_MS = 60 * 60 * 1000;
+
+function templatesRoot() {
+  return join(cacheRoot(), 'agent-team', 'templates');
+}
+
+// Keyed by commit, not by checkout: every linked worktree of a repo at the same commit
+// shares one template.
+export function templateKey(head, denyPaths) {
+  return createHash('sha256').update(JSON.stringify([TEMPLATE_FORMAT, head, denyPaths]))
+    .digest('hex').slice(0, 16);
+}
+
+// Copy-on-write where the filesystem has it, a plain copy where it does not. /bin/cp on
+// macOS because a GNU cp earlier on PATH reads -c as --preserve=context. Node's cpSync is
+// only the fallback: on macOS it copies every byte even with COPYFILE_FICLONE (measured:
+// 1.4 GB written for a 1.3 GB clone, against 20 MB for `cp -c`).
+export function copyTreeArgs(platform, src, dst) {
+  if (platform === 'darwin') return ['/bin/cp', ['-c', '-R', '-p', src, dst]];
+  if (platform === 'linux') return ['cp', ['-R', '-p', '--reflink=auto', src, dst]];
+  return null;
+}
+
+export function copyTree(src, dst) {
+  const cmd = copyTreeArgs(process.platform, src, dst);
+  if (cmd) {
+    try {
+      execFileSync(cmd[0], cmd[1], { stdio: 'pipe' });
+      return;
+    } catch {
+      rmSync(dst, { recursive: true, force: true });
+    }
+  }
+  cpSync(src, dst, { recursive: true, preserveTimestamps: true });
+}
+
+// force: true only suppresses ENOENT — a real removal failure (a read-only parent, an
+// immutable file) throws here too. That must never replace the original error: losing
+// "deny_paths excluded every tracked file" behind an unrelated ENOTEMPTY would leave the
+// operator with no idea what actually went wrong. Swallow the cleanup failure, but not
+// silently — a leftover directory may be an unredacted clone, and silence about it is
+// worse than the extra noise.
+function removeAfterFailure(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (cleanupErr) {
+    console.warn(
+      `agent-team: could not remove workspace directory "${dir}" after a build failure ` +
+      `(${cleanupErr.message}) — remove it manually`
+    );
+  }
+}
+
+function noCommitsError(member, repoRoot) {
+  return new Error(
+    `workspace for member "${member}": "${repoRoot}" has no commits yet — there is ` +
+    `nothing to clone into a workspace`
+  );
+}
+
+// A template is usable once its directory exists: the metadata beside it is written before
+// the directory is renamed into place. Reading one marks it used, for eviction and the sweep.
+function readTemplate(dir) {
+  if (!existsSync(dir)) return null;
+  let meta;
+  try { meta = JSON.parse(readFileSync(`${dir}.json`, 'utf8')); } catch { return null; }
+  const now = new Date();
+  try { utimesSync(dir, now, now); } catch { /* still usable; only its age is wrong */ }
+  return { dir, ...meta };
+}
+
+function ensureTemplate(repoRoot, member, denyPaths) {
+  let head;
+  try {
+    head = git(repoRoot, 'rev-parse', '--verify', '-q', 'HEAD').trim();
+  } catch {
+    throw noCommitsError(member, repoRoot);
+  }
+  const found = readTemplate(join(templatesRoot(), templateKey(head, denyPaths)));
+  if (found) return found;
+
+  mkdirSync(templatesRoot(), { recursive: true });
+  const tmp = join(templatesRoot(), `${templateKey(head, denyPaths)}.tmp-${randomBytes(4).toString('hex')}`);
+  const built = buildTemplate(repoRoot, member, denyPaths, tmp);
+  // Keyed by what was cloned, not by the HEAD read above: the checkout may have moved between.
+  const final = join(templatesRoot(), templateKey(built.head, denyPaths));
+  const repo = repoKey(mainCheckoutRoot(repoRoot) ?? repoRoot);
+  const meta = {
+    repo, head: built.head,
+    unmatchedDenyPaths: built.unmatchedDenyPaths, droppedSymlinks: built.droppedSymlinks
+  };
+  try {
+    writeFileSync(`${tmp}.json`, JSON.stringify(meta));
+    renameSync(`${tmp}.json`, `${final}.json`);
+    renameSync(tmp, final);
+  } catch (err) {
+    // Another dispatch built the same template first; theirs is identical.
+    removeAfterFailure(tmp);
+    rmSync(`${tmp}.json`, { force: true });
+    const theirs = readTemplate(final);
+    if (theirs) return theirs;
+    throw err;
+  }
+  evictTemplates(repo, final);
+  return readTemplate(final) ?? { dir: final, ...meta };
+}
+
+// One template per repo is the steady state: a new commit's template replaces the last one.
+// Workspaces already copied from an evicted template are unaffected; they own their blocks.
+function evictTemplates(repo, keep, now = Date.now()) {
+  for (const name of safeList(templatesRoot())) {
+    if (!/^[0-9a-f]{16}$/.test(name)) continue;
+    const dir = join(templatesRoot(), name);
+    if (dir === keep) continue;
+    let meta;
+    try { meta = JSON.parse(readFileSync(`${dir}.json`, 'utf8')); } catch { continue; }
+    if (meta.repo !== repo || now - mtimeMs(dir) < TEMPLATE_GRACE_MS) continue;
+    removeTemplate(dir);
+  }
+}
+
+function removeTemplate(dir) {
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(`${dir}.json`, { force: true });
+}
+
+function safeList(dir) {
+  try { return readdirSync(dir); } catch { return []; }
+}
+
+function mtimeMs(path) {
+  try { return statSync(path).mtimeMs; } catch { return 0; }
+}
+
+// ---- sweep ----
+//
+// A workspace whose run ended `ok` is pruned at once. One kept after a failure or timeout,
+// or left by a crashed process, is evidence for a human — until it has gone unused for
+// AGENT_TEAM_WORKSPACE_TTL_DAYS (default 7; 0 turns the sweep off). The caller names the
+// workspaces still in use (a paused or waiting member's); those are never removed, however old.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_TTL_DAYS = 7;
+
+export function workspaceTtlMs(env = process.env) {
+  const raw = env.AGENT_TEAM_WORKSPACE_TTL_DAYS;
+  const days = raw === undefined || raw === '' ? DEFAULT_TTL_DAYS : Number(raw);
+  return Number.isFinite(days) && days >= 0 ? days * DAY_MS : DEFAULT_TTL_DAYS * DAY_MS;
+}
+
+// Last use: the newest of the directory and the git files any commit, add or checkout touches.
+function lastUsedMs(dir) {
+  return Math.max(...['', '.git', '.git/index', '.git/HEAD', '.git/logs/HEAD']
+    .map((rel) => mtimeMs(join(dir, rel))));
+}
+
+export function sweepWorkspaces({ keep = [], ttlMs = workspaceTtlMs(), now = Date.now() } = {}) {
+  const removed = [];
+  if (ttlMs <= 0) return { removed };
+  const kept = new Set([...keep].filter(Boolean).map((p) => resolve(p)));
+  const root = join(cacheRoot(), 'agent-team', 'workspaces');
+
+  for (const repo of safeList(root)) {
+    if (!/^[0-9a-f]{12}$/.test(repo)) continue;
+    const repoDir = join(root, repo);
+    for (const name of safeList(repoDir)) {
+      const dir = join(repoDir, name);
+      if (!/-[0-9a-f]{6}$/.test(name) || kept.has(dir)) continue;
+      if (now - lastUsedMs(dir) < ttlMs) continue;
+      rmSync(dir, { recursive: true, force: true });
+      removed.push(dir);
+    }
+    try { rmdirSync(repoDir); } catch { /* not empty */ }
+  }
+
+  // Templates are a cache: one unused for a day is rebuilt on demand. A half-built one
+  // (`.tmp-`) older than the grace period belongs to a dispatch that died mid-build.
+  const templateTtl = Math.min(ttlMs, DAY_MS);
+  for (const name of safeList(templatesRoot())) {
+    const path = join(templatesRoot(), name);
+    if (/^[0-9a-f]{16}(\.json)?\.tmp-[0-9a-f]+$/.test(name)) {
+      if (now - mtimeMs(path) >= TEMPLATE_GRACE_MS) rmSync(path, { recursive: true, force: true });
+    } else if (/^[0-9a-f]{16}$/.test(name) && now - mtimeMs(path) >= templateTtl) {
+      removeTemplate(path);
+      removed.push(path);
+    }
+  }
+  return { removed };
+}
+
+// Builds the filtered clone into `dir`, on TEMPLATE_BRANCH. Returns the commit it cloned.
+function buildTemplate(repoRoot, member, denyPaths, dir) {
+  const branch = TEMPLATE_BRANCH;
+
   // Everything past this point can throw (including the clone itself, and the
   // every-file-denied guard right below). A partial build is an unredacted clone of the
   // repo, not evidence worth keeping — remove it before propagating the failure so
@@ -604,6 +831,7 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
   // removal and no warning.
   let unmatchedDenyPaths;
   let droppedSymlinks;
+  let head;
   try {
     execFileSync('git', cloneArgs(repoRoot, dir), { stdio: 'pipe' });
 
@@ -618,12 +846,10 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     // real cause. Fail here instead, the same way the every-file-denied guard below fails
     // clearly on its own similar path.
     try {
-      execFileSync('git', ['-C', dir, 'rev-parse', '--verify', '-q', 'HEAD'], { stdio: 'pipe' });
+      head = execFileSync('git', ['-C', dir, 'rev-parse', '--verify', '-q', 'HEAD'], { stdio: 'pipe' })
+        .toString().trim();
     } catch {
-      throw new Error(
-        `workspace for member "${member}": "${repoRoot}" has no commits yet — there is ` +
-        `nothing to clone into a workspace`
-      );
+      throw noCommitsError(member, repoRoot);
     }
 
     const { denied, trackedCount, matchedDenyPaths } = deniedFiles(dir, denyPaths);
@@ -655,7 +881,7 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     // unreachable so gc can prune its blobs.
     git(dir, 'checkout', '-q', '--orphan', branch);
     git(dir, 'add', '-A');
-    git(dir, 'commit', '-q', '-m', workspaceCommitSubject(member));
+    git(dir, 'commit', '-q', '-m', workspaceCommitSubject('snapshot'));
     for (const stale of otherBranches(dir, branch)) git(dir, 'branch', '-q', '-D', stale);
     git(dir, 'remote', 'remove', 'origin');
     // `remote remove` deletes the origin remote's config but leaves refs/remotes/origin/HEAD
@@ -666,25 +892,15 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     rmSync(join(dir, '.git', 'logs', 'refs', 'remotes'), { recursive: true, force: true });
     git(dir, 'reflog', 'expire', '--expire=now', '--all');
     git(dir, 'gc', '-q', '--prune=now');
+    // A sandboxed member's Gradle home (see sandboxBuildEnv) is build cache, not a change.
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'exclude'), `/${MEMBER_GRADLE_HOME}/\n`, { flag: 'a' });
   } catch (err) {
-    // force: true only suppresses ENOENT — a real removal failure (a read-only parent,
-    // an immutable file) throws here too. That must never replace the original error:
-    // losing "deny_paths excluded every tracked file" behind an unrelated ENOTEMPTY
-    // would leave the operator with no idea what actually went wrong. Swallow the
-    // cleanup failure, but not silently — a leftover directory is an unredacted clone,
-    // and silence about it is worse than the extra noise.
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch (cleanupErr) {
-      console.warn(
-        `agent-team: could not remove workspace directory "${dir}" after a build failure ` +
-        `(${cleanupErr.message}) — remove it manually`
-      );
-    }
+    removeAfterFailure(dir);
     throw err;
   }
 
-  return { dir, branch, id, kind: isolation, unmatchedDenyPaths, droppedSymlinks };
+  return { head, unmatchedDenyPaths, droppedSymlinks };
 }
 
 export function pruneWorkspace(workspace) {

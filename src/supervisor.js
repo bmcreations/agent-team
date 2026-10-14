@@ -5,7 +5,7 @@ import { loadConfig, CONFIG_RELPATH } from './config.js';
 import { parseGithubRepo } from './cloud.js';
 import { buildBrief } from './brief.js';
 import { resolveCaps, prepareMember, runMember, teamKeys, teamRoot, teamEntry, refuseCycle, adapterPath } from './dispatch.js';
-import { pruneWorkspace } from './workspace.js';
+import { pruneWorkspace, sweepWorkspaces } from './workspace.js';
 import { MemberSession } from './sessions.js';
 import { serveRpc, isListening } from './rpc.js';
 import { liveNotes } from './team-tools.js';
@@ -28,6 +28,7 @@ const WAIT_DEFAULT_S = 600;
 const WAIT_MAX_S = 1800;
 const ASK_DEFAULT_S = 1800;
 const ASK_MAX_S = 7200;
+const SWEEP_EVERY_MS = 60 * 60 * 1000;
 
 const cacheRoot = (env) => env.XDG_CACHE_HOME || join(homedir(), '.cache');
 // A directory of its own: ~/.cache/agent-team predates the supervisor and may be 0755.
@@ -68,17 +69,35 @@ export class Supervisor {
   #closing = false;
   #ticker = null;
   #lastTick = null;
+  #lastSweep = 0;
   #resolutions = new Map();   // memberId -> Promise of { resolved, caps } | { team: true } | { error }
 
   constructor({ store, adapterDir, skillsDir = null, socketPath, env = {}, maxRunning = 6,
-                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000, stopMs = null, shared = false }) {
+                timeoutMs = DEFAULT_TIMEOUT_MS, graceMs = 5000, tickMs = 1000, stopMs = null, shared = false,
+                sweep = false }) {
     // How long a member may take to exit after its final stop before it is ended.
     stopMs ??= Math.max(graceMs * 2, 10_000);
-    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs, stopMs, shared });
+    Object.assign(this, { store, adapterDir, skillsDir, socketPath, env, maxRunning, timeoutMs, graceMs, tickMs, stopMs, shared, sweep });
+  }
+
+  // Removes workspaces nobody has used for the TTL (see sweepWorkspaces). Only a supervisor on
+  // the machine's own store may sweep: the store is what says which workspaces a paused or
+  // waiting member will return to, and one on a scratch store would know of none of them.
+  #sweepWorkspaces() {
+    this.#lastSweep = Date.now();
+    try {
+      const { removed } = sweepWorkspaces({ keep: this.store.workspacesInUse() });
+      if (removed.length) {
+        process.stderr.write(`agent-team: removed ${removed.length} unused workspace(s) and template(s): ${removed.join(', ')}\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`agent-team: workspace sweep failed: ${err.message}\n`);
+    }
   }
 
   async start() {
     this.server = await serveRpc(this.socketPath, (req) => this.#handle(req));
+    if (this.sweep) this.#sweepWorkspaces();
     this.#ticker = setInterval(() => {
       // A throw here would be uncaught and take the supervisor down with every run in it.
       try { this.#tick(); } catch (err) { process.stderr.write(`agent-team: tick failed: ${err.stack ?? err}\n`); }
@@ -524,6 +543,7 @@ export class Supervisor {
   // runs past the timeout is ended and the member fails as timed out, not paused. The timeout counts from each launch, so a resumed member gets it afresh.
   #tick() {
     const at = Date.now();
+    if (this.sweep && at - this.#lastSweep >= SWEEP_EVERY_MS) this.#sweepWorkspaces();
     // One late tick (a busy event loop) must not charge a burst of work at once.
     const elapsed = Math.min(at - (this.#lastTick ?? at), 2 * this.tickMs);
     this.#lastTick = at;

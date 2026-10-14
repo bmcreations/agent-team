@@ -2,14 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, chmodSync
+  mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync, lstatSync, chmodSync,
+  readFileSync, utimesSync
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir, platform } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import {
   createWorkspace, pruneWorkspace, cloneArgs, deniedFiles, parseCheckIgnoreOutput, gitFailure,
-  normalisationAliases, resolveDeniedPaths, parseLsFilesStage
+  normalisationAliases, resolveDeniedPaths, parseLsFilesStage, templateKey, copyTreeArgs,
+  sweepWorkspaces, workspaceTtlMs
 } from '../src/workspace.js';
 
 const DENY = ['credentials/**', '**/.env*'];
@@ -642,10 +644,11 @@ test(
   { skip: platform() !== 'darwin' && 'chflags uappnd semantics are Darwin/BSD-specific' },
   () => {
     const root = repoWithSecrets();
-    const repoKey = createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12);
-    const repoKeyDir = join(WORKSPACE_ROOT, 'agent-team', 'workspaces', repoKey);
-    mkdirSync(repoKeyDir, { recursive: true });
-    execFileSync('chflags', ['uappnd', repoKeyDir]);
+    // The filtered clone is built under the templates directory, so that is where the
+    // failed build's cleanup has to fail.
+    const lockedDir = join(WORKSPACE_ROOT, 'agent-team', 'templates');
+    mkdirSync(lockedDir, { recursive: true });
+    execFileSync('chflags', ['uappnd', lockedDir]);
 
     const originalWarn = console.warn;
     const warnings = [];
@@ -661,14 +664,14 @@ test(
         }
       );
       assert.ok(
-        warnings.some((w) => w.includes('lockedparent') || w.includes(repoKeyDir)),
+        warnings.some((w) => w.includes(lockedDir)),
         `expected a console.warn naming the undeletable directory, got: ${JSON.stringify(warnings)}`
       );
     } finally {
       console.warn = originalWarn;
       // Undo the flag so this directory (and its undeleted workspace) can be reclaimed —
       // by this cleanup and, failing that, by the OS reaping WORKSPACE_ROOT's parent tmpdir.
-      execFileSync('chflags', ['nouappnd', repoKeyDir]);
+      execFileSync('chflags', ['nouappnd', lockedDir]);
     }
   }
 );
@@ -1293,4 +1296,127 @@ test('parseLsFilesStage rejects a truncated stream rather than parsing what arri
     () => parseLsFilesStage(Buffer.concat([Buffer.from('100644 nonsense', 'utf8'), Buffer.from([0])])),
     /tab|malformed/i
   );
+});
+
+// --- templates: one filtered clone per commit, copied per workspace ---
+
+const headOf = (dir) => execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD']).toString().trim();
+const templateDir = (head, deny) => join(WORKSPACE_ROOT, 'agent-team', 'templates', templateKey(head, deny));
+
+test('two workspaces of one commit are copied from one template, and stay independent', () => {
+  const root = repoWithSecrets();
+  const a = createWorkspace(root, 'qa', DENY, 'workspace');
+  const b = createWorkspace(root, 'qa', DENY, 'workspace');
+  const template = templateDir(headOf(root), DENY);
+  assert.equal(existsSync(template), true);
+  assert.notEqual(a.dir, b.dir);
+  assert.notEqual(a.branch, b.branch);
+  assert.equal(tryGit(a.dir, 'branch', '--show-current').stdout.trim(), a.branch);
+
+  writeFileSync(join(a.dir, 'src', 'app.js'), 'changed\n');
+  assert.equal(readFileSync(join(b.dir, 'src', 'app.js'), 'utf8'), 'ok\n');
+  assert.equal(readFileSync(join(template, 'src', 'app.js'), 'utf8'), 'ok\n');
+  assert.equal(tryGit(b.dir, 'status', '--porcelain').stdout, '');
+});
+
+test('a reused template still reports what the build found', () => {
+  const root = repoWithSecrets();
+  const deny = [...DENY, 'no/such/path/**'];
+  const first = createWorkspace(root, 'qa', deny, 'workspace');
+  const second = createWorkspace(root, 'qa', deny, 'workspace');
+  assert.deepEqual(second.unmatchedDenyPaths, first.unmatchedDenyPaths);
+  assert.deepEqual(second.unmatchedDenyPaths, ['no/such/path/**']);
+});
+
+test('the template key changes with the commit and with deny_paths', () => {
+  assert.notEqual(templateKey('a'.repeat(40), DENY), templateKey('b'.repeat(40), DENY));
+  assert.notEqual(templateKey('a'.repeat(40), DENY), templateKey('a'.repeat(40), ['**/.env*']));
+  assert.equal(templateKey('a'.repeat(40), DENY), templateKey('a'.repeat(40), [...DENY]));
+});
+
+test('a new commit gets a template of its own, without the old one\'s content', () => {
+  const root = repoWithSecrets();
+  const before = headOf(root);
+  createWorkspace(root, 'qa', DENY, 'workspace');
+  writeFileSync(join(root, 'src', 'new.js'), 'new\n');
+  execFileSync('git', ['-C', root, 'add', '-A']);
+  execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'next']);
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.notEqual(headOf(root), before);
+  assert.equal(existsSync(join(ws.dir, 'src', 'new.js')), true);
+  assert.equal(existsSync(templateDir(headOf(root), DENY)), true);
+});
+
+// White-box, like cloneArgs: a plain recursive copy passes every test above and silently
+// costs a full checkout per workspace again.
+test('workspaces are copied copy-on-write where the platform has it', () => {
+  assert.deepEqual(copyTreeArgs('darwin', 's', 'd'), ['/bin/cp', ['-c', '-R', '-p', 's', 'd']]);
+  assert.deepEqual(copyTreeArgs('linux', 's', 'd'), ['cp', ['-R', '-p', '--reflink=auto', 's', 'd']]);
+  assert.equal(copyTreeArgs('win32', 's', 'd'), null);
+});
+
+// --- sweep ---
+
+function ageTree(dir, ms) {
+  const t = new Date(Date.now() - ms);
+  for (const rel of ['', '.git', '.git/index', '.git/HEAD', '.git/logs/HEAD']) {
+    try { utimesSync(join(dir, rel), t, t); } catch { /* not every workspace has every file */ }
+  }
+}
+
+const DAY = 24 * 60 * 60 * 1000;
+
+test('the sweep removes a stale workspace and keeps fresh and in-use ones', () => {
+  const root = repoWithSecrets();
+  const stale = createWorkspace(root, 'qa', DENY, 'workspace');
+  const paused = createWorkspace(root, 'qa', DENY, 'workspace');
+  const fresh = createWorkspace(root, 'qa', DENY, 'workspace');
+  ageTree(stale.dir, 8 * DAY);
+  ageTree(paused.dir, 30 * DAY);
+
+  const { removed } = sweepWorkspaces({ keep: [paused.dir] });
+  assert.ok(removed.includes(stale.dir));
+  assert.equal(existsSync(stale.dir), false);
+  assert.equal(existsSync(paused.dir), true);
+  assert.equal(existsSync(fresh.dir), true);
+});
+
+test('the sweep removes a repo directory it emptied', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  ageTree(ws.dir, 8 * DAY);
+  sweepWorkspaces();
+  assert.equal(existsSync(dirname(ws.dir)), false);
+});
+
+test('a TTL of 0 days turns the sweep off', () => {
+  const root = repoWithSecrets();
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  ageTree(ws.dir, 365 * DAY);
+  assert.equal(workspaceTtlMs({ AGENT_TEAM_WORKSPACE_TTL_DAYS: '0' }), 0);
+  sweepWorkspaces({ ttlMs: 0 });
+  assert.equal(existsSync(ws.dir), true);
+  assert.equal(workspaceTtlMs({}), 7 * DAY);
+  assert.equal(workspaceTtlMs({ AGENT_TEAM_WORKSPACE_TTL_DAYS: 'soon' }), 7 * DAY);
+});
+
+test('the sweep drops a template unused for a day; the next workspace rebuilds it', () => {
+  const root = repoWithSecrets();
+  createWorkspace(root, 'qa', DENY, 'workspace');
+  const template = templateDir(headOf(root), DENY);
+  const old = new Date(Date.now() - 2 * DAY);
+  utimesSync(template, old, old);
+  sweepWorkspaces();
+  assert.equal(existsSync(template), false);
+  assert.equal(existsSync(`${template}.json`), false);
+  const ws = createWorkspace(root, 'qa', DENY, 'workspace');
+  assert.equal(existsSync(join(ws.dir, 'src', 'app.js')), true);
+  assert.equal(existsSync(template), true);
+});
+
+test('a member\'s Gradle home in the workspace is not reported as a change', () => {
+  const ws = createWorkspace(repoWithSecrets(), 'qa', DENY, 'workspace');
+  mkdirSync(join(ws.dir, '.gradle-home', 'caches'), { recursive: true });
+  writeFileSync(join(ws.dir, '.gradle-home', 'caches', 'x.jar'), 'bytes');
+  assert.equal(tryGit(ws.dir, 'status', '--porcelain').stdout, '');
 });

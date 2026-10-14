@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
 import { runCodexSession } from '../src/codex-session.js';
 import { gitDiff as readDiff } from '../src/diffbase.js';
+import { sandboxBuildEnv } from '../src/buildcache.js';
 import { codexAttach, diag } from '../src/codex-attach.js';
 
 // Binary resolution: PATH is the contract ("codex" must resolve there for a normal install).
@@ -114,7 +115,10 @@ if (sub === 'probe') {
     args.push(brief.task); // positional prompt LAST, after all flags
 
     const timeoutMs = (brief.timeout_s ?? 900) * 1000;
-    const r = spawnSync(BIN, args, { cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs });
+    const r = spawnSync(BIN, args, {
+      cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs,
+      env: brief.read_only ? process.env : { ...process.env, ...sandboxBuildEnv(brief.cwd) }
+    });
 
     writeFileSync(logPath, (r.stdout ?? '').toString() + (r.stderr ?? '').toString());
 

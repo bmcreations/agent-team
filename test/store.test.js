@@ -449,3 +449,14 @@ test('threads() caps its limit and threadsInState([]) is empty', () => {
   assert.deepEqual(store.threads({ limit: 1e12 }), []);
   store.close();
 });
+
+test('a workspace is in use until its member finishes', () => {
+  const { store, runId, lead } = seeded();
+  const paused = store.addMember({ runId, parentId: lead.id, name: 'a', task: 't', depth: 1 });
+  const failed = store.addMember({ runId, parentId: lead.id, name: 'b', task: 't', depth: 1 });
+  store.setWorkspace(paused.id, '/ws/a');
+  store.setWorkspace(failed.id, '/ws/b');
+  store.setState(paused.id, 'paused');
+  store.setState(failed.id, 'failed');
+  assert.deepEqual(store.workspacesInUse(), ['/ws/a']);
+});

@@ -40,7 +40,10 @@ export async function runThroughSupervisor({ projectRoot, member, task, adapterD
   lockSupervisorDir(merged);
   const socketPath = join(dirname(sharedPath), `inproc-${process.pid}-${++inprocCount}.sock`);
   const store = openStore(defaultStorePath(merged));
-  const sup = new Supervisor({ store, adapterDir, skillsDir, socketPath, env, ...(timeoutMs ? { timeoutMs } : {}) });
+  const sup = new Supervisor({
+    store, adapterDir, skillsDir, socketPath, env, ...(timeoutMs ? { timeoutMs } : {}),
+    sweep: !merged.AGENT_TEAM_SUPERVISOR_DB
+  });
   try {
     await sup.start();
   } catch (err) {

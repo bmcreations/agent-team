@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
 import { gitDiff as readDiff } from '../src/diffbase.js';
+import { sandboxBuildEnv } from '../src/buildcache.js';
 
 // Binary resolution: PATH is the contract ("grok" must resolve there for a normal install).
 // The env var is only an escape hatch for a non-PATH install — on this machine grok 1.0.30
@@ -112,7 +113,10 @@ if (sub === 'probe') {
     args.push('--sandbox', brief.read_only ? 'read-only' : 'workspace');
 
     const timeoutMs = (brief.timeout_s ?? 900) * 1000;
-    const r = spawnSync(BIN, args, { cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs });
+    const r = spawnSync(BIN, args, {
+      cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs,
+      env: brief.read_only ? process.env : { ...process.env, ...sandboxBuildEnv(brief.cwd) }
+    });
 
     writeFileSync(logPath, (r.stdout ?? '').toString() + (r.stderr ?? '').toString());
 

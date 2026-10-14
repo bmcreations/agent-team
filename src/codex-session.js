@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { descendants, endTree, merge, targets } from './proctree.js';
+import { sandboxBuildEnv } from './buildcache.js';
 
 const BIN = fileURLToPath(new URL('../bin/agent-team.js', import.meta.url));
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -298,7 +299,7 @@ export function runCodexSession({ artifacts }) {
     if (resume && Number.isInteger(tokens) && tokens > 0) baseline = tokens;
     if (!existsSync(brief.cwd)) return finish({ status: 'failed', summary: `cwd does not exist: ${brief.cwd}`, log_path: logPath });
     // The team token reaches codex only inside the thread config, not through its own env.
-    const env = { ...process.env };
+    const env = { ...process.env, ...(brief.read_only ? {} : sandboxBuildEnv(brief.cwd)) };
     delete env.AGENT_TEAM_TEAM_TOKEN;
     delete env.AGENT_TEAM_TEAM_SOCKET;
     server = spawn(codexBin(), ['app-server'], { cwd: brief.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });

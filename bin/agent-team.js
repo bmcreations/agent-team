@@ -93,7 +93,8 @@ if (positionals[0] === 'serve') {
   const store = openStore(defaultStorePath());
   const sup = new Supervisor({
     store, adapterDir: join(ROOT, 'adapters'), skillsDir: join(ROOT, 'skills'),
-    socketPath: defaultSocketPath(), maxRunning, shared: true
+    socketPath: defaultSocketPath(), maxRunning, shared: true,
+    sweep: !process.env.AGENT_TEAM_SUPERVISOR_DB
   });
   try {
     await sup.start();

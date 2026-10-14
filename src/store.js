@@ -170,6 +170,10 @@ export function openStore(path) {
       `SELECT * FROM members WHERE state IN (${states.map(() => '?').join(', ')}) ORDER BY id`
     ).all(...states).map(memberRow),
     setWorkspace: (id, dir) => q('UPDATE members SET workspace = ? WHERE id = ?').run(dir, id),
+    // Workspaces a member may still come back to: everything but a finished member's.
+    workspacesInUse: () => q(
+      "SELECT workspace FROM members WHERE workspace IS NOT NULL AND state NOT IN ('done', 'failed', 'cancelled')"
+    ).all().map((r) => r.workspace),
     setResult: (id, result) => q('UPDATE members SET result = ? WHERE id = ?').run(JSON.stringify(result), id),
     setScopeBudget: (id, n) => q('UPDATE members SET scope_budget = ? WHERE id = ?').run(n, id),
     projects: () => q('SELECT project FROM runs UNION SELECT project FROM members WHERE project IS NOT NULL ORDER BY 1')
