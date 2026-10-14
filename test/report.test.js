@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, realpathSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runLogPath } from '../src/workspace.js';
-import { formatDuration, readRuns, renderReport, renderRun, renderTotals } from '../src/report.js';
+import { formatDuration, readRuns, renderReport, renderRun, renderTotals, storeRuns, allRuns } from '../src/report.js';
+import { openStore } from '../src/store.js';
 
 process.env.AGENT_TEAM_WORKSPACE_ROOT = mkdtempSync(join(tmpdir(), 'at-report-wsroot-'));
 
@@ -77,5 +79,99 @@ test('the report reads the last run, skipping a torn line', () => {
 
 test('a project with no run log says so instead of printing an empty table', () => {
   const project = mkdtempSync(join(tmpdir(), 'at-report-empty-'));
-  assert.match(renderReport(project), /No delegations logged/);
+  assert.match(renderReport(project), /No delegations recorded/);
+});
+
+function storeWithRun(project = '/p') {
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project, task: 'fix the login bug' });
+  const lead = store.addMember({ runId, parentId: null, name: 'lead', task: 'fix', depth: 0 });
+  const worker = store.addMember({ runId, parentId: lead.id, name: 'worker', task: 'patch', depth: 1 });
+  store.setRunRoot(runId, lead.id);
+  store.setHarnessInfo(lead.id, { agent: 'claude', model: 'claude-opus-5-5', readOnly: true });
+  store.setHarnessInfo(worker.id, { agent: 'codex', model: 'gpt-5.5', readOnly: false });
+  store.addRunCost(runId, 0.5, lead.id);
+  store.addTokens(runId, worker.id, 12_345);
+  for (const m of [lead, worker]) store.addEvent(m.id, 'started', {});
+  store.addEvent(worker.id, 'finished', { state: 'done' });
+  store.addEvent(lead.id, 'finished', { state: 'done' });
+  store.setResult(worker.id, { status: 'ok', summary: 'patched' });
+  store.setResult(lead.id, { status: 'ok', summary: 'fixed' });
+  for (const m of [lead, worker]) store.setState(m.id, 'done');
+  store.finishRun(runId, 'done');
+  return { store, runId };
+}
+
+test('a finished store run becomes a report tree with cost, tokens and nesting', () => {
+  const { store } = storeWithRun();
+  store.createRun({ project: '/p', task: 'still going' });   // running: left out
+  const [run] = storeRuns(store, '/p');
+  assert.equal(run.task, 'fix the login bug');
+  assert.equal(run.tree.member, 'lead');
+  assert.equal(run.tree.model, 'claude-opus-5-5');
+  assert.equal(run.tree.usage.cost_usd, 0.5);
+  assert.equal(run.tree.delegated[0].usage.tokens, 12_345);
+  assert.equal(run.tree.delegated[0].status, 'ok');
+  assert.ok(run.tree.elapsed_ms >= 0);
+  assert.deepEqual(storeRuns(store, '/elsewhere'), []);
+  const text = renderRun(run);
+  assert.match(text, /tokens/);
+  assert.match(text, /└ worker\s+gpt-5\.5\s+ok/);
+  assert.match(text, /12345/);
+  store.close();
+});
+
+test('the report merges the run log with the store, oldest first', () => {
+  const project = mkdtempSync(join(tmpdir(), 'at-report-merge-'));
+  const path = runLogPath(project);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({ ...RUN, project, at: '2020-01-01T00:00:00.000Z' }) + '\n');
+  const { store } = storeWithRun(project);
+  const runs = allRuns(project, { store });
+  assert.deepEqual(runs.map((r) => r.v), [1, 2]);
+  assert.match(renderReport(project, { store }), /fix the login bug/);
+  assert.match(renderReport(project, { store, all: true }), /2 delegation\(s\)/);
+  store.close();
+});
+
+function gitRepo(prefix) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const git = (...a) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { stdio: 'pipe' });
+  git('init', '-q');
+  git('commit', '-q', '--allow-empty', '-m', 'init');
+  return { dir, git };
+}
+
+test('store runs match by repo, so a subdirectory or a worktree sees its repo\'s runs', () => {
+  const a = gitRepo('at-report-a-');
+  const b = gitRepo('at-report-b-');
+  const sub = join(a.dir, 'sub');
+  mkdirSync(sub);
+  const wt = join(realpathSync(mkdtempSync(join(tmpdir(), 'at-report-wt-'))), 'wt');
+  a.git('worktree', 'add', '-q', wt);
+  const { store } = storeWithRun(sub);
+  assert.equal(storeRuns(store, a.dir).length, 1, 'recorded from a subdirectory, asked from the root');
+  assert.equal(storeRuns(store, wt).length, 1, 'asked from a worktree');
+  const second = storeWithRun(a.dir);
+  assert.equal(storeRuns(second.store, sub).length, 1, 'recorded at the root, asked from a subdirectory');
+  assert.deepEqual(storeRuns(store, b.dir), [], 'another repo is left out');
+  store.close();
+  second.store.close();
+});
+
+test('a member of a finished run that never reached an end state shows as stopped', () => {
+  const store = openStore(':memory:');
+  const runId = store.createRun({ project: '/p', task: 't' });
+  const lead = store.addMember({ runId, parentId: null, name: 'lead', task: 't', depth: 0 });
+  const kid = store.addMember({ runId, parentId: lead.id, name: 'kid', task: 't', depth: 1 });
+  const dead = store.addMember({ runId, parentId: lead.id, name: 'dead', task: 't', depth: 1 });
+  store.setRunRoot(runId, lead.id);
+  store.setState(lead.id, 'failed');
+  store.setState(kid.id, 'running');
+  store.setState(dead.id, 'cancelled');
+  store.finishRun(runId, 'failed');
+  const [run] = storeRuns(store, '/p');
+  assert.deepEqual(run.tree.delegated.map((n) => [n.member, n.status]), [['kid', 'stopped'], ['dead', 'cancelled']]);
+  assert.equal(run.tree.status, 'failed');
+  store.close();
 });

@@ -1,0 +1,607 @@
+import { describe, memberTree, activity, tasks, isProgressReport, isProgressEcho, countLabel, todayCount, mergeTimeline, conversation, matches, hourly, ago, summary, TERMINAL } from './feed.js';
+
+// Member output is untrusted. Every node is built here with createElement and text nodes;
+// nothing from the API is parsed as HTML.
+const $ = (id) => document.getElementById(id);
+const S = { gen: 0, failed: null, route: null, state: null, detail: null, model: { events: [], messages: [] }, source: null,
+            query: '', panel: null, open: new Set() };
+
+const safeHref = (v) => { const s = String(v); return s.startsWith('#') || (s.startsWith('/') && !s.startsWith('//')) ? s : '#'; };
+// replaceChildren stringifies null, so anything that may be absent goes through here first.
+const present = (...list) => list.flat(Infinity).filter((c) => c != null && c !== false);
+function h(tag, props = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'href') el.setAttribute('href', safeHref(v));
+    else el.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
+  return el;
+}
+
+const SVG = 'http://www.w3.org/2000/svg';
+const ICONS = {
+  send: 'M12 19V5M5.5 11.5 12 5l6.5 6.5', back: 'M15 5l-7 7 7 7', chevron: 'M9 6l6 6-6 6', copy: 'M9 9h10v10H9zM15 9V5H5v10h4',
+  pause: 'M9 6v12M15 6v12', now: 'M7 6v12M12 6v12M17 9l3 3-3 3', play: 'M8 5.5v13l10-6.5z', x: 'M6 6l12 12M18 6 6 18',
+  tool: 'M14.5 6.5a4 4 0 0 0 5 5L13 18a2.1 2.1 0 0 1-3-3l6.5-6.5a4 4 0 0 0-2-2z', term: 'M5 7l5 5-5 5M12 17h7',
+  lock: 'M7 11V8a5 5 0 0 1 10 0v3M5 11h14v9H5z', spark: 'M12 3v5M12 16v5M3 12h5M16 12h5M5.6 5.6l3.5 3.5M14.9 14.9l3.5 3.5M5.6 18.4l3.5-3.5M14.9 9.1l3.5-3.5',
+  check: 'M5 12.5l4.5 4.5L19 7', device: 'M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM11 18h2', ext: 'M14 5h5v5M19 5l-8 8M17 14v5H5V7h5'
+};
+function icon(name, cls = '') {
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', `icon ${cls}`.trim());
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(SVG, 'path');
+  path.setAttribute('d', ICONS[name]);
+  svg.append(path);
+  return svg;
+}
+
+// Rebuilds a list, reusing the node of every row whose key is unchanged, so a half-typed
+// answer survives an update and a long transcript is not rebuilt on every event.
+function keyed(container, items, key, build) {
+  const old = new Map([...container.children].map((el) => [el.dataset.key, el]));
+  container.replaceChildren(...items.map((it) => {
+    const k = key(it);
+    const el = old.get(k) ?? build(it);
+    el.dataset.key = k;
+    return el;
+  }));
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {}
+    : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+  return data;
+}
+let flashTimer = null;
+const flash = (text) => {
+  const el = $('flash');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => el.classList.remove('show'), 2600);
+};
+const act = (path, body, done) => api(path, body).then((r) => { flash(done); return r; }, (err) => { flash(err.message); });
+function button(label, path, body, opts = {}) {
+  return h('button', { type: 'button', class: `btn small ${opts.cls ?? ''}`.trim(), onclick: () => {
+    if (opts.confirm && !confirm(opts.confirm)) return;
+    act(path, typeof body === 'function' ? body() : body, opts.done ?? `${label}: sent`);
+  } }, opts.icon ? icon(opts.icon) : null, label);
+}
+
+// Small pieces every view shares.
+const money = (usd) => (usd ? `$${usd.toFixed(2)}` : null);
+const tokens = (n) => (n ? `${n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : n} tokens` : null);
+const shortPath = (p) => String(p ?? '').split('/').filter(Boolean).at(-1) ?? String(p ?? '');
+const projectOf = (runId) => S.state?.runs.find((r) => r.id === runId)?.project ?? null;
+const STATE_LABEL = { running: 'Working', waiting: 'Waiting', paused: 'Paused', taken_over: 'Taken over', done: 'Done',
+                      failed: 'Failed', cancelled: 'Cancelled', pending: 'Starting', queued: 'Queued' };
+const stateLabel = (s) => STATE_LABEL[s] ?? String(s ?? '').replace(/_/g, ' ');
+const pill = (s, text = stateLabel(s)) => h('span', { class: `pill ${s ?? ''}` }, text);
+const dot = (s) => h('span', { class: `dot ${s ?? ''}`, title: stateLabel(s) });
+function harness(agent) {
+  const a = String(agent ?? '').toLowerCase();
+  if (a.startsWith('claude')) return { cls: 'claude', label: 'Claude' };
+  if (a.startsWith('codex')) return { cls: 'codex', label: 'Codex' };
+  return agent ? { cls: 'other', label: agent } : null;
+}
+const hue = (name) => [...String(name)].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 7) % 8;
+const initials = (name) => {
+  const parts = String(name ?? '?').split(/[\s_\-.]+/).filter(Boolean);
+  return ((parts.length > 1 ? parts[0][0] + parts[1][0] : String(name ?? '?').slice(0, 1)) || '?').toUpperCase();
+};
+function avatar(name, { agent = null, human = false, size = '' } = {}) {
+  const hn = harness(agent);
+  return h('span', { class: `av ${human ? 'you' : `av-${hue(name)}`} ${size}`.trim(), 'aria-hidden': 'true' }, initials(name),
+    hn ? h('span', { class: `av-badge ${hn.cls}` }) : human ? h('span', { class: 'av-badge human' }) : null);
+}
+const when = (at) => h('time', { 'data-at': String(at), datetime: new Date(at).toISOString(), title: new Date(at).toLocaleString() }, ago(at));
+const memberHref = (runId, memberId) => `#/run/${runId}/member/${memberId}`;
+const mateLink = (runId, memberId, name) => h('a', { href: memberHref(runId, memberId) }, name);
+
+function parseRoute() {
+  const m = /^#\/run\/(\d+)(?:\/member\/(\d+))?$/.exec(location.hash);
+  return m ? { run: Number(m[1]), member: m[2] ? Number(m[2]) : null } : { run: null, member: null };
+}
+
+function setConn(text, cls) {
+  const el = $('conn');
+  el.textContent = text;
+  el.className = `conn ${cls}`;
+}
+
+// Each view loads a tail over HTTP, then streams from that tail's cursor.
+async function open() {
+  setDrawer(false);
+  const route = parseRoute();
+  if (S.route && route.run === S.route.run && route.run != null) {   // another member, same run
+    S.route = route;
+    scrollTo({ top: 0 });
+    return schedule();
+  }
+  S.source?.close();
+  const gen = ++S.gen;
+  Object.assign(S, { route, failed: null, panel: null, detail: null, model: { events: [], messages: [] } });
+  $('view').replaceChildren(h('p', { class: 'loading' }, 'Loading…'));
+  scrollTo({ top: 0 });
+  try {
+    const tl = await api(route.run ? `/api/runs/${route.run}/timeline?limit=500` : '/api/timeline?limit=500');
+    if (gen !== S.gen) return;
+    const detail = route.run ? await api(`/api/runs/${route.run}`) : null;
+    if (gen !== S.gen) return;
+    S.model = { events: tl.events, messages: tl.messages };
+    S.detail = detail;
+    const q = new URLSearchParams({ after_event: tl.cursor.event, after_message: tl.cursor.message });
+    if (route.run) q.set('run', route.run);
+    const src = new EventSource(`/api/stream?${q}`);
+    const on = (name, f) => src.addEventListener(name, (ev) => {
+      if (gen !== S.gen) return;
+      let data;
+      try { data = JSON.parse(ev.data); } catch { return; }   // one bad frame must not stop the stream
+      f(data);
+      schedule();
+    });
+    on('state', (data) => { S.state = data; });
+    on('timeline', (data) => { S.model = mergeTimeline(S.model, data); });
+    src.onopen = () => { setConn('Live', 'live'); };
+    src.onerror = () => { setConn('Reconnecting', 'down'); };
+    S.source = src;
+  } catch (err) {
+    if (gen !== S.gen) return;
+    S.failed = `Could not load this view: ${err.message}`;
+    flash(err.message);
+  }
+  schedule();
+}
+
+// At most one redraw per frame, however many batches arrive.
+let queued = false;
+function schedule() {
+  if (queued) return;
+  queued = true;
+  requestAnimationFrame(() => { queued = false; draw(); });
+}
+
+function draw() {
+  drawSidebar();
+  drawNeeds();
+  if (S.failed) {
+    $('view').replaceChildren(h('div', { class: 'card empty' }, h('p', { class: 'big' }, 'That view would not load'), h('p', {}, S.failed),
+      h('a', { class: 'btn', href: '#/' }, 'Back to activity')));
+  } else if (S.route.run) drawRun(); else drawActivity();
+}
+
+function drawSidebar() {
+  const live = S.state?.live ?? [];
+  const byProject = new Map();
+  for (const run of S.state?.runs ?? []) {
+    const members = live.filter((m) => m.run_id === run.id);
+    if (S.query && !matches(S.query, run.project, run.task, run.root, ...members.map((m) => m.name))) continue;
+    byProject.set(run.project, [...(byProject.get(run.project) ?? []), { run, members }]);
+  }
+  $('home').classList.toggle('current', !S.route?.run);
+  const groups = [...byProject].map(([project, items]) => h('div', { class: 'project' },
+    h('h2', { title: project }, shortPath(project)),
+    h('ul', {}, items.map(({ run, members }) => h('li', {},
+      h('a', { href: `#/run/${run.id}`, class: `run-link${run.id === S.route?.run ? ' current' : ''}`, title: run.task },
+        dot(run.status), h('span', { class: 'label' }, run.task || run.root || `Run ${run.id}`), h('span', { class: 'num' }, `#${run.id}`)),
+      members.length ? h('ul', { class: 'members' }, members.map((m) => h('li', {},
+        h('a', { href: memberHref(m.run_id, m.id), class: `member-link${m.id === S.route?.member ? ' current' : ''}` },
+          avatar(m.name, { agent: m.agent, size: 'sm' }), h('span', { class: 'label' }, m.name), dot(m.state))))) : null)))));
+  $('projects').replaceChildren(...(groups.length ? groups
+    : [h('p', { class: 'empty-side' }, S.query ? 'Nothing matches that search.' : S.state ? 'No runs yet.' : 'Connecting…')]));
+}
+
+function drawNeeds() {
+  const n = S.state?.needs ?? { questions: [], stalled: [], cost_capped: [] };
+  const items = [
+    ...n.questions.map((q) => ({ key: `q${q.id}`, build: () => questionCard(q) })),
+    ...n.stalled.map((s) => ({ key: `s${s.member_id}.${s.at}`, build: () => h('div', { class: 'ask' },
+      avatar(s.member),
+      h('div', { class: 'body' },
+        h('div', { class: 'who-line' }, mateLink(s.run_id, s.member_id, s.member), ' went quiet · ', when(s.at)),
+        h('p', { class: 'q' }, `No word for ${Math.round((s.quiet_s ?? 0) / 60)} minutes.`),
+        h('div', { class: 'row' },
+          button('Pause now', `/api/members/${s.member_id}/pause`, { now: true }, { cls: 'primary', done: 'Paused' }),
+          button('Cancel', `/api/members/${s.member_id}/cancel`, {}, { cls: 'danger', confirm: `Cancel ${s.member}?`, done: 'Cancelled' })))) })),
+    ...n.cost_capped.map((c) => ({ key: `c${c.run_id}.${c.max_cost_usd}`, build: () => capCard(c) }))
+  ];
+  const section = $('needs');
+  section.hidden = items.length === 0;
+  if (!section.firstChild) {
+    section.append(h('div', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h2', {}, 'Needs you'), h('span', { class: 'badge' })), h('div', { class: 'asks' })));
+  }
+  section.querySelector('.badge').textContent = String(items.length);
+  keyed(section.querySelector('.asks'), items, (i) => i.key, (i) => i.build());
+}
+
+function questionCard(q) {
+  const input = h('input', { type: 'text', placeholder: 'Or write an answer', 'aria-label': `Answer ${q.member}` });
+  const send = (answer) => act(`/api/questions/${q.id}/answer`, { answer }, `Answered ${q.member}`);
+  const options = q.options ?? [];
+  return h('form', { class: 'ask', onsubmit: (e) => { e.preventDefault(); if (input.value.trim()) send(input.value); } },
+    avatar(q.member),
+    h('div', { class: 'body' },
+      h('div', { class: 'who-line' }, mateLink(q.run_id, q.member_id, q.member), ' asks', q.asked_at ? [' · ', when(q.asked_at)] : null),
+      h('p', { class: 'q' }, q.question),
+      h('div', { class: 'row' },
+        options.map((o, i) => h('button', { type: 'button', class: `btn ${i === 0 ? 'primary' : ''}`.trim(), onclick: () => send(o) }, o)),
+        h('div', { class: 'answer' }, input, h('button', { type: 'submit', class: `btn ${options.length ? '' : 'primary'}`.trim() }, 'Answer')))));
+}
+
+function capCard(c) {
+  const input = h('input', { type: 'number', min: '0', step: '0.5', value: String((c.max_cost_usd ?? 0) * 2), 'aria-label': 'New cap in dollars' });
+  return h('form', { class: 'ask', onsubmit: (e) => {
+    e.preventDefault();
+    act(`/api/members/${c.member_id}/resume`, { subtree: true, max_cost_usd: Number(input.value) }, 'Resumed');
+  } },
+    h('span', { class: 'av av-3', 'aria-hidden': 'true' }, '$'),
+    h('div', { class: 'body' },
+      h('div', { class: 'who-line' }, h('a', { href: `#/run/${c.run_id}` }, `Run #${c.run_id}`), ' paused at its spending cap'),
+      h('p', { class: 'q' }, `Spent ${money(c.cost_usd) ?? '$0.00'} of ${money(c.max_cost_usd) ?? '$0.00'}.`),
+      h('div', { class: 'row' }, h('div', { class: 'answer' }, h('span', { class: 'muted' }, 'New cap $'), input,
+        h('button', { type: 'submit', class: 'btn primary' }, 'Raise and resume')))));
+}
+
+function greeting(now = new Date()) {
+  const hr = now.getHours();
+  return hr < 5 ? 'Up late' : hr < 12 ? 'Good morning' : hr < 18 ? 'Good afternoon' : 'Good evening';
+}
+
+function chartCard() {
+  const bins = hourly(S.model.events);
+  const max = Math.max(1, ...bins);
+  const hour = new Date().getHours();
+  const bars = bins.map((n, i) => {
+    const bar = h('span', { class: i > hour ? 'later' : n ? '' : 'zero',
+                            title: `${new Date(2000, 0, 1, i).toLocaleTimeString([], { hour: 'numeric' })} · ${n} tool ${n === 1 ? 'call' : 'calls'}` });
+    bar.style.setProperty('--h', String(Math.round((n / max) * 100)));
+    return bar;
+  });
+  const total = todayCount(S.model.events);
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, `Today · ${total} tool ${total === 1 ? 'call' : 'calls'}`)),
+    h('div', { class: 'chart', role: 'img', 'aria-label': `Tool calls per hour today, ${total} in all` }, bars),
+    h('div', { class: 'axis' }, ['12 AM', '6 AM', '12 PM', '6 PM'].map((t) => h('span', {}, t))));
+}
+
+function runRow(run) {
+  const mates = (S.state?.live ?? []).filter((m) => m.run_id === run.id);
+  return h('li', {}, h('a', { class: 'run-card', href: `#/run/${run.id}` },
+    mates.length ? h('span', { class: 'stack' }, mates.slice(0, 4).map((m) => avatar(m.name, { agent: m.agent, size: 'sm' })))
+      : avatar(run.root ?? run.task, { size: 'sm' }),
+    h('span', { class: 'body' }, h('div', { class: 'title' }, run.task || `Run ${run.id}`),
+      h('div', { class: 'meta' }, present(shortPath(run.project), ` · #${run.id}`, money(run.cost_usd) ? ` · ${money(run.cost_usd)}` : null, ' · ', when(run.created_at)))),
+    pill(run.status)));
+}
+
+function drawActivity() {
+  const entries = activity(S.model.events).reverse()
+    .filter((e) => !S.query || matches(S.query, e.member, projectOf(e.run_id)));
+  const runs = S.state?.runs ?? [];
+  const running = runs.filter((r) => r.status === 'running');
+  const recent = runs.filter((r) => r.status !== 'running').slice(0, 6);
+  const history = entries.slice(0, 60).map((e) => {
+    // report_progress is followed by its own progress line, so the call itself is noise here.
+    const items = e.items.filter((it) => it.kind !== 'user' && !(it.kind === 'tool_call' && /^report_progress\b/.test(it.label ?? '')));
+    const showAll = S.open.has(e.member_id);
+    const shown = items.slice(showAll ? -20 : -4);
+    const last = items.at(-1) ?? e.items.at(-1);
+    return h('li', {},
+      avatar(e.member),
+      h('div', { class: 'body' },
+        h('div', { class: 'who-line' }, mateLink(e.run_id, e.member_id, e.member), ` · ${shortPath(projectOf(e.run_id)) || `run #${e.run_id}`}`,
+          last ? [' · ', when(last.at)] : null),
+        h('ul', { class: 'actions' }, shown.map((it) => h('li', { class: it.kind === 'text' || it.kind === 'progress' ? 'say' : '' },
+          it.kind === 'tool_call' || it.kind === 'command' ? h('span', { class: 'chip' }, it.kind === 'command' ? 'shell' : 'tool') : null,
+          PHRASE[it.kind] && it.kind !== 'progress'
+            ? h('span', { class: 'what note' }, PHRASE[it.kind](it.label === it.kind ? '' : it.label ?? ''))
+            : h('span', { class: 'what' }, it.label || it.kind),
+          it.count > 1 ? h('span', { class: 'count' }, countLabel(it.count, it.kind)) : null))),
+        items.length > 4 ? h('button', { type: 'button', class: 'more', onclick: () => {
+          if (S.open.has(e.member_id)) S.open.delete(e.member_id); else S.open.add(e.member_id);
+          schedule();
+        } }, showAll ? 'Show less' : `Show ${Math.min(items.length, 20) - 4} more`) : null));
+  });
+  $('view').replaceChildren(
+    h('div', { class: 'hello' },
+      h('h1', {}, icon('spark', 'spark'), greeting()),
+      h('p', {}, S.state ? summary(S.state.live, S.state.needs) : 'Catching up with your teams…')),
+    h('div', { class: 'grid' },
+      h('div', { class: 'col' },
+        h('section', { class: 'card' },
+          h('div', { class: 'card-head' }, h('h2', {}, 'History')),
+          history.length ? h('ol', { class: 'history' }, history)
+            : h('div', { class: 'empty' }, h('p', { class: 'big' }, S.query ? 'Nothing matches that search' : 'Nothing has happened yet'),
+                h('p', {}, S.query ? 'Try a teammate or project name.' : 'Start a team with agent-team run, and its work shows up here as it happens.')))),
+      h('div', { class: 'col' },
+        chartCard(),
+        h('section', { class: 'card' },
+          h('div', { class: 'card-head' }, h('h2', {}, 'Running now'), running.length ? h('span', { class: 'badge' }, String(running.length)) : null),
+          running.length ? h('ul', { class: 'runs-list' }, running.map(runRow)) : h('p', { class: 'muted' }, 'No team is running.')),
+        recent.length ? h('section', { class: 'card' },
+          h('div', { class: 'card-head' }, h('h2', {}, 'Recent')),
+          h('ul', { class: 'runs-list' }, recent.map(runRow))) : null)));
+}
+
+// Team events read as sentences in the conversation.
+const PHRASE = {
+  started: () => 'joined the team', paused: () => 'was paused', resumed: () => 'picked back up', interrupted: () => 'was interrupted',
+  stalled: (s) => `went ${s}`, timed_out: () => 'ran out of time', taken_over: () => 'was taken over in a terminal',
+  handed_back: () => 'was handed back', cost_cap: (s) => `hit its ${s}`, finished: (s) => (s ? `finished · ${s}` : 'finished'),
+  delegated: (s) => s.replace(/^delegated to /, 'handed a task to '), progress: (s) => s
+};
+
+function convoRow(r, run) {
+  if (r.type === 'message') {
+    const mine = r.from_kind === 'human';
+    return h('li', { class: `message${mine ? ' mine' : ''}` },
+      avatar(r.from, { human: mine }),
+      h('div', { class: 'msg' },
+        h('div', { class: 'who-line' }, h('b', {}, r.from), ` to ${r.to} · `, when(r.at)),
+        h('div', { class: 'bubble' }, r.text)));
+  }
+  const member = (S.detail?.members ?? []).find((m) => m.name === r.who);
+  const say = (PHRASE[r.kind] ?? ((s) => s || r.kind.replace(/_/g, ' ')))(r.said ?? '');
+  return h('li', { class: 'event' }, dot(r.kind === 'finished' ? 'done' : r.kind === 'paused' ? 'paused' : r.kind === 'stalled' ? 'taken_over' : 'running'),
+    h('span', { class: 'what' }, member ? h('a', { href: memberHref(run.id, member.id) }, h('b', {}, r.who)) : h('b', {}, r.who),
+      r.kind === 'progress' ? ': ' : ' ', say),
+    when(r.at));
+}
+
+// A running task, as Claude shows a subagent: one status line that updates in place, with a
+// spinner while the member works and the earlier updates folded behind a count.
+function glyph(state) {
+  if (state === 'running' || state === 'waiting') return h('span', { class: 'spin', role: 'img', 'aria-label': 'working' });
+  if (state === 'done') return icon('check', 'ok');
+  if (state === 'failed' || state === 'cancelled') return icon('x', 'bad');
+  return dot(state);
+}
+
+function taskLine({ state, who, steps, open }) {
+  const latest = steps.at(-1);
+  const shown = S.open.has(open);
+  return [glyph(state),
+    h('div', { class: 'body' },
+      h('div', { class: 'line' }, who ? [who, ' '] : null, h('span', { class: 'what' }, latest.text ?? describe(latest))),
+      h('div', { class: 'meta' }, when(latest.at), steps.length > 1 ? [' · ', h('button', { type: 'button', class: 'more', 'aria-expanded': String(shown),
+        onclick: () => { if (S.open.has(open)) S.open.delete(open); else S.open.add(open); schedule(); } },
+        shown ? 'Hide earlier' : `${steps.length - 1} earlier ${steps.length === 2 ? 'update' : 'updates'}`)] : null),
+      shown ? h('ol', { class: 'steps' }, steps.slice(0, -1).slice(-30).map((st) => h('li', {}, h('span', {}, st.text ?? describe(st)), ' ', when(st.at)))) : null)];
+}
+
+function drawRun() {
+  const run = S.state?.run?.id === S.route.run ? S.state.run : S.detail?.run;
+  if (!run) return $('view').replaceChildren(h('p', { class: 'loading' }, 'Loading…'));
+  const members = S.state?.run?.id === S.route.run ? S.state.members : S.detail.members;
+  if (!S.panel) {
+    S.panel = { head: h('header', { class: 'run-head' }), tree: h('ul', { class: 'tree' }), talk: h('ol', { class: 'talk' }), tasks: h('ul', { class: 'tasks' }),
+                member: h('aside', { class: 'card member' }), wrap: null, controls: null };
+    S.panel.wrap = h('div', { class: 'run' },
+      h('div', { class: 'run-main' },
+        h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Team')), S.panel.tree),
+        h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Conversation')), S.panel.tasks, S.panel.talk)),
+      h('div', { class: 'run-side' }, S.panel.member));
+    $('view').replaceChildren(S.panel.head, S.panel.wrap);
+  }
+  S.panel.wrap.classList.toggle('has-member', S.route.member != null);
+  S.panel.head.replaceChildren(...present(
+    h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Activity'), icon('chevron'), h('span', { title: run.project }, shortPath(run.project)),
+      icon('chevron'), h('span', {}, `Run #${run.id}`)),
+    h('h1', {}, run.task),
+    h('div', { class: 'facts-row' }, present(pill(run.status), h('span', { class: 'pill quiet' }, `${members.length} ${members.length === 1 ? 'teammate' : 'teammates'}`),
+      money(run.cost_usd) ? h('span', { class: 'pill quiet' }, money(run.cost_usd)) : null,
+      tokens(run.tokens) ? h('span', { class: 'pill quiet' }, tokens(run.tokens)) : null,
+      run.created_at ? h('span', { class: 'pill quiet' }, 'started ', when(run.created_at), run.status === 'running' ? null : '') : null)),
+    run.read_only_note ? h('div', { class: 'banner' }, icon('lock'), h('span', {}, 'Read-only here. ', run.read_only_note)) : null));
+  const node = (m) => h('li', {},
+    h('a', { href: memberHref(run.id, m.id), class: `mate${m.id === S.route.member ? ' current' : ''}` },
+      avatar(m.name, { agent: m.agent }),
+      h('span', { class: 'body' }, h('div', { class: 'name' }, m.name), h('div', { class: 'task' }, m.task ?? '')),
+      pill(m.state)),
+    m.children.length ? h('ul', {}, m.children.map(node)) : null);
+  S.panel.tree.replaceChildren(...memberTree(members).map(node));
+  const states = new Map(members.map((x) => [x.id, x.state]));
+  const running = tasks(S.model.events).filter((t) => states.has(t.member_id))
+    .sort((a, b) => Number(TERMINAL.has(states.get(a.member_id))) - Number(TERMINAL.has(states.get(b.member_id))) || b.latest.at - a.latest.at);
+  S.panel.tasks.hidden = !running.length;
+  S.panel.tasks.replaceChildren(...running.map((t) => h('li', { class: `task${TERMINAL.has(states.get(t.member_id)) ? ' ended' : ''}` },
+    taskLine({ state: states.get(t.member_id), who: h('a', { href: memberHref(run.id, t.member_id) }, h('b', {}, t.member)),
+               steps: t.steps, open: `t${t.member_id}` }))));
+  const talk = conversation(S.model).slice(-300);
+  const atEnd = S.panel.talk.scrollHeight - S.panel.talk.scrollTop - S.panel.talk.clientHeight < 40;
+  if (talk.length) keyed(S.panel.talk, talk, (r) => r.key, (r) => convoRow(r, run));
+  else S.panel.talk.replaceChildren(h('li', { class: 'empty' }, 'The team has not said anything yet.'));
+  if (atEnd) S.panel.talk.scrollTop = S.panel.talk.scrollHeight;
+  const m = members.find((x) => x.id === S.route.member);
+  if (m) drawMember(run, m);
+  else {
+    S.panel.controls = null;
+    S.panel.member.replaceChildren(h('div', { class: 'empty' },
+      h('p', { class: 'big' }, 'Pick a teammate'),
+      h('p', {}, 'Read along as they work, send a message, or pause them.'),
+      h('div', { class: 'stack' }, members.slice(0, 6).map((x) => avatar(x.name, { agent: x.agent })))));
+  }
+}
+
+function drawMember(run, m) {
+  const p = S.panel;
+  if (p.controls?.id !== m.id) {
+    p.controls = memberControls(m);
+    p.mhead = h('div', { class: 'mhead' });
+    p.mtask = h('p', { class: 'mtask' });
+    p.result = h('div', { class: 'result' });
+    p.facts = h('dl', { class: 'facts' });
+    p.transcript = h('ol', { class: 'transcript' });
+    p.task = h('div', { class: 'progress now' });
+    p.member.replaceChildren(
+      h('a', { class: 'back', href: `#/run/${run.id}` }, icon('back'), 'Team'),
+      p.mhead, p.mtask, p.result, p.controls.el,
+      h('details', { class: 'more-facts' }, h('summary', {}, icon('chevron'), 'Details'), p.facts),
+      ...extras(m), h('h3', { class: 'subhead' }, 'Transcript'), p.task, p.transcript);
+  }
+  const hn = harness(m.agent);
+  p.mhead.replaceChildren(avatar(m.name, { agent: m.agent, size: 'lg' }),
+    h('div', { class: 'body' }, h('h2', {}, m.name),
+      h('div', { class: 'tags' }, present(pill(m.state), hn ? h('span', { class: `pill ${hn.cls}` }, hn.label) : null,
+        m.model ? h('span', { class: 'pill quiet' }, m.model) : null, m.read_only ? h('span', { class: 'pill quiet' }, 'read-only') : null))));
+  p.mtask.textContent = m.task ?? '';
+  p.result.replaceChildren(...present(m.result
+    ? h('div', { class: `banner ${m.result.status === 'ok' ? 'info' : ''}`.trim() }, icon(m.result.status === 'ok' ? 'spark' : 'x'),
+      h('span', {}, `Finished${m.result.status === 'ok' ? '' : ` (${m.result.status})`}`, m.result.summary ? `: ${m.result.summary}` : ''))
+    : null));
+  const deny = S.detail?.deny_paths;
+  p.facts.replaceChildren(...[
+    ['harness', m.agent ?? '—'], ['model', m.model ?? '—'], ['workspace', m.workspace ?? 'project folder'],
+    ['read-only', m.read_only == null ? '—' : m.read_only ? 'yes' : 'no'], ['deny_paths', deny ? deny.join(', ') || 'none' : '—'],
+    ['cost', money(m.cost_usd) ?? '—'], ['tokens', m.tokens ? String(m.tokens) : '—']
+  ].flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
+  p.controls.update(run, m);
+  const mine = tasks(S.model.events.filter((e) => e.member_id === m.id))[0];
+  p.task.hidden = !mine;
+  if (mine) p.task.replaceChildren(...taskLine({ state: m.state, steps: mine.steps, open: `s${m.id}` }));
+  const rows = [
+    ...S.model.events.filter((e) => e.member_id === m.id && e.kind !== 'tool_result' && e.kind !== 'progress' && !isProgressEcho(e)
+      && !(e.kind === 'tool_call' && /^report_progress\b/.test(describe(e)))).map((e) => ({ at: e.at, key: `e${e.id}`, e })),
+    ...S.model.messages.filter((x) => x.to_member === m.id && !isProgressReport(x)).map((x) => ({ at: x.at, key: `m${x.id}`, x }))
+  ].sort((a, b) => a.at - b.at).slice(-400);
+  if (rows.length) keyed(p.transcript, rows, (r) => r.key, (r) => (r.e ? eventRow(r.e) : messageRow(r.x)));
+  else p.transcript.replaceChildren(h('li', { class: 'sys' }, h('span', { class: 'what' }, 'Nothing yet.')));
+}
+
+function eventRow(e) {
+  const said = describe(e);
+  if (e.kind === 'text' || e.kind === 'user') {
+    return h('li', { class: 'say' }, h('span', { class: 'what' }, said), h('span', { class: 'stamp' }, when(e.at)));
+  }
+  if (e.kind === 'tool_call' || e.kind === 'command') {
+    const full = h('pre', { hidden: true });
+    const li = h('li', { class: 'tool', role: 'button', tabindex: '0', 'aria-expanded': 'false' },
+      h('div', { class: 'line' }, icon(e.kind === 'command' ? 'term' : 'tool'), h('span', { class: 'what' }, said), h('span', { class: 'stamp' }, when(e.at))),
+      full);
+    const toggle = async () => {
+      if (full.hidden && !full.textContent) {
+        const body = e.body?.clipped ? (await api(`/api/events/${e.id}`).catch(() => e)).body : e.body;
+        full.textContent = JSON.stringify(body, null, 2);
+      }
+      full.hidden = !full.hidden;
+      li.setAttribute('aria-expanded', String(!full.hidden));
+    };
+    li.addEventListener('click', (ev) => { if (!full.contains(ev.target)) toggle(); });
+    li.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); } });
+    return li;
+  }
+  const say = (PHRASE[e.kind] ?? ((s) => s || e.kind.replace(/_/g, ' ')))(said);
+  return h('li', { class: 'sys' }, dot(e.kind === 'paused' ? 'paused' : e.kind === 'finished' ? 'done' : 'running'),
+    h('span', { class: 'what' }, say), h('span', { class: 'stamp' }, when(e.at)));
+}
+
+const messageRow = (x) => h('li', { class: 'inbox' }, avatar(x.from_name, { human: x.from_kind === 'human', size: 'sm' }),
+  h('div', { class: 'msg' }, h('div', { class: 'who-line' }, h('b', {}, x.from_name), ` · ${x.from_kind} · `, when(x.at)),
+    h('div', { class: 'bubble' }, x.text)));
+
+function memberControls(m) {
+  const base = `/api/members/${m.id}`;
+  const text = h('textarea', { rows: '1', placeholder: `Message ${m.name}`, 'aria-label': `Message ${m.name}` });
+  const note = h('input', { type: 'text', class: 'note-input', placeholder: 'Add a note for when it resumes (optional)', 'aria-label': 'Resume note' });
+  const subtree = h('input', { type: 'checkbox', 'aria-label': 'Include its reports' });
+  const send = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send' }, icon('send'));
+  const b = {
+    pause: button('Pause', `${base}/pause`, () => ({ subtree: subtree.checked }), { icon: 'pause', done: 'Pausing after this step' }),
+    now: button('Pause now', `${base}/pause`, () => ({ now: true, subtree: subtree.checked }), { icon: 'now', done: 'Paused' }),
+    resume: button('Resume', `${base}/resume`, () => ({ subtree: subtree.checked, note: note.value || null }), { icon: 'play', cls: 'primary', done: 'Resumed' }),
+    cancel: button('Cancel', `${base}/cancel`, () => ({ subtree: subtree.checked }),
+                   { icon: 'x', cls: 'danger', confirm: `Cancel ${m.name}? Its workspace is kept.`, done: 'Cancelled' })
+  };
+  const grow = () => { text.style.height = 'auto'; text.style.height = `${Math.min(text.scrollHeight, 160)}px`; };
+  const submit = () => {
+    if (!text.value.trim() || text.disabled) return;
+    act(`${base}/message`, { text: text.value }, `Sent to ${m.name}`).then((r) => { if (r) { text.value = ''; grow(); } });
+  };
+  text.addEventListener('input', grow);
+  text.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); } });
+  const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); submit(); } }, text, send);
+  const el = h('div', {}, form,
+    h('div', { class: 'ctl' }, b.pause, b.now, b.resume, b.cancel, h('label', { class: 'switch' }, subtree, 'With its reports')), note,
+    h('div', { class: 'takeover' }, icon('term'),
+      h('div', { class: 'body' }, h('div', { class: 'label' }, 'Take over in a terminal'), h('code', {}, m.attach)),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Copy command',
+                    onclick: () => navigator.clipboard?.writeText(m.attach).then(() => flash('Copied'), () => flash('Could not copy')) }, icon('copy'))));
+  return {
+    id: m.id, el,
+    update(run, cur) {
+      const off = !run.steerable || TERMINAL.has(cur.state);
+      for (const x of [text, send, b.cancel]) x.disabled = off;
+      text.placeholder = !run.steerable ? 'This run is read-only here' : TERMINAL.has(cur.state) ? `${m.name} has finished` : `Message ${m.name}`;
+      b.pause.disabled = b.now.disabled = off || cur.state === 'paused';
+      b.resume.disabled = !run.steerable || cur.state !== 'paused';
+      note.hidden = !run.steerable || cur.state !== 'paused';
+      b.resume.hidden = cur.state !== 'paused';
+      b.pause.hidden = b.now.hidden = cur.state === 'paused';
+    }
+  };
+}
+
+// Sections later tasks add to the member panel (devices, designs).
+function extras(m) {
+  return [devices(m), designs(m)];
+}
+
+function devices(m) {
+  const section = h('section', { class: 'devices', hidden: true });
+  api(`/api/members/${m.id}/devices`).then(({ enabled, targets }) => {
+    if (!enabled) return;
+    const pick = h('select', { 'aria-label': 'Loupe target' }, h('option', { value: '' }, 'Pick a device'));
+    const shown = h('div');
+    const show = (id) => {
+      const img = h('img', { alt: `Screenshot of ${id}`, src: `/api/loupe/screenshot?target=${encodeURIComponent(id)}` });
+      shown.replaceChildren(img, h('div', { class: 'row' },
+        h('button', { type: 'button', class: 'btn small', onclick: () => { img.src = `/api/loupe/screenshot?target=${encodeURIComponent(id)}&t=${Date.now()}`; } }, 'Refresh'),
+        h('a', { class: 'btn small', href: `/loupe/open?target=${encodeURIComponent(id)}`, target: '_blank', rel: 'noopener noreferrer' }, icon('ext'), 'Open live view in loupe')));
+    };
+    pick.addEventListener('change', () => pick.value && show(pick.value));
+    section.append(h('h3', { class: 'subhead' }, 'Devices'), pick, shown);
+    section.hidden = false;
+    targets.forEach((t, i) => { if (i === 0) show(t.id); });
+    api('/api/loupe').then(({ targets: all }) => all.forEach((t) => pick.append(h('option', { value: t.id }, `${t.label} (${t.id})`))), () => {});
+  }, () => {});
+  return section;
+}
+
+function designs(m) {
+  const section = h('section', { class: 'designs', hidden: true });
+  api(`/api/members/${m.id}/designs`).then(({ enabled, refs }) => {
+    if (!enabled || !refs.length) return;
+    section.append(h('h3', { class: 'subhead' }, 'Designs'), ...refs.map((r) => h('figure', {},
+      h('img', { loading: 'lazy', alt: `Figma node ${r.node_id}`,
+                 src: `/api/figma/image?file=${encodeURIComponent(r.file_key)}&node=${encodeURIComponent(r.node_id)}` }),
+      h('figcaption', {}, `node ${r.node_id} · file ${r.file_key}`))));
+    section.hidden = false;
+  }, () => {});
+  return section;
+}
+
+// The sidebar is a drawer on narrow screens.
+function setDrawer(on) {
+  document.body.classList.toggle('drawer', on);
+  $('menu').setAttribute('aria-expanded', String(on));
+  $('scrim').hidden = !on;
+}
+$('menu').addEventListener('click', () => setDrawer(!document.body.classList.contains('drawer')));
+$('scrim').addEventListener('click', () => setDrawer(false));
+addEventListener('keydown', (e) => { if (e.key === 'Escape') setDrawer(false); });
+
+// Relative times ("4m") age in place without a redraw.
+setInterval(() => { for (const t of document.querySelectorAll('time[data-at]')) t.textContent = ago(Number(t.dataset.at)); }, 30_000);
+
+$('search').addEventListener('input', (e) => { S.query = e.target.value; schedule(); });
+addEventListener('hashchange', open);
+open();

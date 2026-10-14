@@ -4,6 +4,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
+import { runCodexSession } from '../src/codex-session.js';
+import { codexAttach, diag } from '../src/codex-attach.js';
 
 // Binary resolution: PATH is the contract ("codex" must resolve there for a normal install).
 // The env var is only an escape hatch for a non-PATH install — on this machine codex-cli
@@ -36,6 +38,43 @@ const sub = process.argv[2];
 const DIFF_KEEP_CHARS = 200_000;
 const DIFF_MAX_BUFFER = 20_000_000;
 
+// The workspace's diff and branch, as a result's `artifacts` (shared by `run` and `session`).
+function artifacts(cwd, logDir) {
+  let diff = '';
+  let diffUnreadable = false;
+  try {
+    // `git diff HEAD` never shows an untracked path, so a member that CREATES a file —
+    // a new source file, a new test — handed back an empty diff while reporting success,
+    // and the manager saw no work. Intent-to-add (`add -A -N`) makes the new file visible
+    // to diff. It is staged into a THROWAWAY index, never the workspace's own: a read_only
+    // brief's conformance check compares `git status --porcelain` from before the run to
+    // after it, and touching the real index would turn "?? new.txt" into "A  new.txt" and
+    // report a read-only violation that never happened.
+    const diffIndex = join(logDir, 'diff-index');
+    const gitEnv = { ...process.env, GIT_INDEX_FILE: diffIndex };
+    execFileSync('git', ['-C', cwd, 'read-tree', 'HEAD'], { stdio: 'pipe', env: gitEnv });
+    execFileSync('git', ['-C', cwd, 'add', '-A', '-N'], { stdio: 'pipe', env: gitEnv });
+    diff = execFileSync('git', ['-C', cwd, 'diff', 'HEAD'], {
+      stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER, env: gitEnv
+    }).toString();
+  } catch (e) {
+    if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      diffUnreadable = true;
+    }
+  }
+
+  let branch = null;
+  try { branch = execFileSync('git', ['-C', cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
+  catch { /* ignore */ }
+  return {
+    branch,
+    diff: diff.slice(0, DIFF_KEEP_CHARS),
+    diff_truncated: diff.length > DIFF_KEEP_CHARS,
+    diff_full_length: diff.length,
+    diff_unreadable: diffUnreadable
+  };
+}
+
 if (sub === 'probe') {
   const r = spawnSync(BIN, ['--version'], { stdio: 'pipe' });
   if (r.status !== 0) { process.stderr.write('codex not on PATH\n'); process.exit(1); }
@@ -43,8 +82,18 @@ if (sub === 'probe') {
 } else if (sub === 'capabilities') {
   process.stdout.write(JSON.stringify({
     // `workspace`, not `worktree` — the plan text predates 9177874, which renamed the key.
-    write: true, workspace: true, structured_output: true, tool_dialect: 'codex'
+    write: true, workspace: true, structured_output: true, tool_dialect: 'codex', protocol: 2,
+    takeover: { notice: null }
   }) + '\n', () => process.exit(0));
+} else if (sub === 'session') {
+  runCodexSession({ artifacts });
+} else if (sub === 'attach') {
+  // The human's take-over of the member's thread, in this terminal (src/codex-attach.js).
+  if (!process.argv[3]) { process.stderr.write('usage: codex attach <thread-id>\n'); process.exit(2); }
+  // Anything unexpected is "never started" (3), so the handback does not claim the human drove.
+  codexAttach(process.argv[3])
+    .catch((err) => { diag(`agent-team: codex attach failed: ${err.message}\n`); return 3; })
+    .then((code) => process.exit(code));
 } else if (sub === 'run') {
   const brief = JSON.parse(readFileSync(0, 'utf8'));
   const logDir = mkdtempSync(join(tmpdir(), 'agent-team-codex-'));
@@ -112,44 +161,13 @@ if (sub === 'probe') {
       try { summary = readFileSync(lastMessagePath, 'utf8'); }
       catch { summary = r.stdout.toString().slice(0, 4000); }
 
-      let diff = '';
-      let diffUnreadable = false;
-      try {
-        // `git diff HEAD` never shows an untracked path, so a member that CREATES a file —
-        // a new source file, a new test — handed back an empty diff while reporting success,
-        // and the manager saw no work. Intent-to-add (`add -A -N`) makes the new file visible
-        // to diff. It is staged into a THROWAWAY index, never the workspace's own: a read_only
-        // brief's conformance check compares `git status --porcelain` from before the run to
-        // after it, and touching the real index would turn "?? new.txt" into "A  new.txt" and
-        // report a read-only violation that never happened.
-        const diffIndex = join(logDir, 'diff-index');
-        const gitEnv = { ...process.env, GIT_INDEX_FILE: diffIndex };
-        execFileSync('git', ['-C', brief.cwd, 'read-tree', 'HEAD'], { stdio: 'pipe', env: gitEnv });
-        execFileSync('git', ['-C', brief.cwd, 'add', '-A', '-N'], { stdio: 'pipe', env: gitEnv });
-        diff = execFileSync('git', ['-C', brief.cwd, 'diff', 'HEAD'], {
-          stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER, env: gitEnv
-        }).toString();
-      } catch (e) {
-        if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-          diffUnreadable = true;
-        }
-      }
-
-      let branch = null;
-      try { branch = execFileSync('git', ['-C', brief.cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
-      catch { /* ignore */ }
+      const art = artifacts(brief.cwd, logDir);
 
       process.stdout.write(JSON.stringify({
         ...answerOutcome(summary, brief),
         findings: [],
         checked_sound: [],
-        artifacts: {
-          branch,
-          diff: diff.slice(0, DIFF_KEEP_CHARS),
-          diff_truncated: diff.length > DIFF_KEEP_CHARS,
-          diff_full_length: diff.length,
-          diff_unreadable: diffUnreadable
-        },
+        artifacts: art,
         log_path: logPath
       }) + '\n', () => process.exit(0));
     }

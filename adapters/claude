@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
+import { runClaudeSession } from '../src/claude-session.js';
 
 const sub = process.argv[2];
 
@@ -95,14 +96,73 @@ function usageFrom(envelope) {
   };
 }
 
+// `git diff HEAD` never shows an untracked path, so a member that CREATES a file — a new
+// source file, a new test — handed back an empty diff while reporting success, and the manager
+// saw no work. Intent-to-add (`add -A -N`) makes the new file visible to diff. It is staged
+// into a THROWAWAY index, never the workspace's own: a read_only brief's conformance check
+// compares `git status --porcelain` from before the run to after it, and touching the real
+// index would turn "?? new.txt" into "A  new.txt" and report a read-only violation that never
+// happened.
+function gitDiff(cwd, logDir, extra = []) {
+  const gitEnv = { ...process.env, GIT_INDEX_FILE: join(logDir, 'diff-index') };
+  execFileSync('git', ['-C', cwd, 'read-tree', 'HEAD'], { stdio: 'pipe', env: gitEnv });
+  execFileSync('git', ['-C', cwd, 'add', '-A', '-N'], { stdio: 'pipe', env: gitEnv });
+  return execFileSync('git', ['-C', cwd, 'diff', ...extra, 'HEAD'], {
+    stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER, env: gitEnv
+  }).toString();
+}
+
+// The workspace's diff and branch, as a result's `artifacts`. diff_stat is what a manager is
+// shown when a live report finishes.
+function artifactsOf(cwd, logDir) {
+  let diff = '';
+  let diffUnreadable = false;
+  try {
+    diff = gitDiff(cwd, logDir);
+  } catch (e) {
+    if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      // The diff exists but is too large to capture — distinct from "no diff", which is
+      // the normal outcome when cwd is not a git repo or has no changes.
+      diffUnreadable = true;
+    }
+  }
+  let diffStat = '';
+  try { diffStat = gitDiff(cwd, logDir, ['--stat']).trim(); } catch { /* no repo, or no HEAD */ }
+
+  let branch = null;
+  try { branch = execFileSync('git', ['-C', cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
+  catch { /* ignore */ }
+  return {
+    branch,
+    diff: diff.slice(0, DIFF_KEEP_CHARS),
+    diff_truncated: diff.length > DIFF_KEEP_CHARS,
+    diff_full_length: diff.length,
+    diff_unreadable: diffUnreadable,
+    diff_max_buffer_invalid_override: diffMaxBufferInvalidOverride,
+    diff_stat: diffStat
+  };
+}
+
 if (sub === 'probe') {
   const r = spawnSync('claude', ['--version'], { stdio: 'pipe' });
   if (r.status !== 0) { process.stderr.write('claude not on PATH\n'); process.exit(1); }
   process.stdout.write(r.stdout.toString().trim() + '\n', () => process.exit(0));
 } else if (sub === 'capabilities') {
   process.stdout.write(JSON.stringify({
-    write: true, workspace: true, structured_output: true, tool_dialect: 'claude'
+    write: true, workspace: true, structured_output: true, tool_dialect: 'claude', protocol: 2,
+    takeover: { notice: 'claude may first ask whether to trust {cwd}.' }
   }) + '\n', () => process.exit(0));
+} else if (sub === 'session') {
+  runClaudeSession({ artifacts: artifactsOf });
+} else if (sub === 'attach') {
+  // The human's take-over: their own claude on the member's session, in this terminal. Ctrl-C
+  // belongs to claude; this process must outlive it to report its exit. Exit 3 says claude
+  // never started.
+  if (!process.argv[3]) { process.stderr.write('usage: claude attach <session-id>\n'); process.exit(2); }
+  process.on('SIGINT', () => {});
+  const r = spawnSync('claude', ['--resume', process.argv[3]], { stdio: 'inherit' });
+  if (r.error) process.stderr.write(`agent-team: could not run claude: ${r.error.message}\n`);
+  process.exit(r.error ? 3 : r.status ?? 1);
 } else if (sub === 'run') {
   const brief = JSON.parse(readFileSync(0, 'utf8'));
   const logDir = mkdtempSync(join(tmpdir(), 'agent-team-claude-'));
@@ -176,35 +236,6 @@ if (sub === 'probe') {
         usage = usageFrom(envelope);
       } catch { summary = r.stdout.toString().slice(0, 4000); }
 
-      let diff = '';
-      let diffUnreadable = false;
-      try {
-        // `git diff HEAD` never shows an untracked path, so a member that CREATES a file —
-        // a new source file, a new test — handed back an empty diff while reporting success,
-        // and the manager saw no work. Intent-to-add (`add -A -N`) makes the new file visible
-        // to diff. It is staged into a THROWAWAY index, never the workspace's own: a read_only
-        // brief's conformance check compares `git status --porcelain` from before the run to
-        // after it, and touching the real index would turn "?? new.txt" into "A  new.txt" and
-        // report a read-only violation that never happened.
-        const diffIndex = join(logDir, 'diff-index');
-        const gitEnv = { ...process.env, GIT_INDEX_FILE: diffIndex };
-        execFileSync('git', ['-C', brief.cwd, 'read-tree', 'HEAD'], { stdio: 'pipe', env: gitEnv });
-        execFileSync('git', ['-C', brief.cwd, 'add', '-A', '-N'], { stdio: 'pipe', env: gitEnv });
-        diff = execFileSync('git', ['-C', brief.cwd, 'diff', 'HEAD'], {
-          stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER, env: gitEnv
-        }).toString();
-      } catch (e) {
-        if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-          // The diff exists but is too large to capture — distinct from "no diff", which is
-          // the normal outcome when brief.cwd is not a git repo or has no changes.
-          diffUnreadable = true;
-        }
-      }
-
-      let branch = null;
-      try { branch = execFileSync('git', ['-C', brief.cwd, 'branch', '--show-current'], { stdio: 'pipe' }).toString().trim(); }
-      catch { /* ignore */ }
-
       // A workspace member with refused tool calls may not have done its work, whatever its
       // summary says. Reporting ok let dispatch prune the workspace, leaving only the session
       // log to show what happened. An empty diff is no test: user hooks run in the clone too
@@ -224,14 +255,7 @@ if (sub === 'probe') {
         usage,
         findings: [],
         checked_sound: [],
-        artifacts: {
-          branch,
-          diff: diff.slice(0, DIFF_KEEP_CHARS),
-          diff_truncated: diff.length > DIFF_KEEP_CHARS,
-          diff_full_length: diff.length,
-          diff_unreadable: diffUnreadable,
-          diff_max_buffer_invalid_override: diffMaxBufferInvalidOverride
-        },
+        artifacts: artifactsOf(brief.cwd, logDir),
         log_path: logPath
       }) + '\n', () => process.exit(0));
     }

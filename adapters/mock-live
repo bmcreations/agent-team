@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+// A scripted v2 (session) adapter for tests. It plays a harness: it runs the member's steps,
+// calls the team tools over the supervisor socket the way `agent-team mcp` would for a real
+// harness, and accepts inbox messages only at step boundaries, which is where claude picks
+// up a mid-run message (at the next tool result).
+import { readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { callRpc } from '../src/rpc.js';
+
+const sub = process.argv[2];
+const out = (m) => process.stdout.write(JSON.stringify(m) + '\n');
+
+if (sub === 'probe') {
+  process.stdout.write('mock-live 0.1.0\n', () => process.exit(0));
+} else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({
+    write: true, workspace: true, structured_output: true, tool_dialect: 'claude', protocol: 2
+  }) + '\n', () => process.exit(0));
+} else if (sub === 'session') {
+  session();
+} else {
+  process.stderr.write(`mock-live: unknown subcommand "${sub}"\n`);
+  process.exit(2);
+}
+
+function session() {
+  const queue = [];
+  let wake = null;
+  // `interrupt` stands in for a harness's turn interrupt: a sleep is cut short, and at the
+  // next step boundary the adapter reports an interrupted idle and exits without a result.
+  // A tool call in flight is not abandoned: the supervisor settles blocking calls before it
+  // interrupts, so their results are still recorded.
+  let interrupted = false;
+  let onInterrupt;
+  const interruption = new Promise((r) => { onInterrupt = r; });
+  // `interrupt_linger_ms` in the member's script holds the exit back, so a test can act while
+  // the member is being halted.
+  let lingerMs = 0;
+  const quit = () => setTimeout(() => {
+    out({ type: 'idle', interrupted: true });
+    process.stdout.write('', () => process.exit(0));
+  }, lingerMs);
+  const rl = createInterface({ input: process.stdin });
+  rl.on('line', (line) => {
+    const m = JSON.parse(line);
+    if (m.type === 'interrupt') { interrupted = true; onInterrupt(); }
+    queue.push(m); wake?.(); wake = null;
+  });
+  rl.on('close', () => { queue.push({ type: 'stop' }); wake?.(); wake = null; });
+  const next = async () => {
+    while (queue.length === 0) await new Promise((r) => { wake = r; });
+    return queue.shift();
+  };
+
+  const received = [];
+  const toolResults = [];
+  const accept = (m) => {
+    out({ type: 'ack', message_id: m.id });
+    const text = `[from: ${m.from}] ${m.text}`;
+    received.push(text);
+    out({ type: 'event', kind: 'user', text });
+  };
+  const drainMessages = () => {
+    for (let i = 0; i < queue.length;) {
+      if (queue[i].type === 'message') accept(queue.splice(i, 1)[0]);
+      else i++;
+    }
+  };
+  const call = (method, params) => callRpc(process.env.AGENT_TEAM_TEAM_SOCKET, {
+    token: process.env.AGENT_TEAM_TEAM_TOKEN, method, params
+  });
+
+  (async () => {
+    const start = await next();
+    const brief = start.brief;
+    const script = JSON.parse(readFileSync(process.env.AGENT_TEAM_MOCK_SCRIPT, 'utf8'));
+    const entry = script.by_member?.[brief.member] ?? script;
+    lingerMs = entry.interrupt_linger_ms ?? 0;
+    // A resumed session keeps the id it was given; a fresh one makes its own. On resume the
+    // member plays `on_resume.steps` instead of `steps`.
+    out({ type: 'session', harness_id: `mock-live-${brief.member}-${process.pid}`,
+          resume: start.resume ?? `mock-session-${brief.member}-${process.pid}` });
+    if (start.resume) {
+      received.push(`[resume ${start.resume}] ${start.note}`);
+      out({ type: 'event', kind: 'user', text: start.note });
+    }
+    const steps = start.resume ? entry.on_resume?.steps ?? [] : entry.steps ?? [];
+
+    const vars = {};
+    const subst = (v) => {
+      if (typeof v === 'string') {
+        const m = /^\$(\w+)\.(\w+)$/.exec(v);
+        return m ? vars[m[1]]?.[m[2]] : v;
+      }
+      if (Array.isArray(v)) return v.map(subst);
+      if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, subst(x)]));
+      return v;
+    };
+
+    for (const step of steps) {
+      if (interrupted) return quit();
+      drainMessages();
+      if (step.say) out({ type: 'event', kind: 'text', text: step.say });
+      if (step.sleep_ms) await Promise.race([new Promise((r) => setTimeout(r, step.sleep_ms)), interruption]);
+      if (interrupted) return quit();
+      if (step.tool) {
+        const args = subst(step.args ?? {});
+        out({ type: 'event', kind: 'tool_call', name: step.tool, args });
+        let res;
+        if (step.until_finished) {
+          const ids = subst(step.until_finished);
+          const done = new Set();
+          const messages = [];
+          let error = null;
+          while (!ids.every((id) => done.has(id))) {
+            // A tool error, or {error} when the supervisor ends the call, is a result to report.
+            const r = await call('wait_for', args).catch((err) => ({ error: err.message }));
+            if (r.error) { error = r.error; break; }
+            for (const m of r.messages) {
+              messages.push(m);
+              if (m.text.startsWith('finished ')) done.add(m.report_id);
+            }
+            if (r.messages.length === 0 && !r.timed_out) break;   // nothing left to wait on
+            if (interrupted) break;
+          }
+          res = error ? { messages, error } : { messages };
+        } else {
+          res = await call(step.tool, args).catch((err) => ({ error: err.message }));
+        }
+        out({ type: 'event', kind: 'tool_result', name: step.tool, result: res });
+        if (step.save) vars[step.save] = res;
+        toolResults.push({ tool: step.tool, result: res });
+      }
+    }
+    if (interrupted) return quit();
+    drainMessages();
+    // `turn_cost_usd` is reported on every idle, as a harness reports a turn's cost.
+    const idle = () => out({ type: 'idle', ...(entry.turn_cost_usd ? { cost_usd: entry.turn_cost_usd } : {}) });
+    idle();
+    for (;;) {
+      const m = await next();
+      if (m.type === 'message') { accept(m); idle(); continue; }
+      if (m.type === 'interrupt') return quit();
+      if (m.type === 'stop') break;
+    }
+    out({
+      type: 'result',
+      status: entry.result?.status ?? 'ok',
+      summary: entry.result?.summary ?? 'done',
+      received, tool_results: toolResults,
+      // Echoes the start's cost_usd baseline, when it had one, for tests to check.
+      ...(Object.hasOwn(start, 'cost_usd') ? { start_cost_usd: start.cost_usd } : {})
+    });
+    process.stdout.write('', () => process.exit(0));
+  })();
+}

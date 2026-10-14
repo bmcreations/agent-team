@@ -10,7 +10,7 @@ import { createWorkspace, pruneWorkspace, runLogPath, mainCheckoutRoot } from '.
 import { buildBrief, loadDialect } from './brief.js';
 import { runAdapter, DEFAULT_TIMEOUT_MS } from './adapter.js';
 
-const adapterPath = (dir, agent) => join(dir, agent);
+export const adapterPath = (dir, agent) => join(dir, agent);
 
 function makeProbe(adapterDir, env) {
   return (agent) => {
@@ -31,7 +31,7 @@ async function readCapabilities(adapterDir, agent, env) {
 
 export async function dispatch({
   projectRoot, member, task, adapterDir, assignments = {},
-  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS
+  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, preresolved = null
 }) {
   const config = loadConfig(projectRoot);
   const budget = { runs: config.defaults.max_delegations };
@@ -40,7 +40,7 @@ export async function dispatch({
     const result = await runMember({
       config, projectRoot, member, task, adapterDir,
       assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0,
-      teams: teamKeys(projectRoot), originRoot: projectRoot
+      teams: teamKeys(projectRoot), originRoot: projectRoot, preresolved
     });
     recordRun(projectRoot, startedAt, task, runNode(result));
     return result;
@@ -121,7 +121,7 @@ function teamRoot(projectRoot, team) {
 
 // What identifies a project in the cycle check: its real path, and the GitHub repository it
 // pushes to, so a local team cannot reach itself again through its own GitHub name.
-function teamKeys(root) {
+export function teamKeys(root) {
   return [realpathSync(root), localRepoKey(root)].filter(Boolean);
 }
 
@@ -278,18 +278,19 @@ function prepareCloud(ctx, resolved) {
   };
 }
 
-async function runMember(ctx) {
-  const { config, projectRoot, member, task, adapterDir, assignments,
-          skillsDir, env, timeoutMs, budget, depth } = ctx;
-
-  const spec = config.members[member];
-  if (spec?.team) return runTeam(ctx, spec);
-
+// The supervisor needs to know whether a member speaks the v2 session protocol before it
+// builds a workspace, so resolution and capabilities are split from preparation.
+export async function resolveCaps(ctx) {
+  const { config, member, adapterDir, assignments, env } = ctx;
   const probe = makeProbe(adapterDir, env);
   const resolved = resolveMember(config, member, { probe, assignments });  // throws before side effects
   assignments[member] = resolved.agent;
-
   const caps = await readCapabilities(adapterDir, resolved.agent, env);
+  return { resolved, caps };
+}
+
+export function prepareMember(ctx, { resolved, caps }, { workspaceDir = null } = {}) {
+  const { config, projectRoot, member, skillsDir } = ctx;
   const dialectText = loadDialect(caps.tool_dialect ?? resolved.agent);
 
   let skillText = null;
@@ -307,7 +308,11 @@ async function runMember(ctx) {
   let workspace;
   let cloud = null;
   let session = null;
-  if (caps.live_session === true) {
+  if (workspaceDir) {
+    // A resumed session goes back to the directory it ran in; claude keys its sessions by cwd.
+    if (!existsSync(workspaceDir)) throw new Error(`cannot resume "${member}": its workspace ${workspaceDir} is gone`);
+    workspace = { dir: workspaceDir, branch: null, kind: 'resumed' };
+  } else if (caps.live_session === true) {
     ({ workspace, session } = prepareSession(ctx, resolved));
   } else if (caps.remote === true) {
     ({ workspace, cloud } = prepareCloud(ctx, resolved));
@@ -365,6 +370,22 @@ async function runMember(ctx) {
       );
     }
   }
+  return { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks };
+}
+
+// `preresolved` is the caller's resolveCaps() result for this member; it is taken out of ctx
+// so reports and team entries, which spread ctx, resolve their own.
+export async function runMember({ preresolved = null, ...ctx }) {
+  const { config, projectRoot, member, task, adapterDir, assignments,
+          skillsDir, env, timeoutMs, budget, depth } = ctx;
+
+  const spec = config.members[member];
+  if (spec?.team) return runTeam(ctx, spec);
+
+  if (preresolved) assignments[member] = preresolved.resolved.agent;
+  const { resolved, caps } = preresolved ?? await resolveCaps(ctx);
+  const { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks } =
+    prepareMember(ctx, { resolved, caps });
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;

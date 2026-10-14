@@ -8,7 +8,7 @@ allowed-tools: [Bash]
 
 # Delegation report
 
-Run the report for the current project. Pass `--all` through if the user asked for totals across runs.
+Run the report for the current project. It includes live (supervised) runs from the store as well as older ones from the run log. Pass `--all` through if the user asked for totals across runs.
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/bin/agent-team.js" report $ARGUMENTS
@@ -19,4 +19,4 @@ Show the output to the user in a code block, unchanged. Then add at most two sen
 Do not:
 - Recompute or reformat the table.
 - Read the run log file directly. The CLI handles torn lines and finds the log for every worktree of the repo.
-- Treat a missing row as a member that did nothing. Only delegations run through agent-team are logged; a member played by an interactive session never appears.
+- Treat a missing row as a member that did nothing. Only delegations run through agent-team are recorded; a member played by an interactive session never appears.

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { runLogPath } from './workspace.js';
+import { resolve } from 'node:path';
+import { mainCheckoutRoot, runLogPath } from './workspace.js';
 
 // Every record in the run log, oldest first. A line that does not parse (a write cut short)
 // is skipped rather than failing the whole report.
@@ -12,6 +13,51 @@ export function readRuns(projectRoot) {
     try { runs.push(JSON.parse(line)); } catch { /* torn line */ }
   }
   return runs;
+}
+
+// A run in the store, as the run log's tree: one node per member, nested by parent.
+function storeTree(store, runId) {
+  const rows = store.members(runId);
+  const nodes = new Map(rows.map((m) => {
+    const span = store.memberSpan(m.id);
+    // storeTree only sees finished runs, so a member still queued, running or paused was stopped with it.
+    const status = m.result?.status ?? (m.state === 'done' ? 'ok' : ['failed', 'cancelled'].includes(m.state) ? m.state : m.state ? 'stopped' : 'unknown');
+    return [m.id, {
+      member: m.name, ...(m.agent === 'team' ? { team: m.name } : {}),
+      agent: m.agent ?? null, model: m.model ?? null, advisor: null,
+      status, summary: m.result?.summary ?? null, depth: m.depth,
+      elapsed_ms: span.started != null && span.finished != null ? span.finished - span.started : null,
+      usage: m.cost_usd || m.tokens ? { cost_usd: m.cost_usd || null, tokens: m.tokens || null } : null,
+      delegated: [], parent: m.parent_id
+    }];
+  }));
+  let root = null;
+  for (const n of nodes.values()) {
+    const parent = n.parent == null ? null : nodes.get(n.parent);
+    if (parent) parent.delegated.push(n); else root ??= n;
+    delete n.parent;
+  }
+  return root;
+}
+
+// Finished runs of this project in the store, oldest first. Live runs never reach the run
+// log, which only dispatch() writes.
+export function storeRuns(store, projectRoot) {
+  // The run log is keyed by the repo's main checkout, so match the same way: a run recorded
+  // from a subdirectory or a worktree belongs to the repo. One git call per distinct path.
+  const roots = new Map();
+  const repoOf = (p) => { if (!roots.has(p)) roots.set(p, mainCheckoutRoot(p) ?? resolve(p)); return roots.get(p); };
+  const repo = repoOf(projectRoot);
+  return store.listRuns({ limit: -1 })
+    .filter((r) => r.status !== 'running' && repoOf(r.project) === repo)
+    .reverse()
+    .map((r) => ({ v: 2, id: r.id, at: new Date(r.created_at).toISOString(), project: r.project, task: r.task, tree: storeTree(store, r.id) }))
+    .filter((r) => r.tree);
+}
+
+export function allRuns(projectRoot, { store = null } = {}) {
+  return [...readRuns(projectRoot), ...(store ? storeRuns(store, projectRoot) : [])]
+    .sort((a, b) => a.at.localeCompare(b.at));
 }
 
 export function formatDuration(ms) {
@@ -57,17 +103,20 @@ function sumTree(node, pick) {
 // One delegation as a tree: who ran under whom, and what each run cost. Turns, cost and
 // advisor calls are the member's own; elapsed includes the reports it waited on.
 export function renderRun(run) {
-  const header = ['member', 'model', 'status', 'elapsed', 'turns', 'cost', 'advisor'];
-  const rows = flatten(run.tree, '', true, true, []).map(([n, label]) => [
+  const nodes = flatten(run.tree, '', true, true, []);
+  const withTokens = nodes.some(([n]) => n.usage?.tokens);
+  const header = ['member', 'model', 'status', 'elapsed', 'turns', 'cost', ...(withTokens ? ['tokens'] : []), 'advisor'];
+  const rows = nodes.map(([n, label]) => [
     label, workModel(n), n.status, formatDuration(n.elapsed_ms),
-    formatCount(n.usage?.turns), formatCost(n.usage?.cost_usd), formatCount(n.usage?.advisor_calls)
+    formatCount(n.usage?.turns), formatCost(n.usage?.cost_usd),
+    ...(withTokens ? [formatCount(n.usage?.tokens)] : []), formatCount(n.usage?.advisor_calls)
   ]);
   const cost = sumTree(run.tree, (n) => n.usage?.cost_usd ?? null);
   const advisor = sumTree(run.tree, (n) => n.usage?.advisor_calls ?? null);
   return [
     `${run.at}  ${run.task ?? ''}`.trimEnd(),
     '',
-    table([header, ...rows], new Set([3, 4, 5, 6])),
+    table([header, ...rows], new Set(withTokens ? [3, 4, 5, 6, 7] : [3, 4, 5, 6])),
     '',
     `total ${formatDuration(run.tree.elapsed_ms)}  ${formatCost(cost)}  advisor calls ${formatCount(advisor)}`
   ].join('\n');
@@ -91,7 +140,8 @@ export function renderTotals(runs) {
   };
   runs.forEach((r) => visit(r.tree));
 
-  const header = ['member', 'runs', 'failed', 'median', 'cost', 'advisor'];
+  const withTokens = [...byMember.values()].some((nodes) => nodes.some((n) => n.usage?.tokens));
+  const header = ['member', 'runs', 'failed', 'median', 'cost', ...(withTokens ? ['tokens'] : []), 'advisor'];
   const rows = [...byMember].map(([member, nodes]) => {
     const costs = nodes.map((n) => n.usage?.cost_usd).filter((c) => c != null);
     const known = nodes.filter((n) => n.usage?.advisor_calls != null);
@@ -99,23 +149,23 @@ export function renderTotals(runs) {
       member, String(nodes.length), String(nodes.filter((n) => n.status !== 'ok').length),
       formatDuration(median(nodes.map((n) => n.elapsed_ms).filter((v) => v != null))),
       costs.length ? formatCost(costs.reduce((a, b) => a + b, 0)) : '—',
+      ...(withTokens ? [formatCount(nodes.reduce((a, n) => a + (n.usage?.tokens ?? 0), 0) || null)] : []),
       known.length ? `${known.filter((n) => n.usage.advisor_calls > 0).length}/${known.length}` : '—'
     ];
   });
   return [
     `${runs.length} delegation(s) since ${runs[0].at}`,
     '',
-    table([header, ...rows], new Set([1, 2, 3, 4]))
+    table([header, ...rows], new Set(withTokens ? [1, 2, 3, 4, 5] : [1, 2, 3, 4]))
   ].join('\n');
 }
 
-// Only runs started through agent-team are logged. A member played by an interactive
-// session (an orchestrator you are talking to) never appears here.
-export function renderReport(projectRoot, { all = false } = {}) {
-  const runs = readRuns(projectRoot);
+// Runs from the store (live, supervised) and from the run log (older, or via dispatch()).
+// A member played by an interactive session never appears in either.
+export function renderReport(projectRoot, { all = false, store = null } = {}) {
+  const runs = allRuns(projectRoot, { store });
   if (runs.length === 0) {
-    return `No delegations logged for ${projectRoot} yet. Only delegations run since ` +
-      `the run log was added are recorded.`;
+    return `No delegations recorded for ${projectRoot} yet.`;
   }
   return all ? renderTotals(runs) : renderRun(runs[runs.length - 1]);
 }

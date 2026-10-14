@@ -1,0 +1,18 @@
+#!/usr/bin/env node
+// Goes idle at once, then ignores stop, interrupt, and stdin closing: a hung adapter that only
+// a signal ends.
+import { createInterface } from 'node:readline';
+const sub = process.argv[2];
+if (sub === 'probe') process.stdout.write('deaf 0.1.0\n', () => process.exit(0));
+else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({ write: true, workspace: true, tool_dialect: 'claude', protocol: 2 }) + '\n',
+    () => process.exit(0));
+} else {
+  const out = (m) => process.stdout.write(JSON.stringify(m) + '\n');
+  setInterval(() => {}, 60_000);
+  createInterface({ input: process.stdin }).on('line', (line) => {
+    const m = JSON.parse(line);
+    if (m.type === 'start') { out({ type: 'session', harness_id: 's' }); out({ type: 'idle' }); }
+    if (m.type === 'stop') out({ type: 'event', kind: 'text', text: 'stop-received' });
+  });
+}

@@ -1,0 +1,20 @@
+#!/usr/bin/env node
+// Works until interrupted, then lingers before exiting so a test can act while the member is
+// being cancelled.
+import { createInterface } from 'node:readline';
+const sub = process.argv[2];
+if (sub === 'probe') process.stdout.write('slowint 0.1.0\n', () => process.exit(0));
+else if (sub === 'capabilities') {
+  process.stdout.write(JSON.stringify({ write: true, workspace: true, tool_dialect: 'claude', protocol: 2 }) + '\n',
+    () => process.exit(0));
+} else {
+  const out = (m) => process.stdout.write(JSON.stringify(m) + '\n');
+  createInterface({ input: process.stdin }).on('line', (line) => {
+    const m = JSON.parse(line);
+    if (m.type === 'start') { out({ type: 'session', harness_id: 's' }); out({ type: 'event', kind: 'text', text: 'working' }); }
+    if (m.type === 'interrupt') {
+      out({ type: 'event', kind: 'text', text: 'interrupt-received' });
+      setTimeout(() => { out({ type: 'idle', interrupted: true }); process.exit(0); }, 600);
+    }
+  });
+}

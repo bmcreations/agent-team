@@ -11,6 +11,128 @@ project. One dispatch does the following for the named member:
    call the member again with their results.
 6. Return one JSON result, and delete the workspace if the run succeeded.
 
+## Live runs
+
+`agent-team serve [--port <n>] [--max-running <n>]` runs the supervisor in the foreground until
+SIGINT or SIGTERM, with the web view at `http://127.0.0.1:4747/` (`--port 0` picks a free port;
+the address is printed at start). The view binds to `127.0.0.1` only and has no sign-in yet:
+any user or process on this machine that can reach the port can read every run and steer the
+runs `serve` owns. `--max-running` (default 6) caps the members working at once across every
+project. When the
+root member's adapter reports [protocol 2](adapters.md#session-adapters-protocol-2),
+`agent-team --member ...` runs it through the supervisor: it submits to a running one, or
+starts an in-process one if none is listening. An in-process supervisor listens on a
+private `inproc-<pid>-<n>.sock` beside the shared socket, so another CLI never submits to it;
+only `serve` listens on the shared path. The `claude` adapter speaks protocol 2, so a claude root member always runs this way; a v1 root's claude reports still run one-shot. For a v2 member, `--timeout` counts only the time the member is working, not time blocked in
+`wait_for` or `ask_human` or idle between turns; past it the supervisor interrupts the session
+and fails the member. A working member with no events for `defaults.stall_minutes` (default
+10) is reported to its manager as `stalled`. `defaults.max_cost_usd` (default none) caps what a
+run may spend, summed from the dollar costs harnesses report; past it the whole run is paused, and
+`resume` needs a higher cap. Each member's spend is recorded too: a resumed claude session
+reports its cost from the start of the session, so the supervisor hands the member's spend to
+the adapter and only the new turns are added. Codex reports tokens, not dollars: a codex session's
+tokens are recorded on the member and the run, and add nothing to `max_cost_usd`, so a run of
+codex members is never paused by the cap. A member that has finished its work and does not exit within
+10 seconds of being told to stop is ended and fails. Its reports are
+started with the `delegate` tool and run in parallel, each in its own workspace. A v1 member
+keeps the `{"status":"delegating"}` loop described under [Delegation](#delegation).
+
+The page steers with the same operations as the CLI verbs: message a member, pause, pause now,
+resume, cancel (one member or its subtree), and answer an `ask_human` question. Actions are
+signed with the name of the OS user running `serve`. Take-over stays in the terminal: the page
+shows the `agent-team attach <run> <member>` command to copy. A run started by a CLI with no
+`serve` running belongs to that CLI's in-process supervisor; the page shows it live but
+read-only, and `send` and `answer` refuse it too, because only the supervisor running a member
+can deliver to it.
+
+`agent-team send <run> <member> <text>` puts one message in the member's inbox and needs
+`serve`, like `pause`, `resume`, `cancel` and `answer`.
+
+`agent-team watch <run> [--json]` prints a run's events and messages and follows it until it
+ends. It reads the store, so it works with or without `serve`, including for a run a CLI
+started in-process.
+
+The page's sidebar lists recent runs by project, with each running member's harness and state.
+"Needs you" holds open `ask_human` questions, members reported stalled, and runs paused by the
+cost cap, each answerable in place. Activity is the default view: each member's task with its
+tool calls nested under it, identical consecutive calls collapsed into a count. A run's page
+shows its org tree beside the conversation between members and humans; a member's panel shows
+its transcript, workspace, `read_only` and `deny_paths`, a message box, and the controls. The
+page holds the newest 2,000 events of what it shows; long tool output is cut to 4,000
+characters per field, and clicking a call loads it whole.
+
+| What | Where | Override |
+|---|---|---|
+| Store | `~/.cache/agent-team/supervisor/supervisor.db` | `AGENT_TEAM_SUPERVISOR_DB` |
+| Socket | `~/.cache/agent-team/supervisor/supervisor.sock` | `AGENT_TEAM_SUPERVISOR_SOCK` |
+
+The cache root is `$XDG_CACHE_HOME` when set. The default `supervisor/` directory is set to
+mode `0700` on every start, and the store file to `0600`, since it holds member tokens. A
+socket directory named through `AGENT_TEAM_SUPERVISOR_SOCK` keeps its mode unless the
+supervisor created it. Socket paths longer than 103 bytes are refused.
+
+When `serve` starts, it adopts every run still marked running whose supervisor no longer
+listens: its own runs from before a restart, and a CLI's run whose in-process supervisor
+died. Members that were working are relaunched from their harness sessions in their own
+workspaces, within the caps, with a note that their last turn was cut off; a manager is also
+given its reports' states. A one-shot (v1) member cannot be resumed and fails. A run whose
+project config can no longer be read fails with the reason. `serve` does not watch for
+in-process supervisors that die while it runs; it adopts their runs at its next start.
+A pause, cancel, or timeout that is still in progress when a supervisor stops is recorded as
+it would have ended, so the restart does not relaunch that member. A claude member's adapter
+that loses its supervisor interrupts claude's turn and kills claude within 4 seconds, so a
+restarted supervisor never resumes a session that the old claude is still writing.
+A run recorded before runs had an owner (written by an older agent-team) is failed, not
+relaunched.
+
+`defaults.max_parallel` (default 3) caps how many of one manager's reports run at once; the
+rest queue. It is per manager, not per run, so a run with several managers can have more
+members running. `serve` also caps running members across all runs, at 6 unless started with `--max-running <n>`.
+
+### Steering a live run
+
+These verbs reach only a supervisor started with `agent-team serve`; a run that a CLI started
+in-process cannot be steered from another terminal. Members are named by run id and name.
+
+```
+agent-team pause <run> <member> [--now] [--subtree]
+agent-team resume <run> <member> [--subtree] [--note <text>] [--max-cost-usd <usd>]
+agent-team cancel <run> <member> [--subtree]
+agent-team send <run> <member> <text>
+agent-team questions [<run>] [--json]
+agent-team answer <question-id> <answer>
+agent-team attach <run> <member>
+agent-team handback <run> <member>
+```
+
+`pause` lets the current turn finish, and that turn still counts toward the timeout: one that
+runs past it fails the member as timed out. `--now` interrupts the turn, so a command it
+started may have partly run. A member that has finished its work and is stopping cannot be
+paused, but `cancel` still ends it. `resume` starts the member again from its harness session in the same workspace
+and delivers anything sent to it while paused. `cancel` keeps the workspace. `--subtree`
+applies the verb to the member and every report under it. A manager that is cancelled or
+fails also cancels its unfinished reports, and a root member that finishes, fails, or is cancelled cancels every
+unfinished member of its run, queued ones included. Pausing a manager alone leaves its reports
+working. A one-shot (v1) report that is already running cannot be cancelled and runs until it
+finishes. Each verb is signed with your OS
+user name, which is what the member and its manager are told.
+
+`attach` hands a claude or codex member to you: its turn is interrupted, and once its process
+has exited, the adapter's `attach` starts in its workspace in your terminal: `claude --resume
+<session>`, or for codex a private app-server on a loopback websocket with `codex resume
+<thread> --remote` against it (the token is in a `0600` file and the TUI's environment, and the
+server stops when you exit). Its manager is told it was taken over. Claude may first ask whether
+to trust the workspace folder. When you exit the harness, however you exit, the member resumes headless and is told that you drove the
+session; your turns are in its history. While you have it, `pause` refuses it and a
+supervisor restart leaves it alone; a cancel still reaches it, including one that cascades from
+its manager or the run, and `attach` then says there is nothing to hand back. If `attach` dies before it can hand back (a closed
+terminal, a stopped supervisor), the member stays taken over: run `attach` again to reopen the
+same session, or `agent-team handback <run> <member>` to resume it headless. If the run is
+at its `max_cost_usd` cap when you hand back, the member stays paused and `attach` or
+`handback` says so; resume it with `--max-cost-usd`. Your own turns count toward the cap
+too, but only from the member's next turn after it resumes, when its claude session reports
+what it has cost since the member last reported. A codex member's turns add tokens, not dollars, so they never count toward the cap.
+
 ## Resolving the agent
 
 The dispatcher runs `adapters/<agent> probe`. A zero exit within 30 seconds means the agent is
@@ -174,8 +296,10 @@ Config errors and dispatcher refusals come back in the same shape,
 | `elapsed_ms` | dispatcher | Wall time for the member, including the reports it waited on. |
 | `delegated` | dispatcher | Full results of every report that ran, in order. |
 
-The adapter is killed, with its whole process group, when `--timeout` expires (900 seconds by
-default), and the result is `status: "timeout"`.
+A v1 adapter is killed, with its whole process group, when `--timeout` expires (900 seconds by
+default), and the result is `status: "timeout"`. A v2 member's timeout counts only its
+working time; past it the supervisor interrupts the session, kills the adapter if it has not
+exited 5 seconds later, and fails the member. See [Live runs](#live-runs).
 
 ## The run log
 
