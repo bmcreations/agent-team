@@ -361,6 +361,10 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
       if (body.command !== command) throw new HttpError(409, 'the deploy command changed; reload the page and confirm again');
       return { command, ...deployer.start({ project: run.project, run, command, by: who }) };
     })],
+    ['POST', /^\/api\/runs\/(\d+)\/title$/, ({ params, body }) => steer(() => {
+      if (typeof body.title !== 'string') throw new HttpError(400, 'title must be text');
+      return sup.renameRun({ run_id: Number(params[0]), title: body.title });
+    })],
     ['GET', /^\/api\/runs\/(\d+)\/timeline$/, ({ params, url }) => {
       found(store.run(params[0]), `run ${params[0]}`);
       return timelineView(store, { runId: params[0] }, url);

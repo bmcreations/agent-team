@@ -15,7 +15,7 @@ export function describe(e) {
     case 'tool_call': return `${b.name ?? 'tool'} ${clip(oneLine(json(b.args)))}`.trim();
     case 'tool_result': return `${b.name ?? 'tool'} → ${clip(oneLine(typeof b.text === 'string' ? b.text : json(b.result ?? b)))}`;
     case 'command': return clip(oneLine(b.command ?? json(b)));
-    case 'titled': return `named the run "${b.title ?? ''}"`;
+    case 'titled': return b.title ? `named the run "${b.title}"` : 'cleared the run name';
     case 'delegated': return `delegated to ${b.to}`;
     case 'stalled': return `quiet for ${Math.round((b.quiet_s ?? 0) / 60)} min`;
     case 'cost_cap': return `cost cap: $${(b.cost_usd ?? 0).toFixed(2)} of $${(b.max_cost_usd ?? 0).toFixed(2)}`;

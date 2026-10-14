@@ -1129,6 +1129,20 @@ export class Supervisor {
     return { ok: true, title: clean };
   }
 
+  // A person renames a run from the web page. Final, like --title: set_title leaves it alone
+  // afterwards. An empty title clears it, so the page derives one from the brief again.
+  renameRun({ run_id, title }) {
+    if (typeof title !== 'string') throw new Error('title must be text');
+    const run = this.store.run(run_id);
+    if (!run) throw new Error(`unknown run ${run_id}`);
+    if (run.status !== 'running' || run.owner !== this.socketPath || !this.#runs.has(run.id)) throw new Error('run by another supervisor');
+    const clean = title.replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (clean) this.store.setRunTitle(run.id, clean, 'human');
+    else this.store.setRunTitle(run.id, null, null);
+    this.store.addEvent(run.root_member, 'titled', { title: clean, by: 'human' });
+    return { title: clean || null };
+  }
+
   #reportProgress(id, { text }) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('report_progress needs "text"');
     const m = this.#live.get(id).member;

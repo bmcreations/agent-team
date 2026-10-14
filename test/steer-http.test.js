@@ -203,3 +203,51 @@ test('a human reply to a thread whose runs another supervisor owns is refused an
     assert.equal(v.store.threadPosts(id).length, before);
   } finally { await v.close(); }
 });
+
+test('a run is renamed from the page, cleared, and refused cross-site', async () => {
+  const { root, script } = project({ solo: LIVE() }, { by_member: { solo: LONG } });
+  const v = await view(script, { http: { by: 'tester' } });
+  try {
+    const { runId, memberId } = v.sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    const path = `/api/runs/${runId}/title`;
+    const set = await post(v.base, path, { title: '  Jump   button  design ' });
+    assert.equal(set.status, 200);
+    assert.deepEqual(set.json, { title: 'Jump button design' });
+    assert.deepEqual([v.store.run(runId).title, v.store.run(runId).title_by], ['Jump button design', 'human']);
+    assert.deepEqual(v.store.events(memberId).findLast((e) => e.kind === 'titled').body, { title: 'Jump button design', by: 'human' });
+    assert.equal((await get(v.base, `/api/runs/${runId}`)).json.run.title, 'Jump button design');
+    await post(v.base, path, { title: 'x'.repeat(200) });
+    assert.equal(v.store.run(runId).title.length, 80);
+    const cleared = await post(v.base, path, { title: '   ' });
+    assert.deepEqual(cleared.json, { title: null });
+    assert.deepEqual([v.store.run(runId).title, v.store.run(runId).title_by], [null, null]);
+    assert.equal((await post(v.base, path, { title: 'Nope' }, { Origin: 'https://evil.example' })).status, 403);
+    assert.equal((await post(v.base, path, { title: 'Nope' }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+    assert.equal((await call(v.base, 'POST', path, { body: '{"title":"x"}', headers: { 'Content-Type': 'text/plain' } })).status, 415);
+    assert.equal((await post(v.base, path, { title: 5 })).status, 400);
+    assert.equal((await post(v.base, '/api/runs/999/title', { title: 'x' })).status, 404);
+    assert.equal(v.store.run(runId).title, null);
+  } finally { await v.close(); }
+});
+
+test('renaming needs a supervisor', async () => {
+  const { script } = project({ solo: LIVE() }, {});
+  const v = await view(script, { http: { sup: null } });
+  try { assert.equal((await post(v.base, '/api/runs/1/title', { title: 'x' })).status, 503); } finally { await v.close(); }
+});
+
+test('set_title is refused once a person renamed the run from the page', async () => {
+  const { root, script } = project({ solo: LIVE() }, {
+    by_member: { solo: { steps: [{ say: 'ready' }, { sleep_ms: 800 }, { tool: 'set_title', args: { title: 'Agent name' } }], result: { status: 'ok', summary: 'x' } } }
+  });
+  const v = await view(script);
+  try {
+    const { runId, memberId } = v.sup.submit({ projectRoot: root, member: 'solo', task: 'go' });
+    await until(() => v.store.events(memberId).some((e) => e.kind === 'text'));
+    assert.equal((await post(v.base, `/api/runs/${runId}/title`, { title: 'Human name' })).status, 200);
+    await v.sup.waitRun(runId);
+    assert.equal(v.store.run(runId).title, 'Human name');
+    const res = v.store.member(memberId).result.tool_results.find((t) => t.tool === 'set_title').result;
+    assert.equal(res.ok, false);
+  } finally { await v.close(); }
+});
