@@ -5,6 +5,7 @@ import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
 import { runClaudeSession } from '../src/claude-session.js';
+import { gitDiff as readDiff } from '../src/diffbase.js';
 
 const sub = process.argv[2];
 
@@ -96,20 +97,9 @@ function usageFrom(envelope) {
   };
 }
 
-// `git diff HEAD` never shows an untracked path, so a member that CREATES a file — a new
-// source file, a new test — handed back an empty diff while reporting success, and the manager
-// saw no work. Intent-to-add (`add -A -N`) makes the new file visible to diff. It is staged
-// into a THROWAWAY index, never the workspace's own: a read_only brief's conformance check
-// compares `git status --porcelain` from before the run to after it, and touching the real
-// index would turn "?? new.txt" into "A  new.txt" and report a read-only violation that never
-// happened.
+// Commits, working tree and untracked files against the workspace's base (src/diffbase.js).
 function gitDiff(cwd, logDir, extra = []) {
-  const gitEnv = { ...process.env, GIT_INDEX_FILE: join(logDir, 'diff-index') };
-  execFileSync('git', ['-C', cwd, 'read-tree', 'HEAD'], { stdio: 'pipe', env: gitEnv });
-  execFileSync('git', ['-C', cwd, 'add', '-A', '-N'], { stdio: 'pipe', env: gitEnv });
-  return execFileSync('git', ['-C', cwd, 'diff', ...extra, 'HEAD'], {
-    stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER, env: gitEnv
-  }).toString();
+  return readDiff(cwd, join(logDir, 'diff-index'), { args: extra, maxBuffer: DIFF_MAX_BUFFER });
 }
 
 // The workspace's diff and branch, as a result's `artifacts`. diff_stat is what a manager is

@@ -306,6 +306,21 @@ cannot be peers.
 Members can also name any team the supervisor has already run, or any directory with a config,
 by path. `peers` only makes a team known by name in advance.
 
+## `deploy`
+
+An optional shell command that puts the project's current state live, run by a human from the
+run page's Deploy button and by nothing else: members have no tool for it. A member that wants
+a deploy asks a human with `ask_human`.
+
+    "deploy": "git pull --ff-only && make build"
+
+It must be a non-empty string. The page shows the command and asks before running it with
+`/bin/sh -c` in the project's real root (not a member's workspace), one at a time per project,
+and stops it after 10 minutes. Its output (the last 64 KB) shows on the page and the last
+8 KB is kept as a `deploy` event on the run's lead. The button appears only on a run that this
+`agent-team serve` owns, and only runs the command the config holds now: the page sends back
+the text it showed, and a config edited since is refused.
+
 ## `defaults`
 
 Optional.

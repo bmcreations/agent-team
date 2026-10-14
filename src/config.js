@@ -484,6 +484,13 @@ export function parseConfig(raw, path) {
     );
   }
 
+  if (raw.deploy !== undefined && raw.deploy !== null &&
+      (typeof raw.deploy !== 'string' || !raw.deploy.trim())) {
+    throw new Error(
+      `${path}: "deploy" must be a non-empty shell command string — got ${JSON.stringify(raw.deploy)}`
+    );
+  }
+
   const peers = raw.peers ?? [];
   if (!Array.isArray(peers)) throw new Error(`${path}: "peers" must be an array of project directories — got ${JSON.stringify(raw.peers)}`);
   if (peers.length > 50) throw new Error(`${path}: "peers" lists ${peers.length} teams; at most 50`);
@@ -499,6 +506,7 @@ export function parseConfig(raw, path) {
     org,
     deny_paths: raw.deny_paths,
     peers,
+    deploy: raw.deploy ?? null,
     defaults
   };
 }

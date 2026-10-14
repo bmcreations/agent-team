@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { answerOutcome } from '../src/delegation.js';
 import { runCodexSession } from '../src/codex-session.js';
+import { gitDiff as readDiff } from '../src/diffbase.js';
 import { codexAttach, diag } from '../src/codex-attach.js';
 
 // Binary resolution: PATH is the contract ("codex" must resolve there for a normal install).
@@ -43,20 +44,7 @@ function artifacts(cwd, logDir) {
   let diff = '';
   let diffUnreadable = false;
   try {
-    // `git diff HEAD` never shows an untracked path, so a member that CREATES a file —
-    // a new source file, a new test — handed back an empty diff while reporting success,
-    // and the manager saw no work. Intent-to-add (`add -A -N`) makes the new file visible
-    // to diff. It is staged into a THROWAWAY index, never the workspace's own: a read_only
-    // brief's conformance check compares `git status --porcelain` from before the run to
-    // after it, and touching the real index would turn "?? new.txt" into "A  new.txt" and
-    // report a read-only violation that never happened.
-    const diffIndex = join(logDir, 'diff-index');
-    const gitEnv = { ...process.env, GIT_INDEX_FILE: diffIndex };
-    execFileSync('git', ['-C', cwd, 'read-tree', 'HEAD'], { stdio: 'pipe', env: gitEnv });
-    execFileSync('git', ['-C', cwd, 'add', '-A', '-N'], { stdio: 'pipe', env: gitEnv });
-    diff = execFileSync('git', ['-C', cwd, 'diff', 'HEAD'], {
-      stdio: 'pipe', maxBuffer: DIFF_MAX_BUFFER, env: gitEnv
-    }).toString();
+    diff = readDiff(cwd, join(logDir, 'diff-index'), { maxBuffer: DIFF_MAX_BUFFER });
   } catch (e) {
     if (e.code === 'ENOBUFS' || e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
       diffUnreadable = true;

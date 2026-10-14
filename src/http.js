@@ -6,6 +6,8 @@ import { figmaRefs, figmaImage, FILE_KEY_RE, NODE_RE } from './figma.js';
 import { basename } from 'node:path';
 import { loadConfig } from './config.js';
 import { knownTeams } from './teams.js';
+import { changesReader } from './changes.js';
+import { Deployer } from './deploy.js';
 import { memberTexts, publicRun, publicMessage, clipEvent, runDetail, needsYou, streamState, teamStatus, threadsView, threadDetail, READ_ONLY_NOTE } from './view.js';
 
 // The web view: a JSON API over the store, server-sent events, and a static page. It binds to
@@ -224,7 +226,7 @@ const text = (v, name) => {
 const flag = (v) => v === true;
 
 export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAULT_PORT, env = process.env,
-                            by = null, pollMs = 250, heartbeatMs = 15_000, stallMs = 60_000, fetchImpl = fetch } = {}) {
+                            by = null, pollMs = 250, heartbeatMs = 15_000, stallMs = 60_000, fetchImpl = fetch, deployTimeoutMs } = {}) {
   let loupe;
   try { loupe = loupeConfig(env); } catch (err) { return Promise.reject(err); }
   const own = sup?.socketPath ?? null;
@@ -262,6 +264,11 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
     if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) throw new HttpError(400, 'max_cost_usd must be a positive number');
     return v;
   };
+
+  const changesOf = changesReader();
+  const deployer = new Deployer({ store, env, ...(deployTimeoutMs ? { timeoutMs: deployTimeoutMs } : {}) });
+  // The project's deploy command as its config says now; null when it has none or does not load.
+  const deployCommand = (run) => { try { return loadConfig(run.project).deploy; } catch { return null; } };
 
   const figmaCache = new Map();
   const figmaToken = () => {
@@ -310,6 +317,7 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
       if (!env.FIGMA_TOKEN) return { enabled: false, refs: [] };
       return { enabled: true, refs: figmaRefs(memberTexts(store, m.id), defaultFileKey(m.run_id)) };
     }],
+    ['GET', /^\/api\/members\/(\d+)\/changes$/, ({ params }) => changesOf(member(params[0]))],
     ['GET', /^\/api\/figma\/image$/, async ({ url, res }) => {
       const fileKey = url.searchParams.get('file') ?? '';
       const nodeId = url.searchParams.get('node') ?? '';
@@ -338,6 +346,21 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
         .map((r) => publicRun(store, r, own))
     })],
     ['GET', /^\/api\/runs\/(\d+)$/, ({ params }) => found(runDetail(store, params[0], own), `run ${params[0]}`)],
+    ['GET', /^\/api\/runs\/(\d+)\/deploy$/, ({ params }) => {
+      const run = found(store.run(params[0]), `run ${params[0]}`);
+      const last = deployer.status(run.project, run);
+      return { ...last, command: deployCommand(run), last_command: last.command };
+    }],
+    // Human only, and only the command the project's config holds: the page sends back the text
+    // it showed, so a config edited since is refused instead of run unseen.
+    ['POST', /^\/api\/runs\/(\d+)\/deploy$/, ({ params, body }) => steer(() => {
+      const run = found(store.run(params[0]), `run ${params[0]}`);
+      if (run.owner !== own) throw new Error('run by another supervisor');
+      const command = deployCommand(run);
+      if (!command) throw new HttpError(404, 'this project has no deploy command');
+      if (body.command !== command) throw new HttpError(409, 'the deploy command changed; reload the page and confirm again');
+      return { command, ...deployer.start({ project: run.project, run, command, by: who }) };
+    })],
     ['GET', /^\/api\/runs\/(\d+)\/timeline$/, ({ params, url }) => {
       found(store.run(params[0]), `run ${params[0]}`);
       return timelineView(store, { runId: params[0] }, url);
@@ -423,6 +446,7 @@ export function startHttp({ store, sup = null, host = '127.0.0.1', port = DEFAUL
 
   function close() {
     hub.close();
+    deployer.close();
     return new Promise((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections();
