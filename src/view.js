@@ -21,7 +21,7 @@ export function publicMember(row) {
 export function publicRun(store, row, ownSocket) {
   const steerable = row.status === 'running' && ownSocket != null && row.owner === ownSocket;
   return {
-    id: row.id, project: row.project, task: row.task, status: row.status, created_at: row.created_at,
+    id: row.id, project: row.project, task: row.task, title: row.title ?? null, status: row.status, created_at: row.created_at,
     cost_usd: row.cost_usd, tokens: row.tokens, max_cost_usd: row.max_cost_usd,
     root: row.root_member == null ? null : store.member(row.root_member)?.name ?? null,
     steerable,

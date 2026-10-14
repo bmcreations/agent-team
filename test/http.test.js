@@ -51,6 +51,17 @@ test('runs and a run\'s members come back without member tokens', async () => {
   } finally { await v.close(); }
 });
 
+test('run listings and details carry the run title, null until one is set', async () => {
+  const { store, runId } = seeded();
+  const web = await startHttp({ store, port: 0 });
+  try {
+    assert.equal((await get(web.url, '/api/runs')).json.runs[0].title, null);
+    store.setRunTitle(runId, 'Ship the thing', 'agent');
+    assert.equal((await get(web.url, '/api/runs')).json.runs[0].title, 'Ship the thing');
+    assert.equal((await get(web.url, `/api/runs/${runId}`)).json.run.title, 'Ship the thing');
+  } finally { await web.close(); store.close(); }
+});
+
 test('a member entered into another project carries project and alias, and that project\'s deny_paths', async () => {
   const { store, runId, lead } = seeded();
   const { root } = project({ solo: LIVE() }, { by_member: {} });
