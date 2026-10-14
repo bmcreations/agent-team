@@ -6,6 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildBrief } from '../src/brief.js';
 import { runAdapter } from '../src/adapter.js';
+import { createWorkspace, pruneWorkspace } from '../src/workspace.js';
+
+process.env.AGENT_TEAM_WORKSPACE_ROOT = mkdtempSync(join(tmpdir(), 'at-diff-wsroot-'));
 
 // Every pre-existing diff test in test/claude-adapter.test.js seeds a TRACKED file and then
 // modifies it, so all three adapters passed while `git diff HEAD` — which never shows an
@@ -34,7 +37,7 @@ function initGitFixtureRepo(dir) {
 // spawned in (every adapter spawns its vendor binary with cwd: brief.cwd), then emits an
 // envelope carrying both claude's `.result` and grok's `.text`, and writes codex's
 // -o/--output-last-message file when that flag is present.
-function createStub(binName) {
+function createStub(binName, { commit = false } = {}) {
   const stubDir = mkdtempSync(join(tmpdir(), `agent-team-${binName}-diffstub-`));
   const stubPath = join(stubDir, binName);
   writeFileSync(stubPath, [
@@ -42,6 +45,12 @@ function createStub(binName) {
     "const fs = require('node:fs');",
     "const path = require('node:path');",
     "fs.writeFileSync(path.join(process.cwd(), 'NEW.txt'), 'created by the member\\n');",
+    ...(commit ? [
+      "const cp = require('node:child_process');",
+      "fs.writeFileSync(path.join(process.cwd(), 'tracked.txt'), 'committed edit\\n');",
+      "cp.execFileSync('git', ['add', 'tracked.txt']);",
+      "cp.execFileSync('git', ['commit', '-q', '-m', 'member commit']);"
+    ] : []),
     "const i = process.argv.indexOf('-o');",
     "if (i !== -1 && process.argv[i + 1]) fs.writeFileSync(process.argv[i + 1], 'ok');",
     "process.stdout.write(JSON.stringify({ result: 'ok', text: 'ok' }) + '\\n');",
@@ -62,8 +71,8 @@ function briefForCwd(cwd, agent) {
   });
 }
 
-async function runWithStub({ agent, binName, binEnv }, cwd) {
-  const { stubDir, stubPath } = createStub(binName);
+async function runWithStub({ agent, binName, binEnv }, cwd, opts) {
+  const { stubDir, stubPath } = createStub(binName, opts);
   const env = binEnv
     ? { [binEnv]: stubPath }
     : { PATH: `${stubDir}:${process.env.PATH}` };
@@ -127,5 +136,31 @@ for (const adapter of ADAPTERS) {
     assert.equal(res.status, 'ok');
     assert.equal(res.artifacts.diff, '');
     assert.equal(res.artifacts.diff_unreadable, false);
+  });
+}
+
+// A member that COMMITS in its workspace clone moves HEAD, and `git diff HEAD` then reports
+// nothing: in a real run every worker committed and every artifacts.diff came back empty.
+for (const adapter of ADAPTERS) {
+  test(`adapters/${adapter.agent}: a workspace member's commit and untracked file are both in the diff`, async () => {
+    const repo = mkdtempSync(join(tmpdir(), `agent-team-${adapter.agent}-wsrepo-`));
+    initGitFixtureRepo(repo);
+    const ws = createWorkspace(repo, 'implementer', [], 'workspace');
+    try {
+      execFileSync('git', ['config', 'user.email', 't@e.st'], { cwd: ws.dir });
+      const res = await runWithStub(adapter, ws.dir, { commit: true });
+      assert.equal(res.status, 'ok');
+      assert.ok(res.artifacts.diff.includes('+committed edit'), `the committed change is missing: ${JSON.stringify(res.artifacts.diff)}`);
+      assert.ok(res.artifacts.diff.includes('NEW.txt'), 'the untracked file is missing');
+      assert.equal(res.artifacts.diff_unreadable, false);
+    } finally { pruneWorkspace(ws); }
+  });
+
+  test(`adapters/${adapter.agent}: outside a workspace the diff is still against HEAD`, async () => {
+    const cwd = mkdtempSync(join(tmpdir(), `agent-team-${adapter.agent}-rootcommit-`));
+    initGitFixtureRepo(cwd);
+    const res = await runWithStub(adapter, cwd, { commit: true });
+    assert.ok(!res.artifacts.diff.includes('committed edit'), 'a commit in the real root is not part of the diff');
+    assert.ok(res.artifacts.diff.includes('NEW.txt'));
   });
 }

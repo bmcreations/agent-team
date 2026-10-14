@@ -10,7 +10,7 @@ import { createWorkspace, pruneWorkspace, runLogPath, mainCheckoutRoot } from '.
 import { buildBrief, loadDialect } from './brief.js';
 import { runAdapter, DEFAULT_TIMEOUT_MS } from './adapter.js';
 
-const adapterPath = (dir, agent) => join(dir, agent);
+export const adapterPath = (dir, agent) => join(dir, agent);
 
 function makeProbe(adapterDir, env) {
   return (agent) => {
@@ -31,7 +31,7 @@ async function readCapabilities(adapterDir, agent, env) {
 
 export async function dispatch({
   projectRoot, member, task, adapterDir, assignments = {},
-  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS
+  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, preresolved = null
 }) {
   const config = loadConfig(projectRoot);
   const budget = { runs: config.defaults.max_delegations };
@@ -40,7 +40,7 @@ export async function dispatch({
     const result = await runMember({
       config, projectRoot, member, task, adapterDir,
       assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0,
-      teams: teamKeys(projectRoot)
+      teams: teamKeys(projectRoot), originRoot: projectRoot, preresolved
     });
     recordRun(projectRoot, startedAt, task, runNode(result));
     return result;
@@ -109,7 +109,7 @@ function addUsage(total, u) {
 // A team path is absolute, under ~/, or relative to the project. A relative path that does
 // not lead to a config from a linked worktree is retried from the main checkout, since
 // sibling repositories sit next to the main checkout, not next to its worktrees.
-function teamRoot(projectRoot, team) {
+export function teamRoot(projectRoot, team) {
   const expanded = team === '~' || team.startsWith('~/') ? join(homedir(), team.slice(1)) : team;
   if (isAbsolute(expanded)) return expanded;
   const local = resolve(projectRoot, expanded);
@@ -121,19 +121,22 @@ function teamRoot(projectRoot, team) {
 
 // What identifies a project in the cycle check: its real path, and the GitHub repository it
 // pushes to, so a local team cannot reach itself again through its own GitHub name.
-function teamKeys(root) {
+export function teamKeys(root) {
   return [realpathSync(root), localRepoKey(root)].filter(Boolean);
 }
 
-function refuseCycle(member, team, keys, teams) {
+export function refuseCycle(member, team, keys, teams) {
   if (keys.some((k) => teams.includes(k))) {
     throw new Error(`member "${member}": team "${team}" is already in this delegation (${[...teams, keys[0]].join(' -> ')})`);
   }
 }
 
 // The member another team is entered through: the one named, else that team's only root.
-function teamEntry(teamConfig, entry, root, member) {
-  if (entry) return entry;
+export function teamEntry(teamConfig, entry, root, member) {
+  if (entry) {
+    if (!teamConfig.members[entry]) throw new Error(`member "${member}": team ${root} has no member "${entry}"`);
+    return entry;
+  }
   if (teamConfig.org.roots.length !== 1) {
     throw new Error(
       `member "${member}": team at ${root} has ${teamConfig.org.roots.length} top-level members ` +
@@ -219,6 +222,23 @@ async function runCloudTeam(ctx, spec, repo) {
   };
 }
 
+// The stand-in for createWorkspace when a member runs in someone's live Claude Code session.
+// The task lands in that person's interactive session, so only a dispatch started in this
+// project may send one: another project's team delegating here is refused.
+function prepareSession(ctx, resolved) {
+  const { projectRoot, member } = ctx;
+  if (ctx.originRoot !== projectRoot || ctx.cloudSource) {
+    throw new Error(
+      `member "${member}": a "${resolved.agent}" member runs in someone's live session, so only ` +
+      `this project's own team can delegate to it — refusing a delegation from ${ctx.originRoot}`
+    );
+  }
+  return {
+    workspace: { dir: mkdtempSync(join(tmpdir(), `agent-team-${member}-`)), branch: null, id: null, kind: 'session' },
+    session: { id: resolved.session_id, project_root: projectRoot }
+  };
+}
+
 // The stand-in for createWorkspace when a member runs in the cloud. Nothing is cloned here;
 // the session clones origin itself, so deny_paths is checked against that commit instead and
 // a match refuses the run. The local directory only gives the adapter a cwd.
@@ -261,18 +281,21 @@ function prepareCloud(ctx, resolved) {
   };
 }
 
-async function runMember(ctx) {
-  const { config, projectRoot, member, task, adapterDir, assignments,
-          skillsDir, env, timeoutMs, budget, depth } = ctx;
-
-  const spec = config.members[member];
-  if (spec?.team) return runTeam(ctx, spec);
-
+// A caller that needs a member's capabilities before it builds the workspace, to choose how
+// to run the member, resolves them here and passes the result on as `preresolved`.
+export async function resolveCaps(ctx) {
+  const { config, member, adapterDir, assignments, env } = ctx;
   const probe = makeProbe(adapterDir, env);
   const resolved = resolveMember(config, member, { probe, assignments });  // throws before side effects
   assignments[member] = resolved.agent;
-
   const caps = await readCapabilities(adapterDir, resolved.agent, env);
+  return { resolved, caps };
+}
+
+// `workspace` is a directory a caller already holds ({ dir, branch, kind }), such as the one
+// a resumed member ran in; it stands in for the one createWorkspace would build.
+export function prepareMember(ctx, { resolved, caps }, { workspace: given = null } = {}) {
+  const { config, projectRoot, member, skillsDir } = ctx;
   const dialectText = loadDialect(caps.tool_dialect ?? resolved.agent);
 
   let skillText = null;
@@ -289,7 +312,12 @@ async function runMember(ctx) {
 
   let workspace;
   let cloud = null;
-  if (caps.remote === true) {
+  let session = null;
+  if (given) {
+    workspace = given;
+  } else if (caps.live_session === true) {
+    ({ workspace, session } = prepareSession(ctx, resolved));
+  } else if (caps.remote === true) {
     ({ workspace, cloud } = prepareCloud(ctx, resolved));
   } else if (ctx.cloudSource) {
     throw new Error(`member "${member}": a team named by GitHub repository can only run on "${CLOUD_AGENT}", got "${resolved.agent}"`);
@@ -345,6 +373,22 @@ async function runMember(ctx) {
       );
     }
   }
+  return { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks };
+}
+
+// `preresolved` is the caller's resolveCaps() result for this member; it is taken out of ctx
+// so reports and team entries, which spread ctx, resolve their own.
+export async function runMember({ preresolved = null, ...ctx }) {
+  const { config, projectRoot, member, task, adapterDir, assignments,
+          skillsDir, env, timeoutMs, budget, depth } = ctx;
+
+  const spec = config.members[member];
+  if (spec?.team) return runTeam(ctx, spec);
+
+  if (preresolved) assignments[member] = preresolved.resolved.agent;
+  const { resolved, caps } = preresolved ?? await resolveCaps(ctx);
+  const { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks } =
+    prepareMember(ctx, { resolved, caps });
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;
@@ -363,7 +407,7 @@ async function runMember(ctx) {
       const brief = buildBrief({
         resolved, task, cwd: workspace.dir, denyPaths: config.deny_paths,
         skillText, dialectText, timeoutSec: Math.floor(timeoutMs / 1000),
-        depth, maxDepth, priorResults, cloud
+        depth, maxDepth, priorResults, cloud, session
       });
 
       result = await runAdapter(adapterPath(adapterDir, resolved.agent), 'run', {
@@ -426,7 +470,8 @@ async function runMember(ctx) {
       member, agent: resolved.agent, model: resolved.model, advisor: resolved.advisor,
       usage, elapsed_ms: Date.now() - started, warning: resolved.warning,
       workspace, unmatchedDenyPaths, droppedSymlinks, depth, delegated,
-      ...(cloud ? { cloud } : {})
+      ...(cloud ? { cloud } : {}),
+      ...(session ? { session } : {})
     };
   } catch (err) {
     // A throw here (e.g. a reporting-line violation) means this frame's workspace

@@ -96,3 +96,10 @@ test('`agent-team report` prints a plain message, not JSON, when nothing has bee
     else process.env.AGENT_TEAM_WORKSPACE_ROOT = prev;
   }
 });
+
+test('--help prints the usage and exits 0 instead of crashing in parseArgs', async () => {
+  const { code, stdout, stderr } = await runCli(['--help']);
+  assert.equal(code, 0);
+  assert.match(stdout, /^usage: agent-team --member/);
+  assert.equal(stderr, '');
+});

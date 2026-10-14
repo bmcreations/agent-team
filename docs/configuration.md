@@ -188,6 +188,7 @@ applies, so the member runs locally instead.
 | Variable | What it is |
 |---|---|
 | `ANTHROPIC_API_KEY` | An API key with Managed Agents access. Sessions are billed to it, separately from a Claude subscription. |
+| `ANTHROPIC_WORKSPACE_ID` | The workspace to use, sent as `anthropic-workspace-id`. Required when the key isn't scoped to a single workspace; the API rejects every request without it. |
 | `AGENT_TEAM_GITHUB_TOKEN` | A fine-grained GitHub token scoped to the repositories cloud members run on, with Contents read access for `read-only` members and read and write for `workspace` ones. The session uses it to clone and push. Your `gh` login is never sent. |
 
 The dispatcher refuses a cloud run when:
@@ -217,6 +218,54 @@ config gives it, and the deny check runs against that repository's own `deny_pat
 session cannot delegate: each further hop would be another clone and another billed session.
 Its cost cap is the lower of the two configs' `cloud_max_cost_usd`. A project cannot reach
 itself through its own GitHub name; the cycle check compares `origin` as well as the path.
+
+### Live session members (experimental)
+
+A member with `"agent": "claude-session"` hands its task to a Claude Code session that is
+already running on this machine, through a [channel](https://code.claude.com/docs/en/channels).
+The task appears in that session's conversation; the session answers through the channel's
+`reply` tool, and that answer is the member's result.
+
+```json
+"pair": { "agent": "claude-session", "reports_to": "orchestrator" }
+```
+
+Setup, once per project and again after updating the plugin:
+
+```bash
+agent-team channel enable
+```
+
+This registers the channel server with Claude Code in this project's local scope, which is
+private to you and not written to the repo's `.mcp.json`. Then start the session members
+should use, from the project directory:
+
+```bash
+claude --dangerously-load-development-channels server:agent-team
+```
+
+The flag and its confirmation prompt are required while channels are a research preview.
+`agent-team channel disable` removes the registration.
+
+Without `session_id`, the member uses the only session in this project running the channel,
+and fails if there are none or several. Set `"session_id"` to pin one; `agent-team channel list`
+prints the running sessions and their directories.
+
+What this does not do:
+
+- **Nothing is enforced.** The task runs in the owner's interactive session with that
+  session's permissions, tools and context. For a `read-only` member and for `deny_paths`, the
+  task opens with a "Limits for this task" section asking the session to respect them; the
+  session can ignore it. No workspace is created and no diff is reported.
+- **No delivery check.** A session started without the flag, or still showing its startup
+  prompts, is listed but drops tasks. The run then ends as `timeout`.
+- **A timeout does not stop the task.** The session keeps working on it, and a late reply is
+  discarded.
+- **Only this project's team can use it.** A delegation from another project's team (a
+  `team` member elsewhere pointing here) is refused before anything is sent.
+
+The server listens on a Unix socket in `~/.cache/agent-team/channels/`, a directory with mode
+0700. Any process running as your user can send it a task.
 
 ## `deny_paths`
 

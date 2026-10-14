@@ -6,6 +6,7 @@ import {
 import { randomBytes, createHash } from 'node:crypto';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
+import { workspaceCommitSubject } from './diffbase.js';
 
 const git = (dir, ...args) =>
   execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' }).toString();
@@ -654,7 +655,7 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     // unreachable so gc can prune its blobs.
     git(dir, 'checkout', '-q', '--orphan', branch);
     git(dir, 'add', '-A');
-    git(dir, 'commit', '-q', '-m', `workspace: ${member}`);
+    git(dir, 'commit', '-q', '-m', workspaceCommitSubject(member));
     for (const stale of otherBranches(dir, branch)) git(dir, 'branch', '-q', '-D', stale);
     git(dir, 'remote', 'remove', 'origin');
     // `remote remove` deletes the origin remote's config but leaves refs/remotes/origin/HEAD

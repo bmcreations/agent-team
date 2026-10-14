@@ -7,11 +7,60 @@ export const CONFIG_RELPATH = join('.claude', 'agent-team.json');
 
 // The adapter that runs a member as a Managed Agents session instead of a local CLI.
 export const CLOUD_AGENT = 'claude-cloud';
+export const SESSION_AGENT = 'claude-session';
 
 export const ISOLATIONS = ['none', 'read-only', 'workspace'];
 export const DELIVERABLES = ['diff', 'review', 'document', 'decision'];
 
 const DELIVERABLE_FOR = { none: 'document', 'read-only': 'review', workspace: 'diff' };
+
+// What an extension (src/extensions.js) adds to the config, by extension name. `defaults` and
+// `keys` map a name to { default, validate(value, path) }: `validate` throws on a bad value,
+// and gets the value after `default` was applied.
+const CORE_KEYS = ['members', 'deny_paths', 'defaults', 'org'];
+const CORE_DEFAULTS = {
+  on_unavailable: 'claude',
+  max_depth: 3,
+  max_delegations: 20,
+  cloud_max_cost_usd: 5
+};
+const extensionSchemas = new Map();
+
+function checkEntries(owner, kind, entries, taken) {
+  if (entries === undefined) return {};
+  if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) {
+    throw new Error(`extension "${owner}": config.${kind} must be an object`);
+  }
+  for (const [key, spec] of Object.entries(entries)) {
+    if (typeof spec?.validate !== 'function') {
+      throw new Error(`extension "${owner}": config.${kind}.${key} needs a validate(value, path) function`);
+    }
+    const clash = taken(key);
+    if (clash) throw new Error(`extension "${owner}": config.${kind}.${key} is already taken by ${clash}`);
+  }
+  return entries;
+}
+
+// Registers an extension's extra config. Registering a name again replaces its earlier schema.
+export function extendConfig(owner, schema = {}) {
+  const unknown = Object.keys(schema).filter((k) => k !== 'defaults' && k !== 'keys');
+  if (unknown.length > 0) throw new Error(`extension "${owner}": config has no "${unknown.join('", "')}" (only defaults and keys)`);
+  const others = [...extensionSchemas].filter(([name]) => name !== owner);
+  const takenBy = (kind) => (key) => {
+    if (kind === 'defaults' && key in CORE_DEFAULTS) return 'the core';
+    if (kind === 'keys' && CORE_KEYS.includes(key)) return 'the core';
+    const other = others.find(([, s]) => key in s[kind]);
+    return other ? `extension "${other[0]}"` : null;
+  };
+  extensionSchemas.set(owner, {
+    defaults: checkEntries(owner, 'defaults', schema.defaults, takenBy('defaults')),
+    keys: checkEntries(owner, 'keys', schema.keys, takenBy('keys'))
+  });
+}
+
+export function resetConfigExtensions() {
+  extensionSchemas.clear();
+}
 
 // Member names are interpolated into a filesystem path (workspace.js joins them as
 // <cache root>/agent-team/workspaces/<repo hash>/<name>-<id>, and path.join happily
@@ -385,6 +434,16 @@ export function parseConfig(raw, path) {
         'isolation "none" has no meaning for it — use "read-only" or "workspace"'
       );
     }
+    // Pins a claude-session member to one running session; without it the member uses the
+    // only session running in the project.
+    if (m.session_id !== undefined && m.session_id !== null) {
+      if (m.agent !== SESSION_AGENT) {
+        throw new Error(`${path}: member "${name}": "session_id" only applies to a "${SESSION_AGENT}" member`);
+      }
+      if (typeof m.session_id !== 'string' || m.session_id === '') {
+        throw new Error(`${path}: member "${name}": "session_id" must be a non-empty string — got ${JSON.stringify(m.session_id)}`);
+      }
+    }
     // The only way past the refusal in src/dispatch.js when deny_paths matches a file the
     // cloud will clone. Strictly true, so a stray "yes" or 1 cannot switch it on.
     if (m.cloud_allow_denied !== undefined && m.cloud_allow_denied !== null &&
@@ -417,11 +476,10 @@ export function parseConfig(raw, path) {
     }
   }
 
+  const schemas = [...extensionSchemas.values()];
   const defaults = {
-    on_unavailable: 'claude',
-    max_depth: 3,
-    max_delegations: 20,
-    cloud_max_cost_usd: 5,
+    ...Object.fromEntries(schemas.flatMap((s) => Object.entries(s.defaults).map(([k, v]) => [k, structuredClone(v.default ?? null)]))),
+    ...CORE_DEFAULTS,
     ...(raw.defaults ?? {})
   };
   // Checked after the merge, not on raw.defaults, so a bad value baked into the hardcoded
@@ -443,10 +501,21 @@ export function parseConfig(raw, path) {
     );
   }
 
+  // An extension's keys are checked after the core's, so a core error is never masked.
+  const extra = {};
+  for (const s of schemas) {
+    for (const [key, spec] of Object.entries(s.defaults)) spec.validate(defaults[key], path);
+    for (const [key, spec] of Object.entries(s.keys)) {
+      extra[key] = raw[key] ?? structuredClone(spec.default ?? null);
+      spec.validate(extra[key], path);
+    }
+  }
+
   return {
     members,
     org,
     deny_paths: raw.deny_paths,
+    ...extra,
     defaults
   };
 }

@@ -8,7 +8,7 @@ allowed-tools: [Bash]
 
 # Delegation report
 
-Run the report for the current project. Pass `--all` through if the user asked for totals across runs.
+Run the report for the current project. It also includes runs that an installed extension records. Pass `--all` through if the user asked for totals across runs.
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/bin/agent-team.js" report $ARGUMENTS

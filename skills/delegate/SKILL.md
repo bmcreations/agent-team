@@ -14,13 +14,21 @@ Run the task through the project's member configuration rather than picking an a
 
 Read `.claude/agent-team.json`. If it is missing, stop and tell the user to run `/agent-team-init`.
 
-## Step 2 — dispatch
+## Step 2 — write the task as the whole job
+
+Send the user's whole request as one task, through to its end: for a change people will see, that
+is design options, the user's pick, the build, the user's sign-off on devices, and a pull request.
+Do not split the job into a "plan only" run and a later "round 2" run, and do not add "no PRs",
+"do not implement" or "stop at a plan" unless the user said so. Include what the user already decided, such
+as rejected options and the reasons, so the team does not ask again.
+
+## Step 3 — dispatch
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/bin/agent-team.js" --member <member> --task "<task>"
 ```
 
-## Step 3 — report
+## Step 4 — report
 
 The command returns one JSON object. Report to the user:
 
