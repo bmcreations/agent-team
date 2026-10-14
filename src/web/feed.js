@@ -186,10 +186,25 @@ const stripLabels = (s) => {
   return out;
 };
 
+// A generic verb or "decide the design" phrase that opens a brief says what kind of work it is,
+// not what it is about; the subject reads better first. Whatever follows, minus an article.
+const LEAD_IN = /^(?:decide\s+(?:on\s+)?the\s+design\s+(?:for|of)|design|decide\s+(?:on|how\s+to)|render|implement|add(?:\s+support\s+for)?|build|create|investigate|explore|fix|support|make)\s+(?:(?:the\s+new|the|a|an)\s+)?/i;
+// A trailing aside after the subject: ", on iOS ...", ", with ...", " — ...", "; ...", ": ...".
+const TRAILING = /(?:,\s+on\s|\s+on\s+iOS\b|,\s+with\s|\s\u2014\s|;|:).*$/i;
+const words = (s) => s.split(/\s+/).filter(Boolean).length;
+
+function subjectFirst(pick) {
+  let out = pick.replace(LEAD_IN, '').trim();
+  if (words(out) < 2) return pick;
+  const cut = out.replace(TRAILING, '').replace(/[\s,.\u2026]+$/, '');
+  if (cut !== out && words(cut) >= 3) out = cut;
+  return out;
+}
+
 // A readable run name from its brief, for when nobody named the run: the first Markdown
 // heading, else the first sentence once any "Exploration only, ..." disclaimer and leading
 // "Goal:"-style label are gone. Cut at a word boundary to about `max` characters.
-export function deriveTitle(task, max = 50) {
+export function deriveTitle(task, max = 60) {
   const text = String(task ?? '');
   let pick = '';
   const heading = /^\s*#+\s*(.+)$/m.exec(text);
@@ -202,6 +217,7 @@ export function deriveTitle(task, max = 50) {
   }
   pick = oneLine(pick);
   if (!pick) return '';
+  pick = subjectFirst(pick);
   if (pick.length > max) {
     const cut = pick.slice(0, max + 1);
     const space = cut.lastIndexOf(' ');

@@ -282,17 +282,32 @@ test('splitDiff gives one entry per file with each line tagged by kind, and coun
 });
 
 test('deriveTitle names a run from the brief when nobody did', () => {
-  assert.equal(deriveTitle("Exploration only, no implementation. Goal: decide the design for a floating 'jump to bottom' button in the chat list."),
-    "Decide the design for a floating 'jump to bottom'…");
-  assert.equal(deriveTitle('Objective: render the new system-message content type in private group chats, with a fallback.'),
-    'Render the new system-message content type in…');
+  assert.equal(deriveTitle("Exploration only, no implementation. Goal: decide the design for a floating 'jump to bottom' button with an unread counter ..."),
+    "Floating 'jump to bottom' button with an unread counter");
+  assert.equal(deriveTitle('Objective: render the new system-message content type in private group chats, on iOS ... and Android ...'),
+    'System-message content type in private group chats');
   assert.equal(deriveTitle('# Brief: flexible New device create (Android + iOS)\n\nApproved by Chris.'),
     'Flexible New device create (Android + iOS)');
   assert.equal(deriveTitle('Intro line\n\n## Real heading\nbody'), 'Real heading');
-  assert.equal(deriveTitle('fix the rotate crash. Then more'), 'Fix the rotate crash');
+  assert.equal(deriveTitle('fix the rotate crash. Then more'), 'Rotate crash');
   assert.equal(deriveTitle('Task: Goal: nested labels'), 'Nested labels');
   assert.equal(deriveTitle(null), '');
-  assert.equal(deriveTitle('x'.repeat(200)).length, 51);
+  assert.equal(deriveTitle('x'.repeat(200)).length, 61);
+});
+
+test('deriveTitle keeps the subject first without emptying the title', () => {
+  // A lead-in that would leave under two words is kept.
+  assert.equal(deriveTitle('Fix flakes'), 'Fix flakes');
+  assert.equal(deriveTitle('add support for it'), 'Add support for it');
+  assert.equal(deriveTitle('Investigate'), 'Investigate');
+  // A trailing clause is cut only when three or more words remain.
+  assert.equal(deriveTitle('Create the retry queue; then wire it up'), 'Retry queue; then wire it up');
+  assert.equal(deriveTitle('Create the upload retry queue; then wire it up'), 'Upload retry queue');
+  assert.equal(deriveTitle('Build a cache: with eviction'), 'Cache: with eviction');
+  assert.equal(deriveTitle('Implement a retry queue for uploads \u2014 see notes'), 'Retry queue for uploads');
+  // A long subject is cut at a word boundary.
+  const long = deriveTitle('Explore the onboarding flow for returning customers who changed devices recently and lost their sessions');
+  assert.ok(long.length <= 61 && long.endsWith('\u2026') && long.startsWith('Onboarding flow'), long);
 });
 
 test('runTitle prefers the run title and falls back to the brief', () => {
