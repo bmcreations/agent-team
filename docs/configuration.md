@@ -247,6 +247,11 @@ claude --dangerously-load-development-channels server:agent-team
 The flag and its confirmation prompt are required while channels are a research preview.
 `agent-team channel disable` removes the registration.
 
+If Claude Code restarts the channel server while a task is running (an MCP reconnect, or
+`claude --resume` of the same session), the task is not lost: the caller reconnects to the session's
+socket and the session's reply, even one sent to the restarted server first, is delivered. The task
+text is sent only once. The caller gives up early if the session's registry entry stays gone for about 30 seconds.
+
 Without `session_id`, the member uses the only session in this project running the channel,
 and fails if there are none or several. Set `"session_id"` to pin one; `agent-team channel list`
 prints the running sessions and their directories.

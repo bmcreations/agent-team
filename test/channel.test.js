@@ -88,20 +88,91 @@ test('two tasks in flight each get their own reply, whatever order Claude answer
   assert.equal((await b).text, 'answer B');
 });
 
-test('a reply to an unknown or abandoned task is a tool error, not a crash', async (t) => {
+test('a reply for a task nobody waits on is kept, not refused; a malformed task_id is an error', async (t) => {
   const s = startServer();
   t.after(() => s.child.kill());
   await s.call('initialize', {});
   await s.registered();
   const res = await s.call('tools/call', { name: 'reply', arguments: { task_id: 't_nope', text: 'x' } });
-  assert.equal(res.result.isError, true);
+  assert.equal(res.result.isError, undefined);
+  assert.match(res.result.content[0].text, /kept/);
+  const bad = await s.call('tools/call', { name: 'reply', arguments: { task_id: 'no good!', text: 'x' } });
+  assert.equal(bad.result.isError, true);
 
-  // The caller gives up; Claude's late reply must not reach anyone.
+  // The caller gives up; Claude's late reply is kept, and goes to nobody unless that task resumes.
   await assert.rejects(askSession(SID, 'slow task', { env: s.env, timeoutMs: 100 }), /no reply to t_\w+ .* within 100 ms/);
   const ev = await s.next((m) => m.params?.content === 'slow task');
   await new Promise((r) => setTimeout(r, 50));
   const late = await s.call('tools/call', { name: 'reply', arguments: { task_id: ev.params.meta.task_id, text: 'too late' } });
-  assert.equal(late.result.isError, true);
+  assert.match(late.result.content[0].text, /kept/);
+});
+
+// Claude Code restarting the channel server: same session id, same socket path, empty memory.
+async function restart(s) {
+  s.child.kill('SIGKILL');
+  await new Promise((r) => s.child.once('exit', r));
+  const n = startServer({ dir: s.dir });
+  t_cleanup.push(n);
+  await n.call('initialize', {});
+  await n.registered();
+  return n;
+}
+const t_cleanup = [];
+const notified = (s) => s.seen.filter((m) => m.method === 'notifications/claude/channel');
+
+test('a server restarted mid-task: the model replies to the new server before the client reconnects', async (t) => {
+  const s = startServer();
+  t.after(() => { s.child.kill(); t_cleanup.splice(0).forEach((x) => x.child.kill()); });
+  await s.call('initialize', {});
+  await s.registered();
+  let open; const gate = new Promise((r) => { open = r; });   // holds the client's reconnect until the test says so
+  const answer = askSession(SID, 'long task', { env: s.env, timeoutMs: 15000, reconnectGate: () => gate });
+  const ev = await s.next((m) => m.method === 'notifications/claude/channel');
+  const taskId = ev.params.meta.task_id;
+
+  const n = await restart(s);
+  const res = await n.call('tools/call', { name: 'reply', arguments: { task_id: taskId, text: 'done after restart' } });
+  assert.match(res.result.content[0].text, /kept/);
+  open();
+  const got = await answer;
+  assert.equal(got.text, 'done after restart');
+  assert.equal(got.task_id, taskId);
+  assert.equal(notified(s).length + notified(n).length, 1);
+});
+
+test('a server restarted mid-task: the client reconnects first and the reply arrives after', async (t) => {
+  const s = startServer();
+  t.after(() => { s.child.kill(); t_cleanup.splice(0).forEach((x) => x.child.kill()); });
+  await s.call('initialize', {});
+  await s.registered();
+  let resumed; const resumeWritten = new Promise((r) => { resumed = r; });
+  const answer = askSession(SID, 'long task', { env: s.env, timeoutMs: 15000, onResume: resumed });
+  const ev = await s.next((m) => m.method === 'notifications/claude/channel');
+  const taskId = ev.params.meta.task_id;
+
+  const n = await restart(s);
+  await resumeWritten;   // the client's resume line is on the new server's socket
+  // The server reads its socket and stdin on one event loop; a few round trips through stdin
+  // let it process the resume line before the reply below.
+  for (let i = 0; i < 5; i++) await n.call('ping', {});
+  const res = await n.call('tools/call', { name: 'reply', arguments: { task_id: taskId, text: 'late but whole' } });
+  assert.equal(res.result.isError, undefined);
+  assert.equal((await answer).text, 'late but whole');
+  assert.equal(notified(s).length, 1);
+  assert.equal(notified(n).length, 0);   // the resume line must not notify Claude again
+});
+
+test('a session whose entry is gone for good fails within the give-up window, not the full timeout', async (t) => {
+  const s = startServer();
+  t.after(() => s.child.kill());
+  await s.call('initialize', {});
+  await s.registered();
+  const answer = askSession(SID, 'doomed', { env: s.env, timeoutMs: 60000, giveUpMs: 600 });
+  await s.next((m) => m.method === 'notifications/claude/channel');
+  const started = Date.now();
+  s.child.kill('SIGKILL');
+  await assert.rejects(answer, /closed without a reply to t_\w+/);
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
 });
 
 test('the registry skips dead servers, and a server cleans up when its session ends', async (t) => {
