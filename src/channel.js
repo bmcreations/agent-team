@@ -64,7 +64,9 @@ const BACKOFF_MAX_MS = 5000;
 // send a resume line, never the text again. Gives up with the closed-without-reply error when
 // the session's entry has been gone for GIVE_UP_MS, or at the overall timeout.
 // `onSent(taskId)` fires once the task is written to the socket.
-export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = process.env, onSent, giveUpMs = GIVE_UP_MS } = {}) {
+// Test hooks: `reconnectGate()` is awaited (after the backoff) before each reconnect attempt;
+// `onResume(taskId)` fires once a resume line is written.
+export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = process.env, onSent, giveUpMs = GIVE_UP_MS, reconnectGate, onResume } = {}) {
   const entry = listChannels(env).find((c) => c.session_id === sessionId);
   if (!entry) return Promise.reject(new Error(`no running agent-team channel for session ${sessionId}`));
   const taskId = `t_${randomBytes(6).toString('hex')}`;
@@ -91,7 +93,12 @@ export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = pro
       }
       const wait = current ? delay : Math.min(delay, giveUpMs - (Date.now() - goneSince));
       delay = Math.min(delay * 2, BACKOFF_MAX_MS);
-      retry = setTimeout(() => open(current?.socket ?? entry.socket, true), wait);
+      retry = setTimeout(async () => {
+        if (reconnectGate) await reconnectGate();
+        if (settled) return;
+        const now = listChannels(env).find((c) => c.session_id === sessionId);
+        open(now?.socket ?? current?.socket ?? entry.socket, true);
+      }, wait);
     };
 
     const open = (path, resume) => {
@@ -102,7 +109,7 @@ export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = pro
       const lost = () => { if (!dead) { dead = true; reconnect(); } };
       s.setEncoding('utf8');
       s.on('connect', () => {
-        if (resume) s.write(JSON.stringify({ task_id: taskId, resume: true }) + '\n');
+        if (resume) s.write(JSON.stringify({ task_id: taskId, resume: true }) + '\n', () => onResume?.(taskId));
         else { written = true; s.write(JSON.stringify({ task_id: taskId, text }) + '\n', () => onSent?.(taskId)); }
       });
       s.on('data', (chunk) => {

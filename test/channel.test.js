@@ -125,13 +125,15 @@ test('a server restarted mid-task: the model replies to the new server before th
   t.after(() => { s.child.kill(); t_cleanup.splice(0).forEach((x) => x.child.kill()); });
   await s.call('initialize', {});
   await s.registered();
-  const answer = askSession(SID, 'long task', { env: s.env, timeoutMs: 15000 });
+  let open; const gate = new Promise((r) => { open = r; });   // holds the client's reconnect until the test says so
+  const answer = askSession(SID, 'long task', { env: s.env, timeoutMs: 15000, reconnectGate: () => gate });
   const ev = await s.next((m) => m.method === 'notifications/claude/channel');
   const taskId = ev.params.meta.task_id;
 
   const n = await restart(s);
   const res = await n.call('tools/call', { name: 'reply', arguments: { task_id: taskId, text: 'done after restart' } });
   assert.match(res.result.content[0].text, /kept/);
+  open();
   const got = await answer;
   assert.equal(got.text, 'done after restart');
   assert.equal(got.task_id, taskId);
@@ -143,12 +145,16 @@ test('a server restarted mid-task: the client reconnects first and the reply arr
   t.after(() => { s.child.kill(); t_cleanup.splice(0).forEach((x) => x.child.kill()); });
   await s.call('initialize', {});
   await s.registered();
-  const answer = askSession(SID, 'long task', { env: s.env, timeoutMs: 15000 });
+  let resumed; const resumeWritten = new Promise((r) => { resumed = r; });
+  const answer = askSession(SID, 'long task', { env: s.env, timeoutMs: 15000, onResume: resumed });
   const ev = await s.next((m) => m.method === 'notifications/claude/channel');
   const taskId = ev.params.meta.task_id;
 
   const n = await restart(s);
-  await new Promise((r) => setTimeout(r, 1200));   // past the client's first backoff steps
+  await resumeWritten;   // the client's resume line is on the new server's socket
+  // The server reads its socket and stdin on one event loop; a few round trips through stdin
+  // let it process the resume line before the reply below.
+  for (let i = 0; i < 5; i++) await n.call('ping', {});
   const res = await n.call('tools/call', { name: 'reply', arguments: { task_id: taskId, text: 'late but whole' } });
   assert.equal(res.result.isError, undefined);
   assert.doesNotMatch(res.result.content[0].text, /kept/);   // delivered straight to the waiting client
