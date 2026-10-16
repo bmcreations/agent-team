@@ -52,33 +52,74 @@ export function pickSession({ sessionId = null, projectRoot, env = process.env }
     `(${here.map((c) => c.session_id).join(', ')}) — set "session_id" on the member to pick one`);
 }
 
+const GIVE_UP_MS = 30_000;   // how long a session's registry entry may stay gone before the session counts as ended
+const BACKOFF_START_MS = 250;
+const BACKOFF_MAX_MS = 5000;
+
 // Sends `text` to the session and resolves with its reply. The channel gives no delivery
 // acknowledgement: a session not started with the channel flag drops the task silently,
 // so a missing reply only ever shows up as the timeout.
+// If the connection closes before a reply (Claude Code restarted the channel server), the task
+// is still in the session's conversation: reconnect to the session's socket with backoff and
+// send a resume line, never the text again. Gives up with the closed-without-reply error when
+// the session's entry has been gone for GIVE_UP_MS, or at the overall timeout.
 // `onSent(taskId)` fires once the task is written to the socket.
-export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = process.env, onSent } = {}) {
+export function askSession(sessionId, text, { timeoutMs = 15 * 60_000, env = process.env, onSent, giveUpMs = GIVE_UP_MS } = {}) {
   const entry = listChannels(env).find((c) => c.session_id === sessionId);
   if (!entry) return Promise.reject(new Error(`no running agent-team channel for session ${sessionId}`));
   const taskId = `t_${randomBytes(6).toString('hex')}`;
   return new Promise((resolve, reject) => {
-    const sock = connect(entry.socket);
-    let buf = '';
+    let sock = null;
+    let retry = null;
     let settled = false;
-    const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); sock.destroy(); fn(v); } };
+    let delay = BACKOFF_START_MS;
+    let goneSince = null;
+    let cwd = entry.cwd;
+    let written = false;   // the task text has gone to a socket at least once
+    const closedErr = () => new Error(`channel for session ${sessionId} closed without a reply to ${taskId}`);
+    const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); clearTimeout(retry); sock?.destroy(); fn(v); } };
     const timer = setTimeout(() => finish(reject, new Error(`no reply to ${taskId} from session ${sessionId} within ${timeoutMs} ms`)), timeoutMs);
-    sock.setEncoding('utf8');
-    sock.on('connect', () => sock.write(JSON.stringify({ task_id: taskId, text }) + '\n', () => onSent?.(taskId)));
-    sock.on('data', (chunk) => {
-      buf += chunk;
-      const nl = buf.indexOf('\n');
-      if (nl < 0) return;
-      try {
-        const reply = JSON.parse(buf.slice(0, nl));
-        if (reply.task_id !== taskId) return finish(reject, new Error(`reply for ${reply.task_id}, expected ${taskId}`));
-        finish(resolve, { task_id: taskId, text: reply.text, cwd: entry.cwd });
-      } catch (e) { finish(reject, e); }
-    });
-    sock.on('error', (e) => finish(reject, e));
-    sock.on('close', () => finish(reject, new Error(`channel for session ${sessionId} closed without a reply to ${taskId}`)));
+
+    // Called when a connection ends without a reply.
+    const reconnect = () => {
+      if (settled) return;
+      const current = listChannels(env).find((c) => c.session_id === sessionId);
+      if (current) { goneSince = null; cwd = current.cwd; }
+      else {
+        goneSince ??= Date.now();
+        if (Date.now() - goneSince >= giveUpMs) return finish(reject, closedErr());
+      }
+      const wait = current ? delay : Math.min(delay, giveUpMs - (Date.now() - goneSince));
+      delay = Math.min(delay * 2, BACKOFF_MAX_MS);
+      retry = setTimeout(() => open(current?.socket ?? entry.socket, true), wait);
+    };
+
+    const open = (path, resume) => {
+      const s = connect(path);
+      sock = s;
+      let buf = '';
+      let dead = false;
+      const lost = () => { if (!dead) { dead = true; reconnect(); } };
+      s.setEncoding('utf8');
+      s.on('connect', () => {
+        if (resume) s.write(JSON.stringify({ task_id: taskId, resume: true }) + '\n');
+        else { written = true; s.write(JSON.stringify({ task_id: taskId, text }) + '\n', () => onSent?.(taskId)); }
+      });
+      s.on('data', (chunk) => {
+        buf += chunk;
+        const nl = buf.indexOf('\n');
+        if (nl < 0) return;
+        try {
+          const reply = JSON.parse(buf.slice(0, nl));
+          if (reply.task_id !== taskId) return finish(reject, new Error(`reply for ${reply.task_id}, expected ${taskId}`));
+          finish(resolve, { task_id: taskId, text: reply.text, cwd });
+        } catch (e) { finish(reject, e); }
+      });
+      // A refused or vanished socket is the same as a closed one: the server may be mid-restart.
+      s.on('error', (e) => { if (!written) finish(reject, e); });   // never reached the session: nothing to resume
+      s.on('close', lost);
+    };
+
+    open(entry.socket, false);
   });
 }

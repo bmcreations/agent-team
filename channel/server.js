@@ -12,7 +12,11 @@
 //
 // Socket protocol: the caller writes one JSON line {task_id, text}, then reads one JSON
 // line {task_id, text} when Claude calls `reply` with that task_id. Closing the connection
-// abandons the task.
+// abandons the wait, not the task: if Claude Code restarts this server mid-task (MCP reconnect,
+// `claude --resume`), the caller reconnects to the same socket path and sends
+// {task_id, resume: true}, which registers it for the reply without notifying Claude again.
+// A reply for a task nobody is waiting on is kept for a while (KEEP_MAX entries, KEEP_MS) and
+// handed over when that caller resumes.
 //
 // Dependency-free on purpose: Claude Code runs it straight from the plugin checkout, which
 // has no npm install step.
@@ -26,6 +30,17 @@ const SOURCE_NAME = 'agent-team';
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
 const pending = new Map();   // task_id -> socket waiting for the reply
+const kept = new Map();      // task_id -> {text, at}: replies that arrived with no socket waiting
+const KEEP_MAX = 50;
+const KEEP_MS = 30 * 60_000;
+
+function keep(taskId, text) {
+  const now = Date.now();
+  for (const [k, v] of kept) if (now - v.at > KEEP_MS) kept.delete(k);
+  kept.delete(taskId);
+  kept.set(taskId, { text, at: now });
+  while (kept.size > KEEP_MAX) kept.delete(kept.keys().next().value);   // oldest first
+}
 
 const instructions = [
   `Tasks from agent-team arrive as <channel source="${SOURCE_NAME}" task_id="...">.`,
@@ -67,11 +82,17 @@ function handle(msg) {
       const { name, arguments: args = {} } = params ?? {};
       if (name !== 'reply') return send({ id, error: { code: -32602, message: `unknown tool: ${name}` } });
       const sock = pending.get(args.task_id);
+      const text = String(args.text ?? '');
       if (!sock) {
-        return send({ id, result: { isError: true, content: [{ type: 'text', text: `no open agent-team task ${args.task_id}` }] } });
+        // The caller may be between connections after a server restart, or may have given up.
+        if (!/^\w+$/.test(args.task_id ?? '')) {
+          return send({ id, result: { isError: true, content: [{ type: 'text', text: `no open agent-team task ${args.task_id}` }] } });
+        }
+        keep(args.task_id, text);
+        return send({ id, result: { content: [{ type: 'text', text: 'no caller is connected for this task right now; your reply was kept and goes to the caller if it reconnects' }] } });
       }
       pending.delete(args.task_id);
-      sock.end(JSON.stringify({ task_id: args.task_id, text: String(args.text ?? '') }) + '\n');
+      sock.end(JSON.stringify({ task_id: args.task_id, text }) + '\n');
       return send({ id, result: { content: [{ type: 'text', text: 'sent' }] } });
     }
     default:
@@ -105,7 +126,19 @@ if (sessionId) {
       if (nl < 0 || sock.taskId) return;
       let task;
       try { task = JSON.parse(buf.slice(0, nl)); } catch { return sock.destroy(); }
-      if (!/^\w+$/.test(task.task_id ?? '') || typeof task.text !== 'string') return sock.destroy();
+      if (!/^\w+$/.test(task.task_id ?? '')) return sock.destroy();
+      if (task.resume === true) {
+        // A caller reconnecting after a restart: wait for (or collect) the reply, no notification.
+        sock.taskId = task.task_id;
+        const k = kept.get(task.task_id);
+        if (k) {
+          kept.delete(task.task_id);
+          return sock.end(JSON.stringify({ task_id: task.task_id, text: k.text }) + '\n');
+        }
+        pending.set(task.task_id, sock);
+        return;
+      }
+      if (typeof task.text !== 'string') return sock.destroy();
       sock.taskId = task.task_id;
       pending.set(task.task_id, sock);
       // meta keys must be identifiers; each becomes an attribute on the <channel> tag.
