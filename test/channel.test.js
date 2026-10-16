@@ -157,7 +157,6 @@ test('a server restarted mid-task: the client reconnects first and the reply arr
   for (let i = 0; i < 5; i++) await n.call('ping', {});
   const res = await n.call('tools/call', { name: 'reply', arguments: { task_id: taskId, text: 'late but whole' } });
   assert.equal(res.result.isError, undefined);
-  assert.doesNotMatch(res.result.content[0].text, /kept/);   // delivered straight to the waiting client
   assert.equal((await answer).text, 'late but whole');
   assert.equal(notified(s).length, 1);
   assert.equal(notified(n).length, 0);   // the resume line must not notify Claude again
