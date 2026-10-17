@@ -13,8 +13,10 @@ const execFileAsync = promisify(execFile);
 const BIN = new URL('../bin/agent-team.js', import.meta.url).pathname;
 const FIXTURE = new URL('./fixtures/extension', import.meta.url).pathname;
 
+// XDG_CACHE_HOME is pinned to a temp dir so the run log never lands in the real ~/.cache.
+const CACHE = mkdtempSync(join(tmpdir(), 'at-ext-cache-'));
 function runCli(args, env = {}) {
-  return execFileAsync(process.execPath, [BIN, ...args], { env: { ...process.env, ...env } }).then(
+  return execFileAsync(process.execPath, [BIN, ...args], { env: { ...process.env, XDG_CACHE_HOME: CACHE, ...env } }).then(
     (r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }),
     (e) => ({ code: e.code, stdout: e.stdout ?? '', stderr: e.stderr ?? '' })
   );

@@ -13,6 +13,10 @@ import { join } from 'node:path';
 import { askSession, listChannels, pickSession } from '../src/channel.js';
 import { dispatch } from '../src/dispatch.js';
 
+// dispatch() logs each run under the cache root read from process.env, so pin it to a temp dir
+// and never write the developer's real ~/.cache/agent-team.
+process.env.XDG_CACHE_HOME = mkdtempSync(join(tmpdir(), 'at-ch-cache-'));
+
 const SERVER = new URL('../channel/server.js', import.meta.url).pathname;
 const SID = '0b6f2c1e-1111-4222-8333-944455556666';
 
