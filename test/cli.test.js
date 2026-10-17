@@ -33,8 +33,10 @@ const BROKEN = {
 
 // Runs the real CLI as a subprocess (not an in-process import) so a raw, unhandled stack
 // trace on stdout/stderr is actually observable the way an operator would see it.
+// XDG_CACHE_HOME is pinned to a temp dir so the run log never lands in the real ~/.cache.
+const CACHE = mkdtempSync(join(tmpdir(), 'at-cli-cache-'));
 function runCli(args) {
-  return execFileAsync(process.execPath, [BIN, ...args]).then(
+  return execFileAsync(process.execPath, [BIN, ...args], { env: { ...process.env, XDG_CACHE_HOME: CACHE } }).then(
     (r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }),
     (e) => ({ code: e.code, stdout: e.stdout ?? '', stderr: e.stderr ?? '' })
   );
