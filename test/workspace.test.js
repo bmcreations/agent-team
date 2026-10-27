@@ -650,6 +650,9 @@ test(
     const originalWarn = console.warn;
     const warnings = [];
     console.warn = (...args) => warnings.push(args.join(' '));
+    // The flag is on the workspace's own parent, so this needs the from-scratch build; a
+    // snapshot would be built (and fail) under .snapshots instead.
+    process.env.AGENT_TEAM_WORKSPACE_SNAPSHOTS = 'off';
     try {
       assert.throws(
         () => createWorkspace(root, 'lockedparent', ['**'], 'workspace'),
@@ -666,6 +669,7 @@ test(
       );
     } finally {
       console.warn = originalWarn;
+      delete process.env.AGENT_TEAM_WORKSPACE_SNAPSHOTS;
       // Undo the flag so this directory (and its undeleted workspace) can be reclaimed —
       // by this cleanup and, failing that, by the OS reaping WORKSPACE_ROOT's parent tmpdir.
       execFileSync('chflags', ['nouappnd', repoKeyDir]);
