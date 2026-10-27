@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, readFileSync,
-  readdirSync, rmdirSync
+  readdirSync, rmdirSync, renameSync, statSync, statfsSync, utimesSync
 } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
 import { tmpdir, homedir } from 'node:os';
@@ -595,6 +595,24 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
   const branch = `agent-team/${member}-${id}`;
   mkdirSync(dirname(dir), { recursive: true });
 
+  // Where the filesystem can clone files, the filtered tree is built once per (commit,
+  // deny_paths) and each member gets a copy-on-write clone of it (see the snapshot section
+  // below). Anywhere else, or if the copy fails, the workspace is built from scratch.
+  const snapshot = snapshotsEnabled() ? findOrBuildSnapshot(repoRoot, member, denyPaths) : null;
+  if (snapshot && cloneSnapshot(snapshot, dir, member, branch)) {
+    const { unmatchedDenyPaths, droppedSymlinks } = snapshot;
+    return { dir, branch, id, kind: isolation, unmatchedDenyPaths, droppedSymlinks };
+  }
+  const { unmatchedDenyPaths, droppedSymlinks } =
+    buildFiltered(repoRoot, dir, member, denyPaths, branch, workspaceCommitSubject(member));
+  return { dir, branch, id, kind: isolation, unmatchedDenyPaths, droppedSymlinks };
+}
+
+// Clones repoRoot's HEAD into dir and filters it: denied files, submodules and symlinks
+// removed, committed as a parentless commit with the given subject on the given branch, and
+// the cloned commit's objects pruned. Returns the commit the clone checked out. With no
+// subject (a snapshot), the filtered tree is held by SNAPSHOT_TREE_REF instead of a commit.
+function buildFiltered(repoRoot, dir, member, denyPaths, branch, subject) {
   // Everything past this point can throw (including the clone itself, and the
   // every-file-denied guard right below). A partial build is an unredacted clone of the
   // repo, not evidence worth keeping — remove it before propagating the failure so
@@ -604,6 +622,7 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
   // removal and no warning.
   let unmatchedDenyPaths;
   let droppedSymlinks;
+  let sha;
   try {
     execFileSync('git', cloneArgs(repoRoot, dir), { stdio: 'pipe' });
 
@@ -625,6 +644,7 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
         `nothing to clone into a workspace`
       );
     }
+    sha = git(dir, 'rev-parse', 'HEAD').trim();
 
     const { denied, trackedCount, matchedDenyPaths } = deniedFiles(dir, denyPaths);
     if (trackedCount > 0 && denied.length === trackedCount) {
@@ -655,7 +675,8 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     // unreachable so gc can prune its blobs.
     git(dir, 'checkout', '-q', '--orphan', branch);
     git(dir, 'add', '-A');
-    git(dir, 'commit', '-q', '-m', workspaceCommitSubject(member));
+    if (subject) git(dir, 'commit', '-q', '-m', subject);
+    else git(dir, 'update-ref', SNAPSHOT_TREE_REF, git(dir, 'write-tree').trim());
     for (const stale of otherBranches(dir, branch)) git(dir, 'branch', '-q', '-D', stale);
     git(dir, 'remote', 'remove', 'origin');
     // `remote remove` deletes the origin remote's config but leaves refs/remotes/origin/HEAD
@@ -684,7 +705,188 @@ export function createWorkspace(repoRoot, member, denyPaths, isolation) {
     throw err;
   }
 
-  return { dir, branch, id, kind: isolation, unmatchedDenyPaths, droppedSymlinks };
+  return { sha, unmatchedDenyPaths, droppedSymlinks };
+}
+
+// Snapshots. Every workspace of the same commit with the same deny_paths holds the same
+// filtered tree, so it is built once into .snapshots/<sha>-<denyKey>/tree and each member gets
+// a copy-on-write clone of it (clonefile on APFS, a reflink on btrfs or XFS). Files no member
+// changes then share disk blocks: cloning a 2.9 GB workspace this way used 33 MB. A clone is an
+// independent copy, not a link, so a workspace still shares nothing with the unfiltered repo
+// (the property cloneArgs exists for); it shares blocks only with a tree that went through
+// the same filtering. Keyed by commit, not repoKey: a run on a chosen base builds from a
+// temporary worktree, and the same commit and deny set filter to the same tree from any
+// checkout.
+//
+// Bump SNAPSHOT_FORMAT whenever buildFiltered's filtering changes, so a snapshot built under
+// the old rules is never reused under the new ones.
+const SNAPSHOT_FORMAT = 1;
+// A snapshot holds its filtered tree by this ref rather than by a commit, so a workspace
+// cloned from it carries no extra commit: its only commit is the member's root.
+const SNAPSHOT_TREE_REF = 'refs/agent-team/snapshot-tree';
+// A snapshot nobody has cloned for this long is removed. It holds no work, so removing one
+// too early only costs a rebuild.
+const SNAPSHOT_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
+
+export function snapshotRoot() {
+  return join(cacheRoot(), 'agent-team', 'workspaces', '.snapshots');
+}
+
+// AGENT_TEAM_WORKSPACE_SNAPSHOTS=off builds every workspace from scratch; =on uses snapshots
+// even where cloning isn't detected (each clone is then a full copy).
+function snapshotsEnabled() {
+  const mode = process.env.AGENT_TEAM_WORKSPACE_SNAPSHOTS;
+  if (mode === 'off') return false;
+  if (mode === 'on') return true;
+  return canClone();
+}
+
+// Neither `cp -c` (macOS) nor `cp --reflink=auto` (Linux) fails where the filesystem can't
+// clone: both quietly make a full copy, and a snapshot would then cost an extra copy instead
+// of saving one. So the filesystem is probed once per process. `cp --reflink=always` does fail,
+// so Linux answers directly; macOS has no such flag, so the probe clones a 32 MB file and
+// checks that free space barely moved.
+const cloneProbes = new Map();
+function canClone() {
+  const root = snapshotRoot();
+  if (cloneProbes.has(root)) return cloneProbes.get(root);
+  let ok = false;
+  let probe;
+  try {
+    mkdirSync(root, { recursive: true });
+    probe = mkdtempSync(join(root, '.probe-'));
+    const a = join(probe, 'a');
+    if (process.platform === 'linux') {
+      writeFileSync(a, 'probe');
+      ok = spawnSync('cp', ['--reflink=always', a, join(probe, 'b')]).status === 0;
+    } else if (process.platform === 'darwin') {
+      const size = 32 << 20;
+      writeFileSync(a, Buffer.alloc(size, 1));
+      spawnSync('sync');
+      const free = () => { const s = statfsSync(probe); return s.bavail * s.bsize; };
+      const before = free();
+      ok = spawnSync('cp', ['-c', a, join(probe, 'b')]).status === 0;
+      spawnSync('sync');
+      ok = ok && before - free() < size / 2;
+    }
+  } catch {
+    ok = false;
+  } finally {
+    if (probe) rmSync(probe, { recursive: true, force: true });
+  }
+  cloneProbes.set(root, ok);
+  return ok;
+}
+
+function denyKey(denyPaths) {
+  return createHash('sha256')
+    .update(JSON.stringify([SNAPSHOT_FORMAT, [...denyPaths].sort()]))
+    .digest('hex').slice(0, 16);
+}
+
+// A snapshot directory exists only once it is complete (it is renamed into place), so a
+// readable meta.json means a usable tree. Reading one marks it used for pruneSnapshots.
+function readSnapshot(dir) {
+  let meta;
+  try {
+    meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+  const now = new Date();
+  try { utimesSync(dir, now, now); } catch { /* pruned meanwhile; the clone falls back */ }
+  return { tree: join(dir, 'tree'), ...meta };
+}
+
+// git repack (including the `gc --auto` a member's git may run) rewrites every pack without a
+// .keep file into new blocks, which would quietly undo the sharing.
+function keepPacks(tree) {
+  const packs = join(tree, '.git', 'objects', 'pack');
+  for (const name of readdirSync(packs)) {
+    if (name.endsWith('.pack')) writeFileSync(join(packs, name.replace(/\.pack$/, '.keep')), '');
+  }
+}
+
+function findOrBuildSnapshot(repoRoot, member, denyPaths) {
+  const head = spawnSync('git', ['-C', repoRoot, 'rev-parse', '--verify', '-q', 'HEAD'], { encoding: 'utf8' });
+  // No commits yet: the full build reports that clearly.
+  if (head.status !== 0) return null;
+  const root = snapshotRoot();
+  mkdirSync(root, { recursive: true });
+  pruneSnapshots();
+  const deny = denyKey(denyPaths);
+  const found = readSnapshot(join(root, `${head.stdout.trim()}-${deny}`));
+  if (found) return found;
+
+  const tmp = mkdtempSync(join(root, '.build-'));
+  let built;
+  try {
+    built = buildFiltered(repoRoot, join(tmp, 'tree'), member, denyPaths, 'agent-team/snapshot', null);
+    keepPacks(join(tmp, 'tree'));
+    const { unmatchedDenyPaths, droppedSymlinks } = built;
+    writeFileSync(join(tmp, 'meta.json'), JSON.stringify({ unmatchedDenyPaths, droppedSymlinks }));
+  } catch (err) {
+    rmSync(tmp, { recursive: true, force: true });
+    throw err;
+  }
+  // Keyed by the commit the clone checked out, which differs from the HEAD read above if a
+  // commit landed in between.
+  const dir = join(root, `${built.sha}-${deny}`);
+  try {
+    renameSync(tmp, dir);
+  } catch {
+    // Another member built the same snapshot first; use theirs.
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  return readSnapshot(dir);
+}
+
+// Clones the snapshot into dir and makes it this member's: the member's root commit over the
+// snapshot's tree, on its own branch. commit-tree leaves the index (already that tree) alone,
+// and there is no gc, since a gc would rewrite the shared pack into new blocks. Returns
+// false, with nothing left at dir, if any step fails.
+function cloneSnapshot(snapshot, dir, member, branch) {
+  try {
+    const args = process.platform === 'darwin' ? ['-a', '-c'] : ['-a', '--reflink=auto'];
+    execFileSync('cp', [...args, snapshot.tree, dir], { stdio: 'pipe' });
+    // Every cloned file has a new inode and ctime, so the index's stat data no longer matches
+    // and the member's first `git status` would rehash the whole tree (3.4 s on a 1.3 GB
+    // Android repo). Refreshing here moves that cost into the build. A non-zero exit means
+    // some entry differs, which the member's own git will report; it is not a failure here.
+    spawnSync('git', ['-C', dir, 'update-index', '-q', '--refresh'], { stdio: 'ignore' });
+    git(dir, 'symbolic-ref', 'HEAD', `refs/heads/${branch}`);
+    const commit = git(dir, 'commit-tree', SNAPSHOT_TREE_REF, '-m', workspaceCommitSubject(member)).trim();
+    git(dir, 'update-ref', 'HEAD', commit);
+    git(dir, 'update-ref', '-d', SNAPSHOT_TREE_REF);
+    git(dir, 'reflog', 'expire', '--expire=now', '--all');
+    return true;
+  } catch (err) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* reported below */ }
+    console.warn(`agent-team: cloning the workspace snapshot failed (${err.message.split('\n')[0]}); building from scratch`);
+    return false;
+  }
+}
+
+// Removes snapshots nobody has cloned for maxIdleMs, and build or probe directories a crashed
+// process left behind. Workspaces never depend on a snapshot, so this can't break one.
+export function pruneSnapshots({ now = Date.now(), maxIdleMs = SNAPSHOT_MAX_IDLE_MS } = {}) {
+  const root = snapshotRoot();
+  let names;
+  try {
+    names = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const removed = [];
+  for (const name of names) {
+    const path = join(root, name);
+    try {
+      if (now - statSync(path).mtimeMs < maxIdleMs) continue;
+      rmSync(path, { recursive: true, force: true });
+      removed.push(path);
+    } catch { /* gone already, or not removable now; try again next time */ }
+  }
+  return removed;
 }
 
 export function pruneWorkspace(workspace) {

@@ -54,6 +54,21 @@ Clones live outside the repository, at:
 ${AGENT_TEAM_WORKSPACE_ROOT:-${XDG_CACHE_HOME:-~/.cache}}/agent-team/workspaces/<repo-hash>/<member>-<id>
 ```
 
+#### Shared snapshots
+
+Every clone of the same commit with the same `deny_paths` holds the same files. Where the
+filesystem can clone files (APFS on macOS, btrfs or XFS on Linux), steps 1–4 run once, into
+`workspaces/.snapshots/<commit>-<deny-hash>/`, and each member gets a copy-on-write copy of
+that snapshot with its own branch and orphan commit. Files a member doesn't change share disk
+blocks with the snapshot: on a 1.3 GB Android repository, the second and later workspaces used
+about 3 MB each instead of 1.3 GB. A copy-on-write copy is an independent file, not a link, so
+a workspace still shares nothing with your repository, only with a snapshot filtered the same
+way.
+
+A snapshot holds no work. One that hasn't been copied for a day is deleted the next time a
+workspace is built. `AGENT_TEAM_WORKSPACE_SNAPSHOTS=off` builds every clone from scratch;
+`=on` uses snapshots even where the filesystem can't clone, which makes each copy a full copy.
+
 `<repo-hash>` is the first 12 hex characters of the SHA-256 of the repository's absolute path.
 Keeping clones out of the repository means the brief never reveals where the real repository is
 through a relative path, and a `git add -A` in your checkout cannot pick one up. It does not stop
