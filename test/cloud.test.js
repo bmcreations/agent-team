@@ -92,12 +92,13 @@ test('parseGithubRepo reads every way a GitHub remote is written', () => {
   assert.equal(parseGithubRepo('../app'), null);
 });
 
-test('config: a GitHub team is accepted, ref is only for one, and cloud fields are checked', () => {
+test('config: a GitHub team is accepted, ref must be a branch name, and cloud fields are checked', () => {
   const base = { deny_paths: ['x'] };
   const ok = parseConfig({ ...base, members: { lead: { agent: 'claude' }, ios: { team: 'github:acme/ios', ref: 'dev', reports_to: 'lead' } } }, 'c');
   assert.equal(ok.members.ios.ref, 'dev');
   assert.equal(ok.defaults.cloud_max_cost_usd, 5);
-  assert.throws(() => parseConfig({ ...base, members: { ios: { team: '../ios', ref: 'dev' } } }, 'c'), /"ref" only applies/);
+  assert.equal(parseConfig({ ...base, members: { ios: { team: '../ios', ref: 'dev' } } }, 'c').members.ios.ref, 'dev');
+  assert.throws(() => parseConfig({ ...base, members: { ios: { team: '../ios', ref: 'origin/dev' } } }, 'c'), /without the remote/);
   assert.throws(() => parseConfig({ ...base, members: { ios: { team: 'https://gitlab.com/a/b' } } }, 'c'), /not a GitHub repository/);
   assert.throws(() => parseConfig({ ...base, members: { a: { agent: 'claude-cloud', isolation: 'none' } } }, 'c'), /isolation "none" has no meaning/);
   assert.throws(() => parseConfig({ ...base, members: { a: { agent: 'claude-cloud', cloud_allow_denied: 'yes' } } }, 'c'), /must be true or false/);

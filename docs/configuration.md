@@ -154,7 +154,7 @@ to it dispatches that project's entry member, with the task the manager wrote:
 | Field | Required | What it does |
 |---|---|---|
 | `team` | yes | The other project's directory: absolute, under `~/`, or relative to this project. Or a GitHub repository, `github:owner/repo` or its URL, for a team with no checkout here; see [Cloud members](#cloud-members). |
-| `ref` | no | For a GitHub team only: the branch to run. Defaults to the repository's default branch. |
+| `ref` | no | The branch the team starts from, without the remote, e.g. `main`. A GitHub team runs it; it defaults to the repository's default branch. A local team entered under `agent-team serve` snapshots its members from that branch's head on `origin`, fetched once per run, instead of from whatever the checkout has. If the fetch fails, it uses the checkout. |
 | `member` | no | The member to enter that team through. Defaults to that team's only top-level member; a team with more than one is refused until you set it. |
 | `reports_to` | no | As for any member. |
 | `charter`, `title` | no | Shown to this member's manager. The manager's brief lists each report's charter and says which reports are other teams. |
