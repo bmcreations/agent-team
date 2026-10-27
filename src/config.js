@@ -194,6 +194,7 @@ function validateDenyPath(entry, path) {
 // that project's entry member under that project's own config, deny_paths included. Only
 // the fields that describe it to a manager here are accepted; everything that says how a
 // member runs belongs to the other team's config, so it is refused rather than ignored.
+const BRANCH_RE = /^[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}$/;
 const TEAM_FIELDS = new Set(['team', 'member', 'ref', 'reports_to', 'title', 'charter']);
 
 function validateTeamMember(m, name, path) {
@@ -212,15 +213,14 @@ function validateTeamMember(m, name, path) {
       'a GitHub repository — write "github:owner/repo" or a local path'
     );
   }
+  // "ref" is the branch the team starts from: a GitHub team runs it, and a local team's members
+  // are snapshotted from its head on origin rather than from whatever the checkout has.
   if (m.ref !== undefined && m.ref !== null) {
-    if (!remote) {
+    if (typeof m.ref !== 'string' || !BRANCH_RE.test(m.ref) || /\.\.|@\{|\.lock$|\/$|^(origin|refs)\//.test(m.ref)) {
       throw new Error(
-        `${path}: member "${name}": "ref" only applies to a team named by GitHub repository; ` +
-        'a local team runs whatever that checkout has'
+        `${path}: member "${name}": "ref" must be a branch name such as "main", without the remote — ` +
+        `got ${JSON.stringify(m.ref)}`
       );
-    }
-    if (typeof m.ref !== 'string' || m.ref === '') {
-      throw new Error(`${path}: member "${name}": "ref" must be a non-empty branch name — got ${JSON.stringify(m.ref)}`);
     }
   }
   const extra = Object.keys(m).filter((k) => !TEAM_FIELDS.has(k));

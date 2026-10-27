@@ -705,6 +705,15 @@ test('team must be a non-empty string', () => {
   assert.throws(() => loadConfig(withMember('ios', { team: 3 })), /"team" must be a non-empty string/);
 });
 
+test('a local team may name the branch it starts from with "ref"', () => {
+  const cfg = loadConfig(withMember('ios', { team: '../ios', ref: 'main' }));
+  assert.equal(cfg.members.ios.ref, 'main');
+  assert.equal(loadConfig(withMember('ios', { team: '../ios', ref: 'code/cash' })).members.ios.ref, 'code/cash');
+  for (const ref of ['', 3, 'origin/main', '-x', 'a b', 'a..b', 'main/']) {
+    assert.throws(() => loadConfig(withMember('ios', { team: '../ios', ref })), /"ref" must be a branch name/, String(ref));
+  }
+});
+
 test('a team member\'s entry member must be a valid name', () => {
   assert.throws(() => loadConfig(withMember('ios', { team: '../ios', member: '../x' })), /"member" "\.\.\/x" is invalid/);
 });
