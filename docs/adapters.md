@@ -53,6 +53,7 @@ delegation and reports `delegating`, `failed` for a malformed one, or `ok`. The 
 | `model` | `--model` |
 | `effort` | `--effort` |
 | `advisor` | `--settings '{"advisorModel":"<advisor>"}'` |
+| `source_root` | `REFLECT_ROOT` in claude's environment; see [Lessons for Claude members](how-it-works.md#lessons-for-claude-members) |
 | `read_only` | `--permission-mode plan` |
 | otherwise | `--permission-mode <permission_mode>`, default `auto` |
 
@@ -92,7 +93,7 @@ value is ignored with a warning and sets `artifacts.diff_max_buffer_invalid_over
 Binary: `AGENT_TEAM_CODEX_BIN`, else `codex` from `PATH`.
 
 `summary` is codex's last message, written with `-o` to `last-message.txt` beside the log.
-`advisor` and `permission_mode` are ignored.
+`advisor`, `permission_mode` and `source_root` are ignored.
 
 ### grok
 
@@ -109,7 +110,7 @@ Binary: `AGENT_TEAM_GROK_BIN`, else `grok` from `PATH`.
 The sandbox is set on both branches because grok's default is no sandbox. Web search is off so
 a snippet of the filtered repository cannot leave through a search query. `summary` is the
 `text` field of grok's JSON output; that parser has not been checked against a real successful
-run.
+run. `advisor`, `permission_mode` and `source_root` are ignored.
 
 On macOS with Docker Desktop installed, `--sandbox read-only` refuses to start because
 `/var/run/docker.sock` is a symlink, so `read-only` grok members fail. They fail closed; grok

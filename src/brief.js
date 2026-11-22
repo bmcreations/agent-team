@@ -90,7 +90,8 @@ function advisorSection() {
 
 export function buildBrief({
   resolved, task, cwd, denyPaths, skillText = null, dialectText = null,
-  timeoutSec = 900, depth = 0, maxDepth = 3, priorResults = null, cloud = null, session = null
+  timeoutSec = 900, depth = 0, maxDepth = 3, priorResults = null, cloud = null, session = null,
+  sourceRoot = null
 }) {
   if (!Array.isArray(denyPaths) || denyPaths.length === 0) {
     throw new Error(
@@ -141,6 +142,9 @@ export function buildBrief({
     ...(cloud ? { cloud } : {}),
     // Only for a claude-session member: the session to use, if pinned, and the project whose
     // running session it falls back to.
-    ...(session ? { session } : {})
+    ...(session ? { session } : {}),
+    // Only when a clone was built: the checkout it came from. adapters/claude alone passes it
+    // on, as REFLECT_ROOT; see docs/how-it-works.md#lessons-for-claude-members.
+    ...(sourceRoot ? { source_root: sourceRoot } : {})
   };
 }
