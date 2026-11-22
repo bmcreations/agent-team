@@ -70,9 +70,31 @@ workspace is built. `AGENT_TEAM_WORKSPACE_SNAPSHOTS=off` builds every clone from
 `=on` uses snapshots even where the filesystem can't clone, which makes each copy a full copy.
 
 `<repo-hash>` is the first 12 hex characters of the SHA-256 of the repository's absolute path.
-Keeping clones out of the repository means the brief never reveals where the real repository is
-through a relative path, and a `git add -A` in your checkout cannot pick one up. It does not stop
-a CLI that already knows your repository's path from reading it directly.
+Keeping clones out of the repository means a member cannot reach the real repository through a
+relative path, and a `git add -A` in your checkout cannot pick one up. It does not stop a CLI
+that already knows your repository's path from reading it directly, and a claude member is told
+that path; see the next section.
+
+### Lessons for Claude members
+
+The reflect plugin's SessionStart hook loads a project's lessons from the repository's
+`.claude/reflections/index.md`, or from a hub index in a parent directory that lists the
+repository's `owner/name`. It looks from the session's working directory: the repository root,
+the GitHub repository its `origin` remote names, parent directories, and the main checkout of a
+worktree. A clone keeps a tracked index that `deny_paths` does not match, but it loses every
+hub: it sits in the cache rather than under the hub's directory, and has no `origin` to name the
+repository by.
+
+The brief's `source_root` is the absolute path of the checkout the clone was built from, which
+for a member of [another team](#other-teams) is that team's repository. The claude adapter sets
+`REFLECT_ROOT` to it, and a reflect hook that supports the variable reads lessons from there
+instead. `none`, cloud and live-session members have no clone, so they get no `source_root`.
+
+No other adapter sets it. agent-team treats anything a non-Claude member can read as sent to that
+member's vendor, which is why `deny_paths` exists, and reflection entries often hold internal
+detail, so the lessons stay with Claude members. The variable also tells a claude member where
+your checkout is, and nothing stops it from reading files there that `deny_paths` kept out of its
+clone.
 
 ### What happens to the workspace afterwards
 
@@ -97,8 +119,9 @@ prompted with, built from these sections in order, each present only when it app
 7. `# Task`.
 
 The brief also carries `cwd`, `read_only`, `deliverable`, `output_path`, `model`, `effort`,
-`advisor`, `permission_mode`, `timeout_s`, `deny_paths`, `reports`, `can_delegate`, `depth` and
-`max_depth` for the adapter to act on.
+`advisor`, `permission_mode`, `timeout_s`, `deny_paths`, `reports`, `can_delegate`, `depth`,
+`max_depth` and, when a clone was built, [`source_root`](#lessons-for-claude-members) for the
+adapter to act on.
 
 ## Delegation
 

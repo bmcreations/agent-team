@@ -557,11 +557,12 @@ export function runLogPath(projectDir) {
 }
 
 // Workspaces must not live inside the repository they are protecting. The brief hands a
-// member its cwd and relative deny_paths, and never discloses repoRoot — nesting the
-// workspace inside the repo made repoRoot trivially derivable as `../../..` (or reachable
-// with a bare `cat ../../../<secret>`), and let a stray `git add -A` in the real repo
-// sweep up an entire workspace. This only keeps the brief from disclosing where the repo
-// is; it does not stop a CLI that already knows repoRoot from reading it directly.
+// member its cwd and relative deny_paths, and only adapters/claude passes repoRoot on (as
+// REFLECT_ROOT, from source_root) — nesting the workspace inside the repo made repoRoot
+// trivially derivable as `../../..` (or reachable with a bare `cat ../../../<secret>`), and
+// let a stray `git add -A` in the real repo sweep up an entire workspace. This only keeps the
+// workspace path from disclosing where the repo is; it does not stop a CLI that already
+// knows repoRoot from reading it directly.
 function workspacePath(repoRoot, member, id) {
   return join(cacheRoot(), 'agent-team', 'workspaces', repoKey(repoRoot), `${member}-${id}`);
 }

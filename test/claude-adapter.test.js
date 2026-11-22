@@ -23,7 +23,7 @@ test('capabilities declares the claude dialect', () => {
   assert.equal(caps.workspace, true);
 });
 
-// A stub "claude" binary: it records its own argv and cwd to a JSON file (path given via
+// A stub "claude" binary: it records its own argv, cwd and REFLECT_ROOT to a JSON file (path given via
 // the CLAUDE_STUB_RECORD env var) and prints a Claude-Code-shaped JSON envelope on stdout,
 // so the adapter's `JSON.parse(r.stdout.toString()).result` path is the one exercised.
 // Plain CommonJS (require, not import) so Node's module-type detection can't get in the way
@@ -35,7 +35,7 @@ function createClaudeStub() {
   writeFileSync(stubPath, [
     '#!/usr/bin/env node',
     "const fs = require('node:fs');",
-    "fs.writeFileSync(process.env.CLAUDE_STUB_RECORD, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));",
+    "fs.writeFileSync(process.env.CLAUDE_STUB_RECORD, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), reflect_root: process.env.REFLECT_ROOT ?? null }));",
     "process.stdout.write(JSON.stringify({ result: 'stub summary' }) + '\\n');",
     ''
   ].join('\n'));
@@ -43,11 +43,14 @@ function createClaudeStub() {
   return { stubDir, recordPath };
 }
 
+// REFLECT_ROOT is dropped from the inherited env: a claude member running these tests has it
+// set, and the stub must see only what the adapter sets.
 function runAdapterAgainstStub(brief) {
   const { stubDir, recordPath } = createClaudeStub();
+  const { REFLECT_ROOT: _inherited, ...parentEnv } = process.env;
   execFileSync(ADAPTER, ['run'], {
     input: JSON.stringify(brief),
-    env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}`, CLAUDE_STUB_RECORD: recordPath }
+    env: { ...parentEnv, PATH: `${stubDir}:${process.env.PATH}`, CLAUDE_STUB_RECORD: recordPath }
   });
   return JSON.parse(readFileSync(recordPath, 'utf8'));
 }
@@ -89,6 +92,24 @@ test('a can_delegate brief reaches the subagent with its delegation section inta
   assert.match(promptArg, /SENTINEL-TASK/);
   assert.match(promptArg, /# Delegating/);
   assert.match(promptArg, /"status":"delegating"/);
+});
+
+test('source_root reaches claude as REFLECT_ROOT, and a brief without it sets nothing', () => {
+  const resolved = {
+    member: 'implementer', title: 'Implementer', agent: 'claude', model: null, skill: null,
+    charter: null, persona: null, isolation: 'workspace', deliverable: 'diff',
+    output_path: null, reports_to: null, reports: [], warning: null
+  };
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-reflect-'));
+  const brief = (extra) => buildBrief({ resolved, task: 'x', cwd, denyPaths: ['**/.env*'], ...extra });
+
+  // The stub writes its record to CLAUDE_STUB_RECORD, so a record at all shows the rest of
+  // the env still reached it.
+  const withRoot = runAdapterAgainstStub(brief({ sourceRoot: '/src/checkout' }));
+  assert.equal(withRoot.reflect_root, '/src/checkout');
+
+  const without = runAdapterAgainstStub(brief({}));
+  assert.equal(without.reflect_root, null);
 });
 
 test('a read_only brief passes --permission-mode plan, and a writable one passes its permission_mode or auto', () => {

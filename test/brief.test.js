@@ -24,6 +24,11 @@ test('the brief carries member, cwd, and deny_paths', () => {
   assert.deepEqual(b.deny_paths, ['**/.env*']);
 });
 
+test('source_root is carried when given, and absent otherwise', () => {
+  assert.equal(buildBrief({ resolved: IMPL, ...base, sourceRoot: '/repo' }).source_root, '/repo');
+  assert.equal('source_root' in buildBrief({ resolved: IMPL, ...base }), false);
+});
+
 test('read_only is derived from isolation', () => {
   assert.equal(buildBrief({ resolved: IMPL, ...base }).read_only, false);
   assert.equal(buildBrief({ resolved: LEAD, ...base }).read_only, true);

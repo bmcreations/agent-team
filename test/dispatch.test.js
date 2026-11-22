@@ -128,6 +128,13 @@ test('an unknown member fails before any workspace is created', async () => {
   });
 });
 
+test('the brief names the checkout a clone came from, and a none member, with no clone, gets none', async () => {
+  const { root, script } = project({ status: 'ok', summary: 's' });
+  assert.equal((await run(root, script, 'implementer')).received.source_root, root);
+  assert.equal((await run(root, script, 'reviewer')).received.source_root, root);
+  assert.equal('source_root' in (await run(root, script, 'marketer')).received, false);
+});
+
 test('an isolation-none member runs without a repository', async () => {
   const { root, script } = project({ status: 'ok', summary: 'copy written' });
   const r = await run(root, script, 'marketer');
@@ -561,6 +568,8 @@ test('a manager delegates to another team, which runs under its own config', asy
   const [worker] = lead.delegated;
   assert.equal(worker.member, 'ios-worker');
   assert.deepEqual(worker.received.deny_paths, ['secrets/**'], 'the other team\'s deny_paths apply');
+  assert.equal(worker.received.source_root, ios.root, 'the other team\'s member points at its own checkout');
+  assert.equal(r.received.source_root, app.root);
 
   assert.match(r.received.task, /ios button added/);
 });

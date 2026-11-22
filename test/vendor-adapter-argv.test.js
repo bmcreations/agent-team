@@ -23,7 +23,7 @@ const ADAPTERS = [
   }
 ];
 
-// Records its argv to the file named by STUB_RECORD, writes codex's -o last-message file when
+// Records its argv and REFLECT_ROOT to the file named by STUB_RECORD, writes codex's -o last-message file when
 // that flag is present, and prints an envelope carrying grok's `.text`, so each adapter takes
 // its success path.
 function createStub(agent) {
@@ -32,7 +32,7 @@ function createStub(agent) {
   writeFileSync(stubPath, [
     '#!/usr/bin/env node',
     "const fs = require('node:fs');",
-    "fs.writeFileSync(process.env.STUB_RECORD, JSON.stringify(process.argv.slice(2)));",
+    "fs.writeFileSync(process.env.STUB_RECORD, JSON.stringify({ argv: process.argv.slice(2), reflect_root: process.env.REFLECT_ROOT ?? null }));",
     "const i = process.argv.indexOf('-o');",
     "if (i !== -1 && process.argv[i + 1]) fs.writeFileSync(process.argv[i + 1], 'ok');",
     "process.stdout.write(JSON.stringify({ text: 'ok' }) + '\\n');",
@@ -42,7 +42,9 @@ function createStub(agent) {
   return { stubPath, recordPath: join(stubDir, 'argv.json') };
 }
 
-function argvFor({ agent, binEnv }, resolvedOverrides) {
+// REFLECT_ROOT is dropped from the inherited env, since codex and grok pass their own env
+// through: a claude member running these tests has it set.
+function runFor({ agent, binEnv }, resolvedOverrides, briefOverrides = {}) {
   const cwd = mkdtempSync(join(tmpdir(), `agent-team-${agent}-argv-`));
   const brief = buildBrief({
     resolved: {
@@ -51,16 +53,19 @@ function argvFor({ agent, binEnv }, resolvedOverrides) {
       output_path: null, reports_to: null, reports: [], warning: null,
       ...resolvedOverrides
     },
-    task: 'x', cwd, denyPaths: ['**/.env*']
+    task: 'x', cwd, denyPaths: ['**/.env*'], ...briefOverrides
   });
   const { stubPath, recordPath } = createStub(agent);
   const adapter = new URL(`../adapters/${agent}`, import.meta.url).pathname;
+  const { REFLECT_ROOT: _inherited, ...parentEnv } = process.env;
   execFileSync(adapter, ['run'], {
     input: JSON.stringify(brief),
-    env: { ...process.env, [binEnv]: stubPath, STUB_RECORD: recordPath }
+    env: { ...parentEnv, [binEnv]: stubPath, STUB_RECORD: recordPath }
   });
-  return JSON.parse(readFileSync(recordPath, 'utf8'));
+  return { brief, ...JSON.parse(readFileSync(recordPath, 'utf8')) };
 }
+
+const argvFor = (a, resolvedOverrides) => runFor(a, resolvedOverrides).argv;
 
 // True when `pair` appears in argv as adjacent elements. Comparing slots rather than a joined
 // string keeps a whitespace-splitting bug in the arg list from passing.
@@ -105,6 +110,16 @@ for (const a of ADAPTERS) {
     // The cwd differs per run, so compare with it masked out.
     const mask = (argv) => argv.map((v) => (v.startsWith(tmpdir()) || v.includes('agent-team-') ? '<tmp>' : v));
     assert.deepEqual(mask(withAdvisor), mask(plain));
+  });
+}
+
+for (const a of ADAPTERS) {
+  test(`adapters/${a.agent}: source_root reaches the CLI neither as REFLECT_ROOT nor in argv`, () => {
+    // Reflection entries stay with Claude members; see docs/how-it-works.md.
+    const run = runFor(a, {}, { sourceRoot: '/src/checkout' });
+    assert.equal(run.brief.source_root, '/src/checkout', 'the brief must carry it, or this proves nothing');
+    assert.equal(run.reflect_root, null);
+    assert.equal(run.argv.some((v) => v.includes('/src/checkout')), false, JSON.stringify(run.argv));
   });
 }
 

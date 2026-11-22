@@ -389,6 +389,10 @@ export async function runMember({ preresolved = null, ...ctx }) {
   const { resolved, caps } = preresolved ?? await resolveCaps(ctx);
   const { dialectText, skillText, workspace, cloud, session, unmatchedDenyPaths, droppedSymlinks } =
     prepareMember(ctx, { resolved, caps });
+  // The checkout the clone was built from, which for another team's member is that team's.
+  // Cloud, session and none members have no clone here, and a GitHub-named team no checkout.
+  const sourceRoot = projectRoot && (workspace.kind === 'read-only' || workspace.kind === 'workspace')
+    ? resolve(projectRoot) : null;
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;
@@ -407,7 +411,7 @@ export async function runMember({ preresolved = null, ...ctx }) {
       const brief = buildBrief({
         resolved, task, cwd: workspace.dir, denyPaths: config.deny_paths,
         skillText, dialectText, timeoutSec: Math.floor(timeoutMs / 1000),
-        depth, maxDepth, priorResults, cloud, session
+        depth, maxDepth, priorResults, cloud, session, sourceRoot
       });
 
       result = await runAdapter(adapterPath(adapterDir, resolved.agent), 'run', {

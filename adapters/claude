@@ -165,8 +165,12 @@ if (sub === 'probe') {
     // the user's own allowlist gets through, so a workspace member could not edit its clone.
     args.push('--permission-mode', brief.read_only ? 'plan' : (brief.permission_mode ?? 'auto'));
 
+    // reflect's SessionStart hook finds a project's lessons from the session's cwd, and from a
+    // clone in the cache with no origin it cannot reach a hub index. REFLECT_ROOT points it at
+    // the checkout instead. No other adapter sets it: see docs/how-it-works.md.
+    const env = brief.source_root ? { ...process.env, REFLECT_ROOT: brief.source_root } : undefined;
     const timeoutMs = (brief.timeout_s ?? 900) * 1000;
-    const r = spawnSync('claude', args, { cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs });
+    const r = spawnSync('claude', args, { cwd: brief.cwd, stdio: 'pipe', timeout: timeoutMs, env });
 
     writeFileSync(logPath, (r.stdout ?? '').toString() + (r.stderr ?? '').toString());
 
