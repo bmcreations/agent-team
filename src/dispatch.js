@@ -31,17 +31,27 @@ async function readCapabilities(adapterDir, agent, env) {
 
 export async function dispatch({
   projectRoot, member, task, adapterDir, assignments = {},
-  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, preresolved = null
+  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, preresolved = null,
+  expectChanges = false
 }) {
   const config = loadConfig(projectRoot);
   const budget = { runs: config.defaults.max_delegations };
   const startedAt = new Date();
   try {
-    const result = await runMember({
+    let result = await runMember({
       config, projectRoot, member, task, adapterDir,
       assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0,
       teams: teamKeys(projectRoot), originRoot: projectRoot, preresolved
     });
+    // A manager that answers without delegating, or a tree of read-only members, changes
+    // nothing and can still end ok. Only the caller knows a change was wanted.
+    if (expectChanges && result.status === 'ok' && !treeChanged(result)) {
+      result = {
+        ...result, status: 'failed',
+        summary: `the run was expected to change something (--expect-changes), but no member ` +
+          `in it produced a diff. Summary: ${result.summary ?? ''}`
+      };
+    }
     recordRun(projectRoot, startedAt, task, runNode(result));
     return result;
   } catch (err) {
@@ -408,6 +418,30 @@ function unearnedOk(result, { member, deliverable, workspace, priorResults }) {
   return result;
 }
 
+// Replaces each of `roots` in `text` with `dir` where it stands as a whole path: followed by
+// the end, a "/", or a character that cannot continue a path segment.
+export function retargetPaths(text, roots, dir) {
+  if (typeof text !== 'string') return text;
+  let out = text;
+  for (const root of roots) {
+    if (!root) continue;
+    const esc = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`${esc}(?=$|[/\\s'"\`)\\],;:])`, 'g'), () => dir);
+  }
+  return out;
+}
+
+// A run asked to change something (--expect-changes) is ok only if some member in its tree
+// shows a change: a non-empty diff, or an ok cloud or session member, whose change lands on a
+// branch or in a live session this process cannot diff.
+export function treeChanged(node) {
+  if (!node) return false;
+  const diff = node.artifacts?.diff;
+  if (typeof diff === 'string' && diff !== '') return true;
+  if (node.status === 'ok' && (node.cloud || node.session)) return true;
+  return (node.delegated ?? []).some(treeChanged);
+}
+
 export async function runMember({ preresolved = null, ...ctx }) {
   const { config, projectRoot, member, adapterDir, assignments,
           skillsDir, env, timeoutMs, budget, depth, parentClone = null } = ctx;
@@ -427,8 +461,15 @@ export async function runMember({ preresolved = null, ...ctx }) {
   // its absolute path. A workspace report given ".../lead-694dda/greeting.txt" edited the
   // read-only lead's clone, left its own unchanged, and the change was pruned with the lead.
   // When both are clones of the same checkout, the path is moved onto this member's clone.
-  const task = parentClone && sourceRoot && parentClone.sourceRoot === sourceRoot
-    ? ctx.task.split(parentClone.dir).join(workspace.dir)
+  // A task can name the real checkout too, by the path its writer worked in. A workspace
+  // member in auto mode would edit that checkout instead of its clone, so the checkout's path
+  // is moved onto the clone as well, only where it stands as a whole path ("/repo" or
+  // "/repo/..."), never inside a longer one ("/repo-other").
+  const task = sourceRoot
+    ? retargetPaths(ctx.task, [
+        ...(parentClone && parentClone.sourceRoot === sourceRoot ? [parentClone.dir] : []),
+        sourceRoot
+      ], workspace.dir)
     : ctx.task;
   const maxDepth = config.defaults.max_depth;
   const delegated = [];

@@ -25,8 +25,12 @@ as rejected options and the reasons, so the team does not ask again.
 ## Step 3 — dispatch
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/bin/agent-team.js" --member <member> --task "<task>"
+node "${CLAUDE_PLUGIN_ROOT}/bin/agent-team.js" --member <member> --task "<task>" [--expect-changes]
 ```
+
+Add `--expect-changes` when the task asks for code to be written or changed (a fix, a feature,
+a PR). The run is then reported `failed` if no member in it produced a diff, instead of `ok` from
+a team that only planned. Leave it off for reviews, research and questions.
 
 ## Step 4 — report
 

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dispatch } from '../src/dispatch.js';
+import { dispatch, retargetPaths } from '../src/dispatch.js';
 import { readRuns } from '../src/report.js';
 
 // Recursively collects every path anywhere under `root` whose own name contains
@@ -161,6 +161,48 @@ test('a task naming the manager\'s clone by path reaches the report with its own
   const sub = r.delegated[0];
   assert.match(sub.received.task, new RegExp(`edit ${sub.workspace.dir}/app\\.js`));
   assert.ok(!sub.received.task.includes(r.workspace.dir), 'the lead\'s clone path must not reach the report');
+});
+
+test('a task naming the real checkout reaches a cloned member with its own clone instead', async () => {
+  const { root, script } = project({});
+  writeFileSync(script, JSON.stringify({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: `edit ${root}/app.js` }] },
+        { status: 'ok', summary: 'done' }
+      ],
+      implementer: { status: 'ok', summary: 'edited', artifacts: { diff: 'x' } }
+    }
+  }));
+  const r = await run(root, script, 'eng-lead', { task: `plan the change to ${root}/app.js` });
+  assert.match(r.received.task, new RegExp(`plan the change to ${r.workspace.dir}/app\\.js`));
+  const sub = r.delegated[0];
+  assert.match(sub.received.task, new RegExp(`edit ${sub.workspace.dir}/app\\.js`));
+  assert.ok(!sub.received.task.includes(`${root}/`), 'the real checkout\'s path must not reach the report');
+});
+
+test('retargetPaths moves only whole paths', () => {
+  assert.equal(retargetPaths('/r and /r/a.js and /r-other/b and "/r"', ['/r'], '/c'),
+    '/c and /c/a.js and /r-other/b and "/c"');
+});
+
+test('--expect-changes fails an ok run whose tree produced no diff', async () => {
+  const quiet = project({ by_member: { 'eng-lead': { status: 'ok', summary: 'planned it' } } });
+  const r = await run(quiet.root, quiet.script, 'eng-lead', { expectChanges: true });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /expected to change something.*Summary: planned it/);
+  assert.equal((await run(quiet.root, quiet.script, 'eng-lead')).status, 'ok', 'without the flag it stays ok');
+
+  const changed = project({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'x' }] },
+        { status: 'ok', summary: 'shipped' }
+      ],
+      implementer: { status: 'ok', summary: 'edited', artifacts: { diff: 'diff --git a/app.js' } }
+    }
+  });
+  assert.equal((await run(changed.root, changed.script, 'eng-lead', { expectChanges: true })).status, 'ok');
 });
 
 test('a manager\'s brief says which reports can edit files', async () => {

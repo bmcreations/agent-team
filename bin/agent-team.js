@@ -41,6 +41,7 @@ const { values, positionals, tokens } = parseArgs({
     help: { type: 'boolean', short: 'h', default: false },
     project: { type: 'string', default: process.cwd() },
     timeout: { type: 'string' },
+    'expect-changes': { type: 'boolean', default: false },
     session: { type: 'string' },
     all: { type: 'boolean', default: false },
     json: { type: 'boolean', default: false }
@@ -48,7 +49,7 @@ const { values, positionals, tokens } = parseArgs({
 });
 
 const USAGE =
-  'usage: agent-team --member <member> --task <text> [--project <dir>] [--timeout <sec>]\n' +
+  'usage: agent-team --member <member> --task <text> [--project <dir>] [--timeout <sec>] [--expect-changes]\n' +
   '       agent-team org [--project <dir>]\n' +
   '       agent-team report [--project <dir>] [--all] [--json]\n' +
   '       agent-team channel enable|disable [--project <dir>]\n' +
@@ -161,6 +162,7 @@ try {
     adapterDir: join(ROOT, 'adapters'),
     skillsDir: join(ROOT, 'skills'),
     timeoutMs: values.timeout == null ? undefined : Number(values.timeout) * 1000,
+    expectChanges: values['expect-changes'],
     values
   };
   const result = (await routeDelegation(extensions, opts, { dispatch })) ?? await dispatch(opts);
