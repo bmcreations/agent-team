@@ -419,26 +419,28 @@ function unearnedOk(result, { member, deliverable, workspace, priorResults }) {
 }
 
 // Replaces each of `roots` in `text` with `dir` where it stands as a whole path: followed by
-// the end, a "/", or a character that cannot continue a path segment.
+// the end, a "/", a character that cannot continue a path segment, or a "." that ends a
+// sentence (followed by the end or whitespace, so "/repo.bak" is left alone).
 export function retargetPaths(text, roots, dir) {
   if (typeof text !== 'string') return text;
   let out = text;
   for (const root of roots) {
     if (!root) continue;
     const esc = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`${esc}(?=$|[/\\s'"\`)\\],;:])`, 'g'), () => dir);
+    out = out.replace(new RegExp(`${esc}(?=$|[/\\s'"\`)\\],;:]|\\.(?:$|\\s))`, 'g'), () => dir);
   }
   return out;
 }
 
 // A run asked to change something (--expect-changes) is ok only if some member in its tree
-// shows a change: a non-empty diff, or an ok cloud or session member, whose change lands on a
-// branch or in a live session this process cannot diff.
+// shows a change: a non-empty diff, an ok cloud member that pushes a branch, or an ok session
+// member, whose change lands in a live session this process cannot diff. A read-only cloud
+// member pushes nothing, so it counts as no change.
 export function treeChanged(node) {
   if (!node) return false;
   const diff = node.artifacts?.diff;
   if (typeof diff === 'string' && diff !== '') return true;
-  if (node.status === 'ok' && (node.cloud || node.session)) return true;
+  if (node.status === 'ok' && (node.cloud?.push_branch || node.session)) return true;
   return (node.delegated ?? []).some(treeChanged);
 }
 

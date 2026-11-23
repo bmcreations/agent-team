@@ -56,6 +56,7 @@ delegation and reports `delegating`, `failed` for a malformed one, or `ok`. The 
 | `source_root` | `REFLECT_ROOT` in claude's environment; see [Lessons for Claude members](how-it-works.md#lessons-for-claude-members) |
 | `read_only` | `--permission-mode dontAsk --disallowedTools Edit Write NotebookEdit`. Bash commands that would prompt are refused; read-only ones run. |
 | otherwise | `--permission-mode <permission_mode>`, default `auto` |
+| `allowed_tools` | `--allowedTools <rule>...`, added to either mode above |
 
 Binary: `claude` from `PATH`. There is no override variable.
 

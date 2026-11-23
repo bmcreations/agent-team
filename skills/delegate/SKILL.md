@@ -30,7 +30,8 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/agent-team.js" --member <member> --task "<task>"
 
 Add `--expect-changes` when the task asks for code to be written or changed (a fix, a feature,
 a PR). The run is then reported `failed` if no member in it produced a diff, instead of `ok` from
-a team that only planned. Leave it off for reviews, research and questions.
+a team that only planned. Leave it off for reviews, research and questions, and for a run that should stop to ask the
+user to choose between options.
 
 ## Step 4 — report
 

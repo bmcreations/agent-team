@@ -93,7 +93,9 @@ instead. `none`, cloud and live-session members have no clone, so they get no `s
 A cloned member's task has that checkout's path, and its manager's clone path, rewritten to its
 own clone wherever either stands as a whole path (`/repo` or `/repo/...`, not `/repo-other`).
 A task written from the real checkout or from a manager's clone would otherwise send a
-`workspace` member's edits there instead of into the clone whose diff is reported.
+`workspace` member's edits there instead of into the clone whose diff is reported. The rewrite
+also applies to read-only members. A path to a file that is untracked or uncommitted in the
+checkout then points into a clone that lacks it, so commit what a member needs first.
 
 No other adapter sets it. agent-team treats anything a non-Claude member can read as sent to that
 member's vendor, which is why `deny_paths` exists, and reflection entries often hold internal
@@ -108,7 +110,7 @@ clone.
 | `status: "ok"` | Deleted, including for `workspace` members. The change survives only as `artifacts.diff` in the result. |
 | `failed` or `timeout` | Kept, and its path returned in `workspace.dir` for you to inspect. |
 | `ok` from the adapter, but nothing to show for it | Reported `failed` and kept. That covers a local `workspace` member whose `artifacts.diff` came back readable and empty, and a manager whose last round of reports held one that did not finish `ok`. The member's own summary follows the reason. |
-| `ok` for the whole run under `--expect-changes`, but no member in the tree produced a diff | Reported `failed`. An `ok` cloud or session member counts as a change, since its work lands where this process cannot diff it. Without the flag, a manager that answers without delegating stays `ok`. |
+| `ok` for the whole run under `--expect-changes`, but no member in the tree produced a diff | Reported `failed`. An `ok` session member, or an `ok` cloud member that pushes a branch, counts as a change, since its work lands where this process cannot diff it. Without the flag, a manager that answers without delegating stays `ok`. A run that ends `ok` only to ask the user to pick between options also fails under the flag. |
 | The dispatcher throws, such as a delegation outside the reporting line | Deleted, then the error is reported. |
 
 ## The brief

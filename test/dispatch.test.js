@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dispatch, retargetPaths } from '../src/dispatch.js';
+import { dispatch, retargetPaths, treeChanged } from '../src/dispatch.js';
 import { readRuns } from '../src/report.js';
 
 // Recursively collects every path anywhere under `root` whose own name contains
@@ -184,6 +184,17 @@ test('a task naming the real checkout reaches a cloned member with its own clone
 test('retargetPaths moves only whole paths', () => {
   assert.equal(retargetPaths('/r and /r/a.js and /r-other/b and "/r"', ['/r'], '/c'),
     '/c and /c/a.js and /r-other/b and "/c"');
+  assert.equal(retargetPaths('Edit the files in /r. Then /r.bak stays, and so does /r.js.', ['/r'], '/c'),
+    'Edit the files in /c. Then /r.bak stays, and so does /r.js.');
+  assert.equal(retargetPaths('Work in /r.', ['/r'], '/c'), 'Work in /c.');
+});
+
+test('treeChanged counts a cloud member only when it pushes a branch', () => {
+  assert.equal(treeChanged({ status: 'ok', cloud: { push_branch: null } }), false, 'read-only cloud member');
+  assert.equal(treeChanged({ status: 'ok', cloud: { push_branch: 'agent-team/w-1' } }), true);
+  assert.equal(treeChanged({ status: 'failed', cloud: { push_branch: 'agent-team/w-1' } }), false);
+  assert.equal(treeChanged({ status: 'ok', delegated: [{ delegated: [{ artifacts: { diff: 'd' } }] }] }), true,
+    'a diff anywhere in the tree counts');
 });
 
 test('--expect-changes fails an ok run whose tree produced no diff', async () => {
@@ -688,6 +699,27 @@ test('a manager delegates to another team, which runs under its own config', asy
   assert.equal(r.received.source_root, app.root);
 
   assert.match(r.received.task, /ios button added/);
+});
+
+test('--expect-changes sees a diff made inside another team', async () => {
+  const script = (worker) => ({
+    by_member: {
+      lead: [
+        { status: 'delegating', delegations: [{ to: 'ios', task: 'add the button' }] },
+        { status: 'ok', summary: 'done' }
+      ],
+      'ios-lead': [
+        { status: 'delegating', delegations: [{ to: 'ios-worker', task: 'edit the view' }] },
+        { status: 'ok', summary: 'ios done' }
+      ],
+      'ios-worker': worker
+    }
+  });
+  const changed = teams(script({ status: 'ok', summary: 'edited', artifacts: { diff: 'diff --git a/View.swift' } }));
+  assert.equal((await run(changed.app.root, changed.app.script, 'lead', { expectChanges: true })).status, 'ok');
+
+  const quiet = teams(script({ status: 'ok', summary: 'looked' }));
+  assert.equal((await run(quiet.app.root, quiet.app.script, 'lead', { expectChanges: true })).status, 'failed');
 });
 
 test('a manager\'s brief says which report is another team', async () => {

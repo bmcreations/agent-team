@@ -42,6 +42,20 @@ function runCli(args) {
   );
 }
 
+test('--expect-changes turns an ok run with no diff into exit 1', async () => {
+  const root = project(GOOD);
+  const script = join(root, 'mock.json');
+  writeFileSync(script, JSON.stringify({ status: 'ok', summary: 'planned it' }));
+  const env = { ...process.env, XDG_CACHE_HOME: CACHE, AGENT_TEAM_MOCK_SCRIPT: script };
+  const cli = (extra) => execFileAsync(process.execPath,
+    [BIN, '--member', 'coo', '--task', 'go', '--project', root, ...extra], { env }).then(
+    (r) => ({ code: 0, stdout: r.stdout }), (e) => ({ code: e.code, stdout: e.stdout ?? '' }));
+  const flagged = await cli(['--expect-changes']);
+  assert.equal(flagged.code, 1);
+  assert.equal(JSON.parse(flagged.stdout).status, 'failed');
+  assert.equal((await cli([])).code, 0, 'without the flag the same run is ok');
+});
+
 test('an unknown --member gives exit 1 and parseable JSON on stdout naming the member', async () => {
   const root = project(GOOD);
   const { code, stdout, stderr } = await runCli([

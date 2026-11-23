@@ -139,7 +139,12 @@ its permission rule in the member's `allowed_tools`, which the claude adapter pa
 
 The rules add to your own allowlist and do not change the mode. The loader refuses an editing
 tool (`Edit`, `Write`, `NotebookEdit`) in a read-only member's list, and `allowed_tools` on a
-`none` member, which has no clone to run in. Codex and grok members ignore it.
+`none` member, which has no clone to run in. It also refuses a rule that allows every Bash
+command (`Bash`, `Bash(*)`) on a read-only member. Codex and grok members ignore it.
+
+Another team's config is trusted the same way as its `permission_mode`: a team you delegate to
+can widen its own read-only members' commands, and those commands run on this machine. Delegate
+only to teams whose config you would run yourself.
 
 If claude refuses any of a workspace member's tool calls, the run reports
 `status: "failed"` with the refused tools in `permission_denials`, and the workspace is kept.

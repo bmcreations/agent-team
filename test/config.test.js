@@ -704,6 +704,15 @@ test('allowed_tools may not give a read-only member an editing tool', () => {
   assert.throws(() => loadConfig(root), /"allowed_tools" names Edit/);
 });
 
+test('allowed_tools may not give a read-only member every Bash command', () => {
+  for (const rule of ['Bash', 'Bash(*)', 'Bash(:*)', ' Bash ( * ) ']) {
+    const root = memberProject('a', { isolation: 'read-only', allowed_tools: [rule] });
+    assert.throws(() => loadConfig(root), /allows every command/, rule);
+  }
+  const ws = memberProject('a', { isolation: 'workspace', allowed_tools: ['Bash'] });
+  assert.deepEqual(loadConfig(ws).members.a.allowed_tools, ['Bash'], 'a workspace member may');
+});
+
 test('allowed_tools is refused on an isolation "none" member', () => {
   const root = memberProject('a', { isolation: 'none', allowed_tools: ['Bash(ls:*)'] });
   assert.throws(() => loadConfig(root), /"allowed_tools" needs a clone/);

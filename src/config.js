@@ -452,6 +452,15 @@ export function parseConfig(raw, path) {
           'read-only member never gets the editing tools — use isolation "workspace"'
         );
       }
+      // A bare "Bash" (or "Bash(*)"/"Bash(:*)") allows every command, writes included, so a
+      // read-only member would be read-only in name only. Name the commands instead.
+      const anyBash = m.allowed_tools.filter((t) => /^Bash\s*(\(\s*:?\*\s*\))?$/.test(t.trim()));
+      if (isolation === 'read-only' && anyBash.length > 0) {
+        throw new Error(
+          `${path}: member "${name}": "allowed_tools" names ${anyBash.join(', ')}, which allows ` +
+          'every command, writes included — name the commands, e.g. "Bash(npm test:*)"'
+        );
+      }
     }
     // A cloud session has no local directory to stand for "none", and its clone is the repo.
     if (m.agent === CLOUD_AGENT && isolation === 'none') {
