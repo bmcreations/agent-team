@@ -382,13 +382,14 @@ export function prepareMember(ctx, { resolved, caps }, { workspace: given = null
 // An `ok` a member's own answer cannot earn, read from facts and never from its prose:
 // - a local workspace member whose diff came back readable and empty changed nothing, so its
 //   workspace is kept and it fails. Only an adapter that reports artifacts.diff is judged;
-//   a cloud member pushes to a branch and reports no diff here.
+//   a cloud member pushes to a branch and reports no diff here. A workspace member whose
+//   deliverable is not "diff" (a review written from a clone it may build in) is not judged.
 // - a manager whose last round of reports holds one that did not finish ok cannot vouch for
 //   the whole. It still answered, so its summary is kept after the reports' names.
-function unearnedOk(result, { member, workspace, priorResults }) {
+function unearnedOk(result, { member, deliverable, workspace, priorResults }) {
   if (result.status !== 'ok') return result;
   const art = result.artifacts;
-  if (workspace.kind === 'workspace' && art && typeof art.diff === 'string' &&
+  if (workspace.kind === 'workspace' && deliverable === 'diff' && art && typeof art.diff === 'string' &&
       art.diff === '' && art.diff_unreadable !== true) {
     return {
       ...result, status: 'failed',
@@ -504,7 +505,9 @@ export async function runMember({ preresolved = null, ...ctx }) {
       }));
     }
 
-    result = unearnedOk(result, { member, workspace, priorResults });
+    result = unearnedOk(result, {
+      member, deliverable: config.members[member]?.deliverable, workspace, priorResults
+    });
     if (result.status === 'ok') pruneWorkspace(workspace);
 
     return {

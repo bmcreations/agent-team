@@ -109,6 +109,10 @@ test('an empty diff is not judged when it was unreadable, or for a read-only mem
   assert.equal((await run(unreadable.root, unreadable.script, 'implementer')).status, 'ok');
   const readOnly = project({ status: 'ok', summary: 's', artifacts: { diff: '' } });
   assert.equal((await run(readOnly.root, readOnly.script, 'reviewer')).status, 'ok');
+  const review = project({ status: 'ok', summary: 's', artifacts: { diff: '' } }, {
+    members: { ...TEAM, implementer: { ...TEAM.implementer, deliverable: 'review' } }
+  });
+  assert.equal((await run(review.root, review.script, 'implementer')).status, 'ok');
 });
 
 test('a manager that ends ok over a report that failed is reported failed', async () => {
