@@ -102,6 +102,7 @@ clone.
 |---|---|
 | `status: "ok"` | Deleted, including for `workspace` members. The change survives only as `artifacts.diff` in the result. |
 | `failed` or `timeout` | Kept, and its path returned in `workspace.dir` for you to inspect. |
+| `ok` from the adapter, but nothing to show for it | Reported `failed` and kept. That covers a local `workspace` member whose `artifacts.diff` came back readable and empty, and a manager whose last round of reports held one that did not finish `ok`. The member's own summary follows the reason. |
 | The dispatcher throws, such as a delegation outside the reporting line | Deleted, then the error is reported. |
 
 ## The brief

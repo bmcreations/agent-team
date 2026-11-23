@@ -96,6 +96,76 @@ test('a member that binds a skill with no skillsDir provided is refused, not sil
   );
 });
 
+test('a workspace member that ends ok with an empty diff fails and keeps its workspace', async () => {
+  const { root, script } = project({ status: 'ok', summary: 'all done', artifacts: { diff: '' } });
+  const r = await run(root, script, 'implementer');
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /no changes \(empty diff\)\. Member summary: all done/);
+  assert.equal(existsSync(r.workspace.dir), true, 'the workspace is kept for inspection');
+});
+
+test('an empty diff is not judged when it was unreadable, or for a read-only member', async () => {
+  const unreadable = project({ status: 'ok', summary: 's', artifacts: { diff: '', diff_unreadable: true } });
+  assert.equal((await run(unreadable.root, unreadable.script, 'implementer')).status, 'ok');
+  const readOnly = project({ status: 'ok', summary: 's', artifacts: { diff: '' } });
+  assert.equal((await run(readOnly.root, readOnly.script, 'reviewer')).status, 'ok');
+});
+
+test('a manager that ends ok over a report that failed is reported failed', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'x' }, { to: 'reviewer', task: 'y' }] },
+        { status: 'ok', summary: 'shipped' }
+      ],
+      implementer: { status: 'failed', summary: 'could not edit' },
+      reviewer: { status: 'ok', summary: 'fine' }
+    }
+  });
+  const r = await run(root, script, 'eng-lead');
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /did not finish ok: implementer \(failed\)\. Member summary: shipped/);
+});
+
+test('a manager whose retry round succeeds after a failed report stays ok', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'x' }] },
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'x again' }] },
+        { status: 'ok', summary: 'shipped' }
+      ],
+      implementer: [{ status: 'failed', summary: 'flaked' }, { status: 'ok', summary: 'edited' }]
+    }
+  });
+  const r = await run(root, script, 'eng-lead');
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.delegated.map((d) => d.status), ['failed', 'ok']);
+});
+
+test('a task naming the manager\'s clone by path reaches the report with its own clone instead', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'edit {cwd}/app.js' }] },
+        { status: 'ok', summary: 'done' }
+      ],
+      implementer: { status: 'ok', summary: 'edited', artifacts: { diff: 'x' } }
+    }
+  });
+  const r = await run(root, script, 'eng-lead');
+  const sub = r.delegated[0];
+  assert.match(sub.received.task, new RegExp(`edit ${sub.workspace.dir}/app\\.js`));
+  assert.ok(!sub.received.task.includes(r.workspace.dir), 'the lead\'s clone path must not reach the report');
+});
+
+test('a manager\'s brief says which reports can edit files', async () => {
+  const { root, script } = project({ by_member: { 'eng-lead': { status: 'ok', summary: 's' } } });
+  const r = await run(root, script, 'eng-lead');
+  assert.match(r.received.task, /^- implementer: Can edit files\.$/m);
+  assert.doesNotMatch(r.received.task, /- reviewer:/);
+});
+
 test('a failed run KEEPS the workspace for inspection', async () => {
   const { root, script } = project({ status: 'failed', summary: 'exploded' });
   const r = await run(root, script, 'implementer');

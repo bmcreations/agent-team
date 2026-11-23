@@ -57,7 +57,8 @@ export function resolveMember(config, name, { probe, assignments = {} } = {}) {
     reports_to: member.reports_to ?? null,
     reports: directReports(config.org, name),
     report_details: directReports(config.org, name).map((r) => ({
-      name: r, charter: config.members[r].charter ?? null, team: config.members[r].team ?? null
+      name: r, charter: config.members[r].charter ?? null, team: config.members[r].team ?? null,
+      isolation: config.members[r].isolation ?? null
     })),
     warning
   };

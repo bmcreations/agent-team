@@ -410,7 +410,8 @@ export function parseConfig(raw, path) {
     }
     // permission_mode becomes adapters/claude's --permission-mode for a workspace member
     // (auto when unset). Only its type is checked, since the CLI's list of modes changes.
-    // Read-only and "none" members always run in plan mode, so setting it there is refused
+    // Read-only and "none" members always run in dontAsk with the editing tools removed, so
+    // setting it there is refused
     // rather than silently ignored. Like advisor, codex and grok members may carry it for
     // the on_unavailable fallback to claude.
     if (m.permission_mode !== undefined && m.permission_mode !== null) {
@@ -423,7 +424,7 @@ export function parseConfig(raw, path) {
       if (isolation !== 'workspace') {
         throw new Error(
           `${path}: member "${name}": "permission_mode" only applies to isolation "workspace"; ` +
-          `an isolation "${isolation}" member always runs in plan mode`
+          `an isolation "${isolation}" member always runs read-only (dontAsk, no editing tools)`
         );
       }
     }

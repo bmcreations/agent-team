@@ -378,9 +378,38 @@ export function prepareMember(ctx, { resolved, caps }, { workspace: given = null
 
 // `preresolved` is the caller's resolveCaps() result for this member; it is taken out of ctx
 // so reports and team entries, which spread ctx, resolve their own.
+//
+// An `ok` a member's own answer cannot earn, read from facts and never from its prose:
+// - a local workspace member whose diff came back readable and empty changed nothing, so its
+//   workspace is kept and it fails. Only an adapter that reports artifacts.diff is judged;
+//   a cloud member pushes to a branch and reports no diff here.
+// - a manager whose last round of reports holds one that did not finish ok cannot vouch for
+//   the whole. It still answered, so its summary is kept after the reports' names.
+function unearnedOk(result, { member, workspace, priorResults }) {
+  if (result.status !== 'ok') return result;
+  const art = result.artifacts;
+  if (workspace.kind === 'workspace' && art && typeof art.diff === 'string' &&
+      art.diff === '' && art.diff_unreadable !== true) {
+    return {
+      ...result, status: 'failed',
+      summary: `member "${member}" ended ok but its workspace has no changes (empty diff). ` +
+        `Member summary: ${result.summary ?? ''}`
+    };
+  }
+  const notOk = (priorResults ?? []).filter((r) => r.status !== 'ok');
+  if (notOk.length > 0) {
+    return {
+      ...result, status: 'failed',
+      summary: `report(s) did not finish ok: ${notOk.map((r) => `${r.member} (${r.status})`).join(', ')}. ` +
+        `Member summary: ${result.summary ?? ''}`
+    };
+  }
+  return result;
+}
+
 export async function runMember({ preresolved = null, ...ctx }) {
-  const { config, projectRoot, member, task, adapterDir, assignments,
-          skillsDir, env, timeoutMs, budget, depth } = ctx;
+  const { config, projectRoot, member, adapterDir, assignments,
+          skillsDir, env, timeoutMs, budget, depth, parentClone = null } = ctx;
 
   const spec = config.members[member];
   if (spec?.team) return runTeam(ctx, spec);
@@ -393,6 +422,13 @@ export async function runMember({ preresolved = null, ...ctx }) {
   // Cloud, session and none members have no clone here, and a GitHub-named team no checkout.
   const sourceRoot = projectRoot && (workspace.kind === 'read-only' || workspace.kind === 'workspace')
     ? resolve(projectRoot) : null;
+  // A manager writes its task from inside its own clone, so the task can name that clone by
+  // its absolute path. A workspace report given ".../lead-694dda/greeting.txt" edited the
+  // read-only lead's clone, left its own unchanged, and the change was pruned with the lead.
+  // When both are clones of the same checkout, the path is moved onto this member's clone.
+  const task = parentClone && sourceRoot && parentClone.sourceRoot === sourceRoot
+    ? ctx.task.split(parentClone.dir).join(workspace.dir)
+    : ctx.task;
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;
@@ -457,7 +493,8 @@ export async function runMember({ preresolved = null, ...ctx }) {
           );
         }
         const sub = await runMember({
-          ...ctx, member: req.to, task: req.task, depth: depth + 1, priorResults: null
+          ...ctx, member: req.to, task: req.task, depth: depth + 1, priorResults: null,
+          parentClone: sourceRoot ? { dir: workspace.dir, sourceRoot } : null
         });
         round.push(sub);
         delegated.push(sub);
@@ -467,6 +504,7 @@ export async function runMember({ preresolved = null, ...ctx }) {
       }));
     }
 
+    result = unearnedOk(result, { member, workspace, priorResults });
     if (result.status === 'ok') pruneWorkspace(workspace);
 
     return {

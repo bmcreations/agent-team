@@ -675,12 +675,12 @@ test('an empty-string permission_mode is refused', () => {
   assert.throws(() => loadConfig(root), /"permission_mode"/);
 });
 
-test('permission_mode is refused on a read-only member, which always runs in plan mode', () => {
+test('permission_mode is refused on a read-only member, which always runs read-only', () => {
   const root = memberProject('a', { isolation: 'read-only', permission_mode: 'auto' });
   assert.throws(() => loadConfig(root), /"permission_mode".*workspace/);
 });
 
-test('permission_mode is refused on an isolation "none" member, which also runs in plan mode', () => {
+test('permission_mode is refused on an isolation "none" member, which also runs read-only', () => {
   const root = memberProject('a', { isolation: 'none', permission_mode: 'auto' });
   assert.throws(() => loadConfig(root), /"permission_mode".*workspace/);
 });

@@ -123,7 +123,10 @@ Sets `--permission-mode` for a claude member with `isolation: "workspace"`. It d
 no mode cannot edit its clone. `acceptEdits` allows file edits but no shell commands.
 
 The loader refuses `permission_mode` on `read-only` and `none` members, which always run in
-`plan`. If claude refuses any of a workspace member's tool calls, the run reports
+`dontAsk` without the Edit, Write and NotebookEdit tools, so a Bash command that would change
+something is refused unless your own allowlist names it. They do not run in `plan`: plan mode let
+Bash writes through, and read-only managers took it as a reason to wait for approval instead of
+delegating. If claude refuses any of a workspace member's tool calls, the run reports
 `status: "failed"` with the refused tools in `permission_denials`, and the workspace is kept.
 
 ### Other teams

@@ -29,16 +29,19 @@ export function loadDialect(dialect) {
   return existsSync(resolvedPath) ? readFileSync(resolvedPath, 'utf8') : null;
 }
 
-// One line per report that has something to say: its charter, and for another team, that
-// the task goes to that team's lead, who splits it among its own members.
+// One line per report that has something to say: its charter, whether it can edit files, and
+// for another team, that the task goes to that team's lead, who splits it among its own
+// members. A read-only lead in plan mode once wrote a plan and asked for approval instead of
+// sending the edits to its workspace report, so the line says who can make them.
 function reportLines(details) {
   return details
-    .filter((d) => d.charter || d.team)
+    .filter((d) => d.charter || d.team || d.isolation === 'workspace')
     .map((d) => {
       const team = d.team
         ? `Another team, in ${d.team}. Its lead gets your task and splits it among that team's members.`
         : null;
-      return `- ${d.name}: ${[d.charter, team].filter(Boolean).join(' ')}`;
+      const edits = d.isolation === 'workspace' ? 'Can edit files.' : null;
+      return `- ${d.name}: ${[d.charter, edits, team].filter(Boolean).join(' ')}`;
     });
 }
 
