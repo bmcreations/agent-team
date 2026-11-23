@@ -35,6 +35,16 @@ if (sub === 'probe') {
     picked = entry;
   }
 
+  // "{cwd}" in a scripted delegation's task becomes this run's cwd, as a real manager names
+  // files by the absolute path of its own clone.
+  if (Array.isArray(picked.delegations)) {
+    picked = {
+      ...picked,
+      delegations: picked.delegations.map((d) => (d && typeof d.task === 'string')
+        ? { ...d, task: d.task.split('{cwd}').join(brief.cwd) } : d)
+    };
+  }
+
   if (picked.hang) {
     // never exits; the caller's timeout has to kill the process group. Task 8 exercises this.
     setInterval(() => {}, 1000);

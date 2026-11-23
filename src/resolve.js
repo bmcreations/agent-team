@@ -46,6 +46,7 @@ export function resolveMember(config, name, { probe, assignments = {} } = {}) {
     effort: member.effort ?? null,
     advisor: member.advisor ?? null,
     permission_mode: member.permission_mode ?? null,
+    allowed_tools: member.allowed_tools ?? [],
     cloud_allow_denied: member.cloud_allow_denied === true,
     session_id: member.session_id ?? null,
     skill: member.skill ?? null,
@@ -57,7 +58,8 @@ export function resolveMember(config, name, { probe, assignments = {} } = {}) {
     reports_to: member.reports_to ?? null,
     reports: directReports(config.org, name),
     report_details: directReports(config.org, name).map((r) => ({
-      name: r, charter: config.members[r].charter ?? null, team: config.members[r].team ?? null
+      name: r, charter: config.members[r].charter ?? null, team: config.members[r].team ?? null,
+      isolation: config.members[r].isolation ?? null
     })),
     warning
   };

@@ -410,7 +410,8 @@ export function parseConfig(raw, path) {
     }
     // permission_mode becomes adapters/claude's --permission-mode for a workspace member
     // (auto when unset). Only its type is checked, since the CLI's list of modes changes.
-    // Read-only and "none" members always run in plan mode, so setting it there is refused
+    // Read-only and "none" members always run in dontAsk with the editing tools removed, so
+    // setting it there is refused
     // rather than silently ignored. Like advisor, codex and grok members may carry it for
     // the on_unavailable fallback to claude.
     if (m.permission_mode !== undefined && m.permission_mode !== null) {
@@ -423,7 +424,41 @@ export function parseConfig(raw, path) {
       if (isolation !== 'workspace') {
         throw new Error(
           `${path}: member "${name}": "permission_mode" only applies to isolation "workspace"; ` +
-          `an isolation "${isolation}" member always runs in plan mode`
+          `an isolation "${isolation}" member always runs read-only (dontAsk, no editing tools)`
+        );
+      }
+    }
+    // allowed_tools becomes adapters/claude's --allowedTools: permission rules such as
+    // "Bash(npm test:*)" that let a read-only reviewer run a command dontAsk would refuse.
+    // The editing tools stay removed for a read-only member, so naming one is refused, and an
+    // isolation "none" member has no clone for a command to run in.
+    if (m.allowed_tools !== undefined && m.allowed_tools !== null) {
+      if (!Array.isArray(m.allowed_tools) ||
+          m.allowed_tools.some((t) => typeof t !== 'string' || t.trim() === '')) {
+        throw new Error(
+          `${path}: member "${name}": "allowed_tools" must be a list of non-empty strings — got ` +
+          `${JSON.stringify(m.allowed_tools)}`
+        );
+      }
+      if (isolation === 'none') {
+        throw new Error(
+          `${path}: member "${name}": "allowed_tools" needs a clone to run in; isolation "none" has none`
+        );
+      }
+      const editing = m.allowed_tools.filter((t) => /^(Edit|Write|NotebookEdit)\b/.test(t.trim()));
+      if (isolation === 'read-only' && editing.length > 0) {
+        throw new Error(
+          `${path}: member "${name}": "allowed_tools" names ${editing.join(', ')}, but a ` +
+          'read-only member never gets the editing tools — use isolation "workspace"'
+        );
+      }
+      // A bare "Bash" (or "Bash(*)"/"Bash(:*)") allows every command, writes included, so a
+      // read-only member would be read-only in name only. Name the commands instead.
+      const anyBash = m.allowed_tools.filter((t) => /^Bash\s*(\(\s*:?\*\s*\))?$/.test(t.trim()));
+      if (isolation === 'read-only' && anyBash.length > 0) {
+        throw new Error(
+          `${path}: member "${name}": "allowed_tools" names ${anyBash.join(', ')}, which allows ` +
+          'every command, writes included — name the commands, e.g. "Bash(npm test:*)"'
         );
       }
     }

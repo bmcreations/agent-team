@@ -112,7 +112,7 @@ test('source_root reaches claude as REFLECT_ROOT, and a brief without it sets no
   assert.equal(without.reflect_root, null);
 });
 
-test('a read_only brief passes --permission-mode plan, and a writable one passes its permission_mode or auto', () => {
+test('a read_only brief passes --permission-mode dontAsk without the editing tools, and a writable one passes its permission_mode or auto', () => {
   const baseResolved = {
     member: 'lead',
     title: 'Lead',
@@ -139,7 +139,12 @@ test('a read_only brief passes --permission-mode plan, and a writable one passes
   const roRecord = runAdapterAgainstStub(roBrief);
   const roPmIndex = roRecord.argv.indexOf('--permission-mode');
   assert.notEqual(roPmIndex, -1, 'read-only argv must contain --permission-mode');
-  assert.equal(roRecord.argv[roPmIndex + 1], 'plan');
+  // Not plan: plan mode let Bash writes through and told managers to wait for approval.
+  assert.equal(roRecord.argv[roPmIndex + 1], 'dontAsk');
+  const roDenied = roRecord.argv.indexOf('--disallowedTools');
+  assert.notEqual(roDenied, -1, 'read-only argv must remove the editing tools');
+  assert.deepEqual(roRecord.argv.slice(roDenied + 1, roDenied + 4), ['Edit', 'Write', 'NotebookEdit']);
+  assert.ok(!roRecord.argv.includes('plan'), 'a read-only member must not run in plan mode');
 
   const wCwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-w-'));
   const wBrief = buildBrief({
@@ -155,6 +160,7 @@ test('a read_only brief passes --permission-mode plan, and a writable one passes
   const wPmIndex = wRecord.argv.indexOf('--permission-mode');
   assert.notEqual(wPmIndex, -1, 'workspace argv must contain --permission-mode');
   assert.equal(wRecord.argv[wPmIndex + 1], 'auto');
+  assert.ok(!wRecord.argv.includes('--disallowedTools'), 'a workspace member keeps its editing tools');
 
   const setCwd = mkdtempSync(join(tmpdir(), 'agent-team-claude-pm-'));
   const setBrief = buildBrief({
@@ -165,6 +171,19 @@ test('a read_only brief passes --permission-mode plan, and a writable one passes
   });
   const setRecord = runAdapterAgainstStub(setBrief);
   assert.equal(setRecord.argv[setRecord.argv.indexOf('--permission-mode') + 1], 'acceptEdits');
+  assert.ok(!setRecord.argv.includes('--allowedTools'), 'no allowed_tools, no --allowedTools');
+
+  const allowBrief = buildBrief({
+    resolved: { ...baseResolved, isolation: 'read-only', allowed_tools: ['Bash(npm test:*)', 'Bash(node:*)'] },
+    task: 'x',
+    cwd: mkdtempSync(join(tmpdir(), 'agent-team-claude-allow-')),
+    denyPaths: ['**/.env*']
+  });
+  const allowRecord = runAdapterAgainstStub(allowBrief);
+  const at = allowRecord.argv.indexOf('--allowedTools');
+  assert.deepEqual(allowRecord.argv.slice(at + 1, at + 3), ['Bash(npm test:*)', 'Bash(node:*)']);
+  assert.equal(allowRecord.argv[allowRecord.argv.indexOf('--permission-mode') + 1], 'dontAsk',
+    'allowed_tools does not loosen a read-only member\'s mode');
 });
 
 test('a resolved model is passed as --model, and the flag is absent when model is null', () => {

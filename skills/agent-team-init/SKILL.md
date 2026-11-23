@@ -141,7 +141,7 @@ advisor ignores it unless `on_unavailable` falls it back to claude.
 `isolation: "workspace"`. It defaults to `auto`; without a mode, headless `claude -p` refuses every
 tool call that would prompt, so the member cannot edit its clone. Set it to `acceptEdits` to allow
 file edits but no shell commands. The loader refuses it on `read-only` and `none` members, which
-always run in `plan`. If claude refuses any of a workspace member's tool calls, the run reports
+always run in `dontAsk` without the editing tools. If claude refuses any of a workspace member's tool calls, the run reports
 `status: failed` with the refused tools listed in `permission_denials`, and its workspace is kept.
 
 ## Step 5 — confirm it loads

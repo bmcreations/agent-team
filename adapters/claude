@@ -8,6 +8,10 @@ import { gitDiff as readDiff } from '../src/diffbase.js';
 
 const sub = process.argv[2];
 
+// The built-in tools that only edit files. A read-only member runs without them (see the
+// --permission-mode comment in `run`).
+const READ_ONLY_DENIED_TOOLS = ['Edit', 'Write', 'NotebookEdit'];
+
 // How much diff text to keep verbatim in the report. Anything past this is truncated, but
 // the truncation is signaled explicitly (diff_truncated / diff_full_length) rather than
 // silently dropped.
@@ -163,7 +167,24 @@ if (sub === 'probe') {
     if (brief.advisor) args.push('--settings', JSON.stringify({ advisorModel: brief.advisor }));
     // With no mode, headless `claude -p` refuses every tool call that would prompt, and only
     // the user's own allowlist gets through, so a workspace member could not edit its clone.
-    args.push('--permission-mode', brief.read_only ? 'plan' : (brief.permission_mode ?? 'auto'));
+    //
+    // A read-only member runs in dontAsk with the editing tools removed, not in plan mode.
+    // Plan mode stopped only the Write tool: under it, `touch` and `git commit` through Bash
+    // ran in the clone. dontAsk refuses any call that would prompt, so a Bash command that
+    // changes something is refused unless the user's own allowlist names it, while read-only
+    // commands (git log, git grep) still run. Plan mode also tells the session "the user does
+    // not want you to execute yet", and read-only managers took that as a reason to write a
+    // plan and ask for approval instead of handing the edits to a report that could make them.
+    if (brief.read_only) {
+      args.push('--permission-mode', 'dontAsk', '--disallowedTools', ...READ_ONLY_DENIED_TOOLS);
+    } else {
+      args.push('--permission-mode', brief.permission_mode ?? 'auto');
+    }
+    // The member's own permission rules (config "allowed_tools"), on top of the user's
+    // allowlist: how a read-only reviewer is let run `npm test` in its clone.
+    if (Array.isArray(brief.allowed_tools) && brief.allowed_tools.length > 0) {
+      args.push('--allowedTools', ...brief.allowed_tools);
+    }
 
     // reflect's SessionStart hook finds a project's lessons from the session's cwd, and from a
     // clone in the cache with no origin it cannot reach a hub index. REFLECT_ROOT points it at

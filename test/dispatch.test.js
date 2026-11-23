@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dispatch } from '../src/dispatch.js';
+import { dispatch, retargetPaths, treeChanged } from '../src/dispatch.js';
 import { readRuns } from '../src/report.js';
 
 // Recursively collects every path anywhere under `root` whose own name contains
@@ -94,6 +94,133 @@ test('a member that binds a skill with no skillsDir provided is refused, not sil
     () => run(root, script, 'implementer'),
     /member "implementer" binds skill "some-skill" but no skillsDir was provided/
   );
+});
+
+test('a workspace member that ends ok with an empty diff fails and keeps its workspace', async () => {
+  const { root, script } = project({ status: 'ok', summary: 'all done', artifacts: { diff: '' } });
+  const r = await run(root, script, 'implementer');
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /no changes \(empty diff\)\. Member summary: all done/);
+  assert.equal(existsSync(r.workspace.dir), true, 'the workspace is kept for inspection');
+});
+
+test('an empty diff is not judged when it was unreadable, or for a read-only member', async () => {
+  const unreadable = project({ status: 'ok', summary: 's', artifacts: { diff: '', diff_unreadable: true } });
+  assert.equal((await run(unreadable.root, unreadable.script, 'implementer')).status, 'ok');
+  const readOnly = project({ status: 'ok', summary: 's', artifacts: { diff: '' } });
+  assert.equal((await run(readOnly.root, readOnly.script, 'reviewer')).status, 'ok');
+  const review = project({ status: 'ok', summary: 's', artifacts: { diff: '' } }, {
+    members: { ...TEAM, implementer: { ...TEAM.implementer, deliverable: 'review' } }
+  });
+  assert.equal((await run(review.root, review.script, 'implementer')).status, 'ok');
+});
+
+test('a manager that ends ok over a report that failed is reported failed', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'x' }, { to: 'reviewer', task: 'y' }] },
+        { status: 'ok', summary: 'shipped' }
+      ],
+      implementer: { status: 'failed', summary: 'could not edit' },
+      reviewer: { status: 'ok', summary: 'fine' }
+    }
+  });
+  const r = await run(root, script, 'eng-lead');
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /did not finish ok: implementer \(failed\)\. Member summary: shipped/);
+});
+
+test('a manager whose retry round succeeds after a failed report stays ok', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'x' }] },
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'x again' }] },
+        { status: 'ok', summary: 'shipped' }
+      ],
+      implementer: [{ status: 'failed', summary: 'flaked' }, { status: 'ok', summary: 'edited' }]
+    }
+  });
+  const r = await run(root, script, 'eng-lead');
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.delegated.map((d) => d.status), ['failed', 'ok']);
+});
+
+test('a task naming the manager\'s clone by path reaches the report with its own clone instead', async () => {
+  const { root, script } = project({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'edit {cwd}/app.js' }] },
+        { status: 'ok', summary: 'done' }
+      ],
+      implementer: { status: 'ok', summary: 'edited', artifacts: { diff: 'x' } }
+    }
+  });
+  const r = await run(root, script, 'eng-lead');
+  const sub = r.delegated[0];
+  assert.match(sub.received.task, new RegExp(`edit ${sub.workspace.dir}/app\\.js`));
+  assert.ok(!sub.received.task.includes(r.workspace.dir), 'the lead\'s clone path must not reach the report');
+});
+
+test('a task naming the real checkout reaches a cloned member with its own clone instead', async () => {
+  const { root, script } = project({});
+  writeFileSync(script, JSON.stringify({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: `edit ${root}/app.js` }] },
+        { status: 'ok', summary: 'done' }
+      ],
+      implementer: { status: 'ok', summary: 'edited', artifacts: { diff: 'x' } }
+    }
+  }));
+  const r = await run(root, script, 'eng-lead', { task: `plan the change to ${root}/app.js` });
+  assert.match(r.received.task, new RegExp(`plan the change to ${r.workspace.dir}/app\\.js`));
+  const sub = r.delegated[0];
+  assert.match(sub.received.task, new RegExp(`edit ${sub.workspace.dir}/app\\.js`));
+  assert.ok(!sub.received.task.includes(`${root}/`), 'the real checkout\'s path must not reach the report');
+});
+
+test('retargetPaths moves only whole paths', () => {
+  assert.equal(retargetPaths('/r and /r/a.js and /r-other/b and "/r"', ['/r'], '/c'),
+    '/c and /c/a.js and /r-other/b and "/c"');
+  assert.equal(retargetPaths('Edit the files in /r. Then /r.bak stays, and so does /r.js.', ['/r'], '/c'),
+    'Edit the files in /c. Then /r.bak stays, and so does /r.js.');
+  assert.equal(retargetPaths('Work in /r.', ['/r'], '/c'), 'Work in /c.');
+});
+
+test('treeChanged counts a cloud member only when it pushes a branch', () => {
+  assert.equal(treeChanged({ status: 'ok', cloud: { push_branch: null } }), false, 'read-only cloud member');
+  assert.equal(treeChanged({ status: 'ok', cloud: { push_branch: 'agent-team/w-1' } }), true);
+  assert.equal(treeChanged({ status: 'failed', cloud: { push_branch: 'agent-team/w-1' } }), false);
+  assert.equal(treeChanged({ status: 'ok', delegated: [{ delegated: [{ artifacts: { diff: 'd' } }] }] }), true,
+    'a diff anywhere in the tree counts');
+});
+
+test('--expect-changes fails an ok run whose tree produced no diff', async () => {
+  const quiet = project({ by_member: { 'eng-lead': { status: 'ok', summary: 'planned it' } } });
+  const r = await run(quiet.root, quiet.script, 'eng-lead', { expectChanges: true });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /expected to change something.*Summary: planned it/);
+  assert.equal((await run(quiet.root, quiet.script, 'eng-lead')).status, 'ok', 'without the flag it stays ok');
+
+  const changed = project({
+    by_member: {
+      'eng-lead': [
+        { status: 'delegating', delegations: [{ to: 'implementer', task: 'x' }] },
+        { status: 'ok', summary: 'shipped' }
+      ],
+      implementer: { status: 'ok', summary: 'edited', artifacts: { diff: 'diff --git a/app.js' } }
+    }
+  });
+  assert.equal((await run(changed.root, changed.script, 'eng-lead', { expectChanges: true })).status, 'ok');
+});
+
+test('a manager\'s brief says which reports can edit files', async () => {
+  const { root, script } = project({ by_member: { 'eng-lead': { status: 'ok', summary: 's' } } });
+  const r = await run(root, script, 'eng-lead');
+  assert.match(r.received.task, /^- implementer: Can edit files\.$/m);
+  assert.doesNotMatch(r.received.task, /- reviewer:/);
 });
 
 test('a failed run KEEPS the workspace for inspection', async () => {
@@ -572,6 +699,27 @@ test('a manager delegates to another team, which runs under its own config', asy
   assert.equal(r.received.source_root, app.root);
 
   assert.match(r.received.task, /ios button added/);
+});
+
+test('--expect-changes sees a diff made inside another team', async () => {
+  const script = (worker) => ({
+    by_member: {
+      lead: [
+        { status: 'delegating', delegations: [{ to: 'ios', task: 'add the button' }] },
+        { status: 'ok', summary: 'done' }
+      ],
+      'ios-lead': [
+        { status: 'delegating', delegations: [{ to: 'ios-worker', task: 'edit the view' }] },
+        { status: 'ok', summary: 'ios done' }
+      ],
+      'ios-worker': worker
+    }
+  });
+  const changed = teams(script({ status: 'ok', summary: 'edited', artifacts: { diff: 'diff --git a/View.swift' } }));
+  assert.equal((await run(changed.app.root, changed.app.script, 'lead', { expectChanges: true })).status, 'ok');
+
+  const quiet = teams(script({ status: 'ok', summary: 'looked' }));
+  assert.equal((await run(quiet.app.root, quiet.app.script, 'lead', { expectChanges: true })).status, 'failed');
 });
 
 test('a manager\'s brief says which report is another team', async () => {

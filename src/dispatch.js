@@ -31,17 +31,27 @@ async function readCapabilities(adapterDir, agent, env) {
 
 export async function dispatch({
   projectRoot, member, task, adapterDir, assignments = {},
-  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, preresolved = null
+  skillsDir = null, env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, preresolved = null,
+  expectChanges = false
 }) {
   const config = loadConfig(projectRoot);
   const budget = { runs: config.defaults.max_delegations };
   const startedAt = new Date();
   try {
-    const result = await runMember({
+    let result = await runMember({
       config, projectRoot, member, task, adapterDir,
       assignments: { ...assignments }, skillsDir, env, timeoutMs, budget, depth: 0,
       teams: teamKeys(projectRoot), originRoot: projectRoot, preresolved
     });
+    // A manager that answers without delegating, or a tree of read-only members, changes
+    // nothing and can still end ok. Only the caller knows a change was wanted.
+    if (expectChanges && result.status === 'ok' && !treeChanged(result)) {
+      result = {
+        ...result, status: 'failed',
+        summary: `the run was expected to change something (--expect-changes), but no member ` +
+          `in it produced a diff. Summary: ${result.summary ?? ''}`
+      };
+    }
     recordRun(projectRoot, startedAt, task, runNode(result));
     return result;
   } catch (err) {
@@ -378,9 +388,65 @@ export function prepareMember(ctx, { resolved, caps }, { workspace: given = null
 
 // `preresolved` is the caller's resolveCaps() result for this member; it is taken out of ctx
 // so reports and team entries, which spread ctx, resolve their own.
+//
+// An `ok` a member's own answer cannot earn, read from facts and never from its prose:
+// - a local workspace member whose diff came back readable and empty changed nothing, so its
+//   workspace is kept and it fails. Only an adapter that reports artifacts.diff is judged;
+//   a cloud member pushes to a branch and reports no diff here. A workspace member whose
+//   deliverable is not "diff" (a review written from a clone it may build in) is not judged.
+// - a manager whose last round of reports holds one that did not finish ok cannot vouch for
+//   the whole. It still answered, so its summary is kept after the reports' names.
+function unearnedOk(result, { member, deliverable, workspace, priorResults }) {
+  if (result.status !== 'ok') return result;
+  const art = result.artifacts;
+  if (workspace.kind === 'workspace' && deliverable === 'diff' && art && typeof art.diff === 'string' &&
+      art.diff === '' && art.diff_unreadable !== true) {
+    return {
+      ...result, status: 'failed',
+      summary: `member "${member}" ended ok but its workspace has no changes (empty diff). ` +
+        `Member summary: ${result.summary ?? ''}`
+    };
+  }
+  const notOk = (priorResults ?? []).filter((r) => r.status !== 'ok');
+  if (notOk.length > 0) {
+    return {
+      ...result, status: 'failed',
+      summary: `report(s) did not finish ok: ${notOk.map((r) => `${r.member} (${r.status})`).join(', ')}. ` +
+        `Member summary: ${result.summary ?? ''}`
+    };
+  }
+  return result;
+}
+
+// Replaces each of `roots` in `text` with `dir` where it stands as a whole path: followed by
+// the end, a "/", a character that cannot continue a path segment, or a "." that ends a
+// sentence (followed by the end or whitespace, so "/repo.bak" is left alone).
+export function retargetPaths(text, roots, dir) {
+  if (typeof text !== 'string') return text;
+  let out = text;
+  for (const root of roots) {
+    if (!root) continue;
+    const esc = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`${esc}(?=$|[/\\s'"\`)\\],;:]|\\.(?:$|\\s))`, 'g'), () => dir);
+  }
+  return out;
+}
+
+// A run asked to change something (--expect-changes) is ok only if some member in its tree
+// shows a change: a non-empty diff, an ok cloud member that pushes a branch, or an ok session
+// member, whose change lands in a live session this process cannot diff. A read-only cloud
+// member pushes nothing, so it counts as no change.
+export function treeChanged(node) {
+  if (!node) return false;
+  const diff = node.artifacts?.diff;
+  if (typeof diff === 'string' && diff !== '') return true;
+  if (node.status === 'ok' && (node.cloud?.push_branch || node.session)) return true;
+  return (node.delegated ?? []).some(treeChanged);
+}
+
 export async function runMember({ preresolved = null, ...ctx }) {
-  const { config, projectRoot, member, task, adapterDir, assignments,
-          skillsDir, env, timeoutMs, budget, depth } = ctx;
+  const { config, projectRoot, member, adapterDir, assignments,
+          skillsDir, env, timeoutMs, budget, depth, parentClone = null } = ctx;
 
   const spec = config.members[member];
   if (spec?.team) return runTeam(ctx, spec);
@@ -393,6 +459,20 @@ export async function runMember({ preresolved = null, ...ctx }) {
   // Cloud, session and none members have no clone here, and a GitHub-named team no checkout.
   const sourceRoot = projectRoot && (workspace.kind === 'read-only' || workspace.kind === 'workspace')
     ? resolve(projectRoot) : null;
+  // A manager writes its task from inside its own clone, so the task can name that clone by
+  // its absolute path. A workspace report given ".../lead-694dda/greeting.txt" edited the
+  // read-only lead's clone, left its own unchanged, and the change was pruned with the lead.
+  // When both are clones of the same checkout, the path is moved onto this member's clone.
+  // A task can name the real checkout too, by the path its writer worked in. A workspace
+  // member in auto mode would edit that checkout instead of its clone, so the checkout's path
+  // is moved onto the clone as well, only where it stands as a whole path ("/repo" or
+  // "/repo/..."), never inside a longer one ("/repo-other").
+  const task = sourceRoot
+    ? retargetPaths(ctx.task, [
+        ...(parentClone && parentClone.sourceRoot === sourceRoot ? [parentClone.dir] : []),
+        sourceRoot
+      ], workspace.dir)
+    : ctx.task;
   const maxDepth = config.defaults.max_depth;
   const delegated = [];
   let priorResults = null;
@@ -457,7 +537,8 @@ export async function runMember({ preresolved = null, ...ctx }) {
           );
         }
         const sub = await runMember({
-          ...ctx, member: req.to, task: req.task, depth: depth + 1, priorResults: null
+          ...ctx, member: req.to, task: req.task, depth: depth + 1, priorResults: null,
+          parentClone: sourceRoot ? { dir: workspace.dir, sourceRoot } : null
         });
         round.push(sub);
         delegated.push(sub);
@@ -467,6 +548,9 @@ export async function runMember({ preresolved = null, ...ctx }) {
       }));
     }
 
+    result = unearnedOk(result, {
+      member, deliverable: config.members[member]?.deliverable, workspace, priorResults
+    });
     if (result.status === 'ok') pruneWorkspace(workspace);
 
     return {

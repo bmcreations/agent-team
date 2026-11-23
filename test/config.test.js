@@ -675,14 +675,47 @@ test('an empty-string permission_mode is refused', () => {
   assert.throws(() => loadConfig(root), /"permission_mode"/);
 });
 
-test('permission_mode is refused on a read-only member, which always runs in plan mode', () => {
+test('permission_mode is refused on a read-only member, which always runs read-only', () => {
   const root = memberProject('a', { isolation: 'read-only', permission_mode: 'auto' });
   assert.throws(() => loadConfig(root), /"permission_mode".*workspace/);
 });
 
-test('permission_mode is refused on an isolation "none" member, which also runs in plan mode', () => {
+test('permission_mode is refused on an isolation "none" member, which also runs read-only', () => {
   const root = memberProject('a', { isolation: 'none', permission_mode: 'auto' });
   assert.throws(() => loadConfig(root), /"permission_mode".*workspace/);
+});
+
+// --- allowed_tools: permission rules a member adds, such as a reviewer's "Bash(npm test:*)" ---
+
+test('a read-only member may set allowed_tools', () => {
+  const root = memberProject('a', { isolation: 'read-only', allowed_tools: ['Bash(npm test:*)'] });
+  assert.deepEqual(loadConfig(root).members.a.allowed_tools, ['Bash(npm test:*)']);
+});
+
+test('allowed_tools must be a list of non-empty strings', () => {
+  for (const bad of ['Bash(npm test:*)', [''], [3]]) {
+    const root = memberProject('a', { isolation: 'read-only', allowed_tools: bad });
+    assert.throws(() => loadConfig(root), /"allowed_tools" must be a list/);
+  }
+});
+
+test('allowed_tools may not give a read-only member an editing tool', () => {
+  const root = memberProject('a', { isolation: 'read-only', allowed_tools: ['Edit', 'Bash(ls:*)'] });
+  assert.throws(() => loadConfig(root), /"allowed_tools" names Edit/);
+});
+
+test('allowed_tools may not give a read-only member every Bash command', () => {
+  for (const rule of ['Bash', 'Bash(*)', 'Bash(:*)', ' Bash ( * ) ']) {
+    const root = memberProject('a', { isolation: 'read-only', allowed_tools: [rule] });
+    assert.throws(() => loadConfig(root), /allows every command/, rule);
+  }
+  const ws = memberProject('a', { isolation: 'workspace', allowed_tools: ['Bash'] });
+  assert.deepEqual(loadConfig(ws).members.a.allowed_tools, ['Bash'], 'a workspace member may');
+});
+
+test('allowed_tools is refused on an isolation "none" member', () => {
+  const root = memberProject('a', { isolation: 'none', allowed_tools: ['Bash(ls:*)'] });
+  assert.throws(() => loadConfig(root), /"allowed_tools" needs a clone/);
 });
 
 const withMember = (name, m) => project({ ...OK, members: { ...OK.members, [name]: m } });
