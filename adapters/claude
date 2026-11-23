@@ -180,6 +180,11 @@ if (sub === 'probe') {
     } else {
       args.push('--permission-mode', brief.permission_mode ?? 'auto');
     }
+    // The member's own permission rules (config "allowed_tools"), on top of the user's
+    // allowlist: how a read-only reviewer is let run `npm test` in its clone.
+    if (Array.isArray(brief.allowed_tools) && brief.allowed_tools.length > 0) {
+      args.push('--allowedTools', ...brief.allowed_tools);
+    }
 
     // reflect's SessionStart hook finds a project's lessons from the session's cwd, and from a
     // clone in the cache with no origin it cannot reach a hub index. REFLECT_ROOT points it at

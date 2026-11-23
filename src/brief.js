@@ -134,6 +134,7 @@ export function buildBrief({
     effort: resolved.effort,
     advisor: resolved.advisor,
     permission_mode: resolved.permission_mode ?? null,
+    allowed_tools: resolved.allowed_tools ?? [],
     timeout_s: timeoutSec,
     deny_paths: denyPaths,
     reports: resolved.reports,

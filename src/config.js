@@ -428,6 +428,31 @@ export function parseConfig(raw, path) {
         );
       }
     }
+    // allowed_tools becomes adapters/claude's --allowedTools: permission rules such as
+    // "Bash(npm test:*)" that let a read-only reviewer run a command dontAsk would refuse.
+    // The editing tools stay removed for a read-only member, so naming one is refused, and an
+    // isolation "none" member has no clone for a command to run in.
+    if (m.allowed_tools !== undefined && m.allowed_tools !== null) {
+      if (!Array.isArray(m.allowed_tools) ||
+          m.allowed_tools.some((t) => typeof t !== 'string' || t.trim() === '')) {
+        throw new Error(
+          `${path}: member "${name}": "allowed_tools" must be a list of non-empty strings — got ` +
+          `${JSON.stringify(m.allowed_tools)}`
+        );
+      }
+      if (isolation === 'none') {
+        throw new Error(
+          `${path}: member "${name}": "allowed_tools" needs a clone to run in; isolation "none" has none`
+        );
+      }
+      const editing = m.allowed_tools.filter((t) => /^(Edit|Write|NotebookEdit)\b/.test(t.trim()));
+      if (isolation === 'read-only' && editing.length > 0) {
+        throw new Error(
+          `${path}: member "${name}": "allowed_tools" names ${editing.join(', ')}, but a ` +
+          'read-only member never gets the editing tools — use isolation "workspace"'
+        );
+      }
+    }
     // A cloud session has no local directory to stand for "none", and its clone is the repo.
     if (m.agent === CLOUD_AGENT && isolation === 'none') {
       throw new Error(

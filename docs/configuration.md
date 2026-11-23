@@ -50,6 +50,7 @@ directory name and a git branch name.
 | `effort` | no | the CLI's default | Reasoning effort, passed to the CLI as written. See [Effort](#effort). |
 | `advisor` | no | the user's `advisorModel` | Claude only. See [Advisor](#advisor). |
 | `permission_mode` | no | `auto` | Claude only, and only on `workspace` members. See [Permission mode](#permission_mode). |
+| `allowed_tools` | no | none | Claude only. Permission rules added for this member, such as `"Bash(npm test:*)"`. See [Permission mode](#permission_mode). |
 
 A member can instead stand for another project's team. See [Other teams](#other-teams).
 
@@ -126,7 +127,21 @@ The loader refuses `permission_mode` on `read-only` and `none` members, which al
 `dontAsk` without the Edit, Write and NotebookEdit tools, so a Bash command that would change
 something is refused unless your own allowlist names it. They do not run in `plan`: plan mode let
 Bash writes through, and read-only managers took it as a reason to wait for approval instead of
-delegating. If claude refuses any of a workspace member's tool calls, the run reports
+delegating.
+
+That also refuses a read-only reviewer's `npm test` or `node` in its clone. To allow one, list
+its permission rule in the member's `allowed_tools`, which the claude adapter passes as
+`--allowedTools`:
+
+```json
+"reviewer": { "agent": "claude", "isolation": "read-only", "allowed_tools": ["Bash(npm test:*)"] }
+```
+
+The rules add to your own allowlist and do not change the mode. The loader refuses an editing
+tool (`Edit`, `Write`, `NotebookEdit`) in a read-only member's list, and `allowed_tools` on a
+`none` member, which has no clone to run in. Codex and grok members ignore it.
+
+If claude refuses any of a workspace member's tool calls, the run reports
 `status: "failed"` with the refused tools in `permission_denials`, and the workspace is kept.
 
 ### Other teams

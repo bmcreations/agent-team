@@ -171,6 +171,19 @@ test('a read_only brief passes --permission-mode dontAsk without the editing too
   });
   const setRecord = runAdapterAgainstStub(setBrief);
   assert.equal(setRecord.argv[setRecord.argv.indexOf('--permission-mode') + 1], 'acceptEdits');
+  assert.ok(!setRecord.argv.includes('--allowedTools'), 'no allowed_tools, no --allowedTools');
+
+  const allowBrief = buildBrief({
+    resolved: { ...baseResolved, isolation: 'read-only', allowed_tools: ['Bash(npm test:*)', 'Bash(node:*)'] },
+    task: 'x',
+    cwd: mkdtempSync(join(tmpdir(), 'agent-team-claude-allow-')),
+    denyPaths: ['**/.env*']
+  });
+  const allowRecord = runAdapterAgainstStub(allowBrief);
+  const at = allowRecord.argv.indexOf('--allowedTools');
+  assert.deepEqual(allowRecord.argv.slice(at + 1, at + 3), ['Bash(npm test:*)', 'Bash(node:*)']);
+  assert.equal(allowRecord.argv[allowRecord.argv.indexOf('--permission-mode') + 1], 'dontAsk',
+    'allowed_tools does not loosen a read-only member\'s mode');
 });
 
 test('a resolved model is passed as --model, and the flag is absent when model is null', () => {

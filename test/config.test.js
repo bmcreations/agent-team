@@ -685,6 +685,30 @@ test('permission_mode is refused on an isolation "none" member, which also runs 
   assert.throws(() => loadConfig(root), /"permission_mode".*workspace/);
 });
 
+// --- allowed_tools: permission rules a member adds, such as a reviewer's "Bash(npm test:*)" ---
+
+test('a read-only member may set allowed_tools', () => {
+  const root = memberProject('a', { isolation: 'read-only', allowed_tools: ['Bash(npm test:*)'] });
+  assert.deepEqual(loadConfig(root).members.a.allowed_tools, ['Bash(npm test:*)']);
+});
+
+test('allowed_tools must be a list of non-empty strings', () => {
+  for (const bad of ['Bash(npm test:*)', [''], [3]]) {
+    const root = memberProject('a', { isolation: 'read-only', allowed_tools: bad });
+    assert.throws(() => loadConfig(root), /"allowed_tools" must be a list/);
+  }
+});
+
+test('allowed_tools may not give a read-only member an editing tool', () => {
+  const root = memberProject('a', { isolation: 'read-only', allowed_tools: ['Edit', 'Bash(ls:*)'] });
+  assert.throws(() => loadConfig(root), /"allowed_tools" names Edit/);
+});
+
+test('allowed_tools is refused on an isolation "none" member', () => {
+  const root = memberProject('a', { isolation: 'none', allowed_tools: ['Bash(ls:*)'] });
+  assert.throws(() => loadConfig(root), /"allowed_tools" needs a clone/);
+});
+
 const withMember = (name, m) => project({ ...OK, members: { ...OK.members, [name]: m } });
 
 test('a team member needs no agent and keeps its fields', () => {
